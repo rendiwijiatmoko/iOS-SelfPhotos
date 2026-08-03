@@ -22,7 +22,7 @@ struct MainTabView: View {
                     Label("Photos", systemImage: "photo")
                 }
 
-            Text("Albums")
+            AlbumsListView()
                 .tabItem {
                     Label("Albums", systemImage: "folder")
                 }
