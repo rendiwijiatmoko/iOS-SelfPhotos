@@ -5,8 +5,8 @@ struct AssetResponseDTO: Decodable, Identifiable {
     let type: String
     let originalFileName: String
     let fileCreatedAt: Date
-    let isFavorite: Bool
-    let isArchived: Bool
+    var isFavorite: Bool
+    var isArchived: Bool
     let isTrashed: Bool
     let duration: String?
     let thumbhash: String?
