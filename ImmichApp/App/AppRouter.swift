@@ -40,12 +40,6 @@ struct MainTabView: View {
     }
 }
 
-struct TimelineView: View {
-    var body: some View {
-        Text("Timeline - Coming in Phase 4")
-    }
-}
-
 struct SettingsView: View {
     @Environment(SessionManager.self) private var session
     @State private var showLogoutAlert = false
