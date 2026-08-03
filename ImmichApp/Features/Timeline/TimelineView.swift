@@ -9,6 +9,9 @@ struct TimelineView: View {
         NavigationStack {
             content
                 .navigationTitle("Photos")
+                .navigationDestination(for: AssetLite.self) { asset in
+                    AssetDetailView(asset: asset)
+                }
                 .toolbar {
                     ToolbarItem(placement: .navigationBarTrailing) {
                         if case .loading = vm?.phase {

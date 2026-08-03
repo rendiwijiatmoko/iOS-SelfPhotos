@@ -1,7 +1,7 @@
 import Foundation
 
 final class APIClient {
-    private let session: SessionManager
+    private(set) var session: SessionManager
     private let urlSession: URLSession
 
     init(session: SessionManager, urlSession: URLSession = .shared) {
