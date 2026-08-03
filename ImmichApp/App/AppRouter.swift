@@ -14,43 +14,59 @@ struct AppRouter: View {
 
 struct MainTabView: View {
     @Environment(SessionManager.self) private var session
+    @State private var syncVM: SyncViewModel?
 
     var body: some View {
-        TabView {
-            TimelineView()
-                .tabItem {
-                    Label("Photos", systemImage: "photo")
-                }
+        VStack(spacing: 0) {
+            if let syncVM {
+                OfflineBanner(isOnline: syncVM.isOnline)
+            }
 
-            AlbumsListView()
-                .tabItem {
-                    Label("Albums", systemImage: "folder")
-                }
+            TabView {
+                TimelineView()
+                    .tabItem {
+                        Label("Photos", systemImage: "photo")
+                    }
 
-            SearchView()
-                .tabItem {
-                    Label("Search", systemImage: "magnifyingglass")
-                }
+                AlbumsListView()
+                    .tabItem {
+                        Label("Albums", systemImage: "folder")
+                    }
 
-            PeopleView()
-                .tabItem {
-                    Label("People", systemImage: "person.2")
-                }
+                SearchView()
+                    .tabItem {
+                        Label("Search", systemImage: "magnifyingglass")
+                    }
 
-            BackupView()
-                .tabItem {
-                    Label("Backup", systemImage: "arrow.up.circle")
-                }
+                PeopleView()
+                    .tabItem {
+                        Label("People", systemImage: "person.2")
+                    }
 
-            MemoriesView()
-                .tabItem {
-                    Label("Memories", systemImage: "calendar")
-                }
+                BackupView()
+                    .tabItem {
+                        Label("Backup", systemImage: "arrow.up.circle")
+                    }
 
-            SettingsView()
-                .tabItem {
-                    Label("Settings", systemImage: "gear")
-                }
+                MemoriesView()
+                    .tabItem {
+                        Label("Memories", systemImage: "calendar")
+                    }
+
+                SettingsView()
+                    .tabItem {
+                        Label("Settings", systemImage: "gear")
+                    }
+            }
+        }
+        .task {
+            if syncVM == nil {
+                let api = APIClient(session: session)
+                let dataManager = SwiftDataManager.shared
+                let repo = SyncRepository(api: api, dataManager: dataManager)
+                syncVM = SyncViewModel(repo: repo, dataManager: dataManager)
+                await syncVM?.performBackgroundSync()
+            }
         }
     }
 }

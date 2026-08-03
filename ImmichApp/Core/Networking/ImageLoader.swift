@@ -2,18 +2,82 @@ import SwiftUI
 
 actor ImageCache {
     static let shared = ImageCache()
-    private let cache = NSCache<NSString, UIImage>()
+    private let memoryCache = NSCache<NSString, UIImage>()
+    private let diskCacheURL: URL
+    private let maxDiskCacheSize: Int = 100 * 1024 * 1024
+
+    nonisolated private static let diskCacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("immich-image-cache")
+
+    init() {
+        diskCacheURL = Self.diskCacheDir
+        try? FileManager.default.createDirectory(at: diskCacheURL, withIntermediateDirectories: true)
+    }
 
     func image(for key: String) -> UIImage? {
-        cache.object(forKey: key as NSString)
+        if let cached = memoryCache.object(forKey: key as NSString) {
+            return cached
+        }
+
+        let diskPath = diskCacheURL.appendingPathComponent(hashKey(key))
+        if let data = try? Data(contentsOf: diskPath), let image = UIImage(data: data) {
+            memoryCache.setObject(image, forKey: key as NSString)
+            return image
+        }
+        return nil
     }
 
     func insert(_ img: UIImage, for key: String) {
-        cache.setObject(img, forKey: key as NSString)
+        memoryCache.setObject(img, forKey: key as NSString)
+
+        if let data = img.jpegData(compressionQuality: 0.8) {
+            let diskPath = diskCacheURL.appendingPathComponent(hashKey(key))
+            try? data.write(to: diskPath)
+            evictIfNeeded()
+        }
     }
 
     func clear() {
-        cache.removeAllObjects()
+        memoryCache.removeAllObjects()
+        try? FileManager.default.removeItem(at: diskCacheURL)
+        try? FileManager.default.createDirectory(at: diskCacheURL, withIntermediateDirectories: true)
+    }
+
+    private func evictIfNeeded() {
+        let fileManager = FileManager.default
+        guard let contents = try? fileManager.contentsOfDirectory(at: diskCacheURL, includingPropertiesForKeys: [.contentModificationDateKey]) else {
+            return
+        }
+
+        var totalSize = 0
+        var files: [(url: URL, date: Date)] = []
+
+        for fileURL in contents {
+            if let attrs = try? fileManager.attributesOfItem(atPath: fileURL.path),
+               let size = attrs[.size] as? Int {
+                totalSize += size
+                if let date = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date() as Date? {
+                    files.append((fileURL, date))
+                }
+            }
+        }
+
+        if totalSize > maxDiskCacheSize {
+            files.sort { $0.date < $1.date }
+            var freed = 0
+            for file in files {
+                if freed > maxDiskCacheSize / 4 { break }
+                try? fileManager.removeItem(at: file.url)
+                if let attrs = try? fileManager.attributesOfItem(atPath: file.url.path),
+                   let size = attrs[.size] as? Int {
+                    freed += size
+                }
+            }
+        }
+    }
+
+    private func hashKey(_ key: String) -> String {
+        key.hashValue.description
     }
 }
 
