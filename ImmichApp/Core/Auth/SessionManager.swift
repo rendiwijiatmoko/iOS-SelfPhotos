@@ -79,30 +79,3 @@ final class SessionManager {
     }
 }
 
-// Placeholder DTOs for SessionManager
-struct UserResponseDTO: Decodable, Identifiable {
-    let id: String
-    let email: String
-    let name: String
-    let profileImagePath: String?
-    let storageLabel: String?
-}
-
-struct ServerPingDTO: Decodable { let res: String }
-struct ServerFeaturesDTO: Decodable {
-    let smartSearch: Bool
-    let facialRecognition: Bool
-    let oauth: Bool
-    let passwordLogin: Bool
-    let search: Bool
-}
-
-struct LoginRequestDTO: Encodable { let email: String; let password: String }
-struct LoginResponseDTO: Decodable {
-    let accessToken: String
-    let userId: String
-    let userEmail: String
-    let name: String
-    let isAdmin: Bool
-    let shouldChangePassword: Bool
-}
