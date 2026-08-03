@@ -19,7 +19,7 @@ struct AssetDetailView: View {
             TabView(selection: $currentAsset) {
                 ForEach(assets) { asset in
                     VStack {
-                        ZoomableImageView(assetId: asset.id, scale: $scale, offset: $offset)
+                        ZoomableImageView(assetId: asset.id, thumbhash: asset.thumbhash, scale: $scale, offset: $offset)
                     }
                     .tag(asset)
                 }
@@ -174,7 +174,7 @@ struct PreviewIndicator: View {
                         Button {
                             onSelect(asset)
                         } label: {
-                            AuthImage(assetId: asset.id)
+                            AuthImage(assetId: asset.id, thumbhash: asset.thumbhash)
                                 .frame(width: 50, height: 50)
                                 .clipped()
                                 .cornerRadius(4)
@@ -204,12 +204,13 @@ struct PreviewIndicator: View {
 
 struct ZoomableImageView: View {
     let assetId: String
+    var thumbhash: String?
     @Binding var scale: CGFloat
     @Binding var offset: CGSize
 
     var body: some View {
         ZStack {
-            AuthImage(assetId: assetId, size: "preview")
+            AuthImage(assetId: assetId, size: "preview", thumbhash: thumbhash)
                 .scaledToFit()
                 .scaleEffect(scale)
                 .offset(offset)

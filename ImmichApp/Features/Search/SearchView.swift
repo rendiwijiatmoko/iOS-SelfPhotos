@@ -101,7 +101,7 @@ struct SearchView: View {
             LazyVGrid(columns: columns, spacing: 2) {
                 ForEach(vm.results) { asset in
                     NavigationLink(value: asset) {
-                        AuthImage(assetId: asset.id)
+                        AuthImage(assetId: asset.id, thumbhash: asset.thumbhash)
                             .aspectRatio(asset.ratio, contentMode: .fill)
                             .clipped()
                     }

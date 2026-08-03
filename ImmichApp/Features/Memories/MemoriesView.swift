@@ -106,7 +106,7 @@ struct MemoryCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let firstAsset = memory.assets.first {
-                AuthImage(assetId: firstAsset.id)
+                AuthImage(assetId: firstAsset.id, thumbhash: firstAsset.thumbhash)
                     .frame(height: 120)
                     .clipped()
                     .cornerRadius(8)
@@ -147,7 +147,7 @@ struct StoryViewer: View {
                 TabView(selection: $currentIndex) {
                     ForEach(Array(memory.assets.enumerated()), id: \.offset) { index, asset in
                         VStack {
-                            AuthImage(assetId: asset.id, size: "preview")
+                            AuthImage(assetId: asset.id, size: "preview", thumbhash: asset.thumbhash)
                                 .scaledToFit()
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)

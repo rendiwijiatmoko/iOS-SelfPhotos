@@ -212,7 +212,7 @@ struct PersonDetailView: View {
                         thumbhash: asset.thumbhash,
                         createdAt: asset.fileCreatedAt
                     )) {
-                        AuthImage(assetId: asset.id)
+                        AuthImage(assetId: asset.id, thumbhash: asset.thumbhash)
                             .aspectRatio(1, contentMode: .fill)
                             .clipped()
                     }
