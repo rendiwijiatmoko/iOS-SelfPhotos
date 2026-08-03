@@ -4,7 +4,7 @@ import Observation
 @MainActor
 @Observable
 final class OnboardingViewModel {
-    var serverText = ""
+    var serverText = "https://photos.0xmwehehe.xyz"
     var email = ""
     var password = ""
     var apiKey = ""
