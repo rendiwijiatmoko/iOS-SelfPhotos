@@ -1,3 +1,4 @@
+import CryptoKit
 import SwiftUI
 
 actor ImageCache {
@@ -12,6 +13,7 @@ actor ImageCache {
     init() {
         diskCacheURL = Self.diskCacheDir
         try? FileManager.default.createDirectory(at: diskCacheURL, withIntermediateDirectories: true)
+        Task { await purgeLegacyFiles() }
     }
 
     func image(for key: String) -> UIImage? {
@@ -50,34 +52,61 @@ actor ImageCache {
         }
 
         var totalSize = 0
-        var files: [(url: URL, date: Date)] = []
+        var files: [(url: URL, date: Date, size: Int)] = []
 
         for fileURL in contents {
-            if let attrs = try? fileManager.attributesOfItem(atPath: fileURL.path),
-               let size = attrs[.size] as? Int {
-                totalSize += size
-                if let date = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date() as Date? {
-                    files.append((fileURL, date))
-                }
-            }
+            guard let attrs = try? fileManager.attributesOfItem(atPath: fileURL.path),
+                  let size = attrs[.size] as? Int else { continue }
+
+            totalSize += size
+            let date = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+            files.append((fileURL, date, size))
         }
 
-        if totalSize > maxDiskCacheSize {
-            files.sort { $0.date < $1.date }
-            var freed = 0
-            for file in files {
-                if freed > maxDiskCacheSize / 4 { break }
-                try? fileManager.removeItem(at: file.url)
-                if let attrs = try? fileManager.attributesOfItem(atPath: file.url.path),
-                   let size = attrs[.size] as? Int {
-                    freed += size
-                }
-            }
+        guard totalSize > maxDiskCacheSize else { return }
+
+        // Buang yang paling lama dulu sampai turun ke bawah batas dengan
+        // sisa ruang 25%, supaya eviction tidak terpicu lagi tiap insert.
+        // Ukuran dibaca dari hasil scan di atas — bukan dari file yang sudah
+        // dihapus (yang selalu gagal dan dulu membuat seluruh cache terkuras).
+        files.sort { $0.date < $1.date }
+        let target = maxDiskCacheSize - maxDiskCacheSize / 4
+
+        for file in files {
+            if totalSize <= target { break }
+            try? fileManager.removeItem(at: file.url)
+            totalSize -= file.size
         }
     }
 
-    private func hashKey(_ key: String) -> String {
-        key.hashValue.description
+    /// Sisa file dari skema key lama (`hashValue`, nama berupa angka desimal).
+    /// File-file itu tidak akan pernah kena hit lagi, jadi dibuang sekali saja
+    /// supaya tidak menghabiskan kuota disk cache.
+    private func purgeLegacyFiles() {
+        let fileManager = FileManager.default
+        guard let contents = try? fileManager.contentsOfDirectory(at: diskCacheURL, includingPropertiesForKeys: nil) else {
+            return
+        }
+
+        for fileURL in contents where !Self.isStableKeyFilename(fileURL.lastPathComponent) {
+            try? fileManager.removeItem(at: fileURL)
+        }
+    }
+
+    nonisolated private static func isStableKeyFilename(_ name: String) -> Bool {
+        name.count == 64 && name.allSatisfy(\.isHexDigit)
+    }
+
+    /// Nama file disk untuk sebuah cache key.
+    ///
+    /// Harus **stabil lintas proses**: `String.hashValue` di Swift di-seed acak
+    /// tiap app dijalankan, jadi nama file lama berubah tiap app dibuka dan
+    /// disk cache tidak pernah hit di sesi berikutnya. SHA256 selalu
+    /// menghasilkan nama yang sama untuk key yang sama.
+    nonisolated private func hashKey(_ key: String) -> String {
+        SHA256.hash(data: Data(key.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 }
 
