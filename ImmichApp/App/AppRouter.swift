@@ -27,9 +27,14 @@ struct MainTabView: View {
                     Label("Albums", systemImage: "folder")
                 }
 
-            Text("Search")
+            SearchView()
                 .tabItem {
                     Label("Search", systemImage: "magnifyingglass")
+                }
+
+            PeopleView()
+                .tabItem {
+                    Label("People", systemImage: "person.2")
                 }
 
             SettingsView()

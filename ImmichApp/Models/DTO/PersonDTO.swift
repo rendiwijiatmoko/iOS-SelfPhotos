@@ -1,9 +1,9 @@
 import Foundation
 
-struct PersonDTO: Decodable, Identifiable {
+struct PersonDTO: Decodable, Identifiable, Hashable {
     let id: String
-    let name: String
+    var name: String
     let birthDate: Date?
     let thumbnailPath: String?
-    let isHidden: Bool
+    var isHidden: Bool
 }
