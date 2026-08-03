@@ -21,7 +21,7 @@ final class SessionManager {
         }
     }
 
-    private lazy var api = APIClient(session: self)
+    @ObservationIgnored private lazy var api = APIClient(session: self)
 
     func setServer(_ raw: String) throws {
         var s = raw.trimmingCharacters(in: .whitespaces)
