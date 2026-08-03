@@ -68,7 +68,7 @@ struct TimelineView: View {
                                 Button {
                                     selectedAsset = asset
                                 } label: {
-                                    AuthImage(assetId: asset.id)
+                                    AuthImage(assetId: asset.id, thumbhash: asset.thumbhash)
                                         .aspectRatio(asset.ratio, contentMode: .fill)
                                         .clipped()
                                         .matchedGeometryEffect(id: asset.id, in: sourceNamespace)
