@@ -37,6 +37,11 @@ struct MainTabView: View {
                     Label("People", systemImage: "person.2")
                 }
 
+            MemoriesView()
+                .tabItem {
+                    Label("Memories", systemImage: "calendar")
+                }
+
             SettingsView()
                 .tabItem {
                     Label("Settings", systemImage: "gear")
