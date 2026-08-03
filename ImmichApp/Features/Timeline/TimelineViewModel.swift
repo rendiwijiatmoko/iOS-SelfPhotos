@@ -9,13 +9,18 @@ final class TimelineViewModel {
     private var loaded = Set<String>()
 
     private let repo: TimelineRepository
+    private let syncVM: SyncViewModel?
 
-    init(repo: TimelineRepository) {
+    init(repo: TimelineRepository, syncVM: SyncViewModel? = nil) {
         self.repo = repo
+        self.syncVM = syncVM
     }
 
     func loadBuckets() async {
         phase = .loading
+
+        await syncVM?.performBackgroundSync()
+
         do {
             let buckets = try await repo.buckets()
             sections = buckets.map { bucket in
