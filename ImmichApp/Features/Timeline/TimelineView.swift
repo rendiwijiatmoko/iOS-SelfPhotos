@@ -3,14 +3,19 @@ import SwiftUI
 struct TimelineView: View {
     @Environment(SessionManager.self) private var session
     @State private var vm: TimelineViewModel?
+    @State private var selectedAsset: AssetLite?
+    @Namespace private var sourceNamespace
     private let columns = [GridItem(.adaptive(minimum: 110), spacing: 2)]
 
     var body: some View {
         NavigationStack {
             content
                 .navigationTitle("Photos")
-                .navigationDestination(for: AssetLite.self) { asset in
-                    AssetDetailView(asset: asset)
+                .navigationDestination(item: $selectedAsset) { asset in
+                    let allAssets = vm?.sections.flatMap { $0.assets } ?? []
+                    AssetDetailView(currentAsset: asset, assets: allAssets)
+                        .navigationTransition(.zoom(sourceID: asset.id, in: sourceNamespace))
+                        .toolbarVisibility(.hidden, for: .tabBar)
                 }
                 .toolbar {
                     ToolbarItem(placement: .navigationBarTrailing) {
@@ -60,10 +65,13 @@ struct TimelineView: View {
                     Section {
                         LazyVGrid(columns: columns, spacing: 2) {
                             ForEach(section.assets) { asset in
-                                NavigationLink(value: asset) {
+                                Button {
+                                    selectedAsset = asset
+                                } label: {
                                     AuthImage(assetId: asset.id)
                                         .aspectRatio(asset.ratio, contentMode: .fill)
                                         .clipped()
+                                        .matchedGeometryEffect(id: asset.id, in: sourceNamespace)
                                 }
                             }
                         }
