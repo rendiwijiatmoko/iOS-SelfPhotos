@@ -70,7 +70,7 @@ struct OnboardingView: View {
             }
             .buttonStyle(.borderedProminent)
             .frame(maxWidth: .infinity)
-            .disabled(vm.serverText.isEmpty || vm.phase == .loading)
+            .disabled(vm.serverText.isEmpty || vm.phase.isLoading)
         }
     }
 
@@ -127,7 +127,7 @@ struct OnboardingView: View {
             }
             .buttonStyle(.borderedProminent)
             .frame(maxWidth: .infinity)
-            .disabled(vm.email.isEmpty || vm.password.isEmpty || vm.phase == .loading)
+            .disabled(vm.email.isEmpty || vm.password.isEmpty || vm.phase.isLoading)
         }
     }
 
@@ -148,7 +148,7 @@ struct OnboardingView: View {
             }
             .buttonStyle(.borderedProminent)
             .frame(maxWidth: .infinity)
-            .disabled(vm.apiKey.isEmpty || vm.phase == .loading)
+            .disabled(vm.apiKey.isEmpty || vm.phase.isLoading)
         }
     }
 }
