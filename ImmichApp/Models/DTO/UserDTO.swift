@@ -6,4 +6,5 @@ struct UserResponseDTO: Decodable, Identifiable {
     let name: String
     let profileImagePath: String?
     let storageLabel: String?
+    let isAdmin: Bool?
 }
