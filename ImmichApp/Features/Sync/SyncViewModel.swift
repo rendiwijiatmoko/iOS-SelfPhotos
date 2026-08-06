@@ -1,33 +1,26 @@
 import Foundation
 import Observation
-import Network
 
 @MainActor
 @Observable
 final class SyncViewModel {
-    var isOnline: Bool = true
+    /// Diteruskan dari `NetworkMonitor`, tidak dipantau sendiri lagi.
+    ///
+    /// Dulu view model ini memegang `NWPathMonitor`-nya sendiri — dan karena ia
+    /// hidup sebagai `@State` milik satu view, layar yang tidak bisa
+    /// menjangkaunya (detail aset, yang dipresentasikan UIKit) tidak punya cara
+    /// tahu sedang offline.
+    var isOnline: Bool { NetworkMonitor.shared.isOnline }
     var isSyncing: Bool = false
     var lastSyncTime: Date?
     var syncProgress: String = ""
 
     private let repo: SyncRepository
     private let dataManager: SwiftDataManager
-    private let monitor = NWPathMonitor()
 
     init(repo: SyncRepository, dataManager: SwiftDataManager) {
         self.repo = repo
         self.dataManager = dataManager
-        setupNetworkMonitoring()
-    }
-
-    private func setupNetworkMonitoring() {
-        monitor.pathUpdateHandler = { [weak self] path in
-            DispatchQueue.main.async {
-                self?.isOnline = path.status == .satisfied
-            }
-        }
-        let queue = DispatchQueue(label: "network-monitor")
-        monitor.start(queue: queue)
     }
 
     func performFullSync() async {
@@ -60,8 +53,14 @@ final class SyncViewModel {
         }
     }
 
+    /// Dipakai juga oleh layar Photos, yang merender DARI hasil sync ini —
+    /// karena itu statusnya harus terlihat, bukan diam-diam seperti dulu. Layar
+    /// kosong yang tidak menjelaskan apa-apa selama sync pertama berjalan
+    /// terlihat persis seperti aplikasi yang menggantung.
     func performBackgroundSync() async {
-        guard isOnline else { return }
+        guard isOnline, !isSyncing else { return }
+        isSyncing = true
+        defer { isSyncing = false }
 
         do {
             let state = dataManager.getSyncState()
@@ -76,7 +75,4 @@ final class SyncViewModel {
         }
     }
 
-    deinit {
-        monitor.cancel()
-    }
 }

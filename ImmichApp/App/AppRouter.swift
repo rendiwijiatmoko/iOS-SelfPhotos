@@ -2,12 +2,48 @@ import SwiftUI
 
 struct AppRouter: View {
     @Environment(SessionManager.self) private var session
+    @AppStorage(SettingsViewModel.themeKey) private var theme = "system"
+    @State private var launch = AppLaunchState.shared
+    /// Waktu tunggu maksimum splash.
+    ///
+    /// Linimasa yang menyalakan tanda "siap", dan tab terakhir yang dipakai bisa
+    /// saja bukan Photos — layar itu lalu tidak pernah dibangun dan tandanya
+    /// tidak pernah menyala. Batas ini yang memastikan splash selalu berakhir.
+    @State private var didTimeOut = false
 
     var body: some View {
-        if session.isLoggedIn {
-            MainTabView()
-        } else {
-            OnboardingView()
+        Group {
+            if session.isLoggedIn {
+                MainTabView()
+            } else {
+                OnboardingView()
+            }
+        }
+        .preferredColorScheme(colorScheme)
+        // Splash hanya untuk sesi yang sudah masuk: onboarding tidak membaca
+        // cache apa pun, jadi tidak ada yang perlu ditutupi.
+        .overlay {
+            if session.isLoggedIn, !isReady {
+                SplashView()
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.25), value: isReady)
+        .task {
+            try? await Task.sleep(for: .seconds(2))
+            didTimeOut = true
+        }
+    }
+
+    private var isReady: Bool {
+        launch.isReady || didTimeOut
+    }
+
+    private var colorScheme: ColorScheme? {
+        switch theme {
+        case "light": .light
+        case "dark":  .dark
+        default:      nil
         }
     }
 }
@@ -15,245 +51,105 @@ struct AppRouter: View {
 struct MainTabView: View {
     @Environment(SessionManager.self) private var session
     @State private var syncVM: SyncViewModel?
+    @State private var selectedTab: TabID
+    /// Naik satu setiap tab Photos ditekan ulang saat sudah aktif.
+    @State private var photosResetRequest = 0
+    /// Layar detail meminta pita offline menyingkir selama ia tampil.
+    ///
+    /// Singleton, bukan environment — lihat `OfflineBannerSuppression`.
+    private var suppression: OfflineBannerSuppression { .shared }
+
+    private static let tabKey = "mainTab.selected"
+
+    /// Sengaja BUKAN bernama `Tab` — nama itu sudah dipakai tipe `Tab` milik
+    /// SwiftUI yang dipakai di bawah, dan enum bersarang akan menaunginya.
+    private enum TabID: String, Hashable {
+        case photos, library, search
+    }
+
+    /// Tab terakhir dibaca LANGSUNG di init, bukan lewat `onAppear`.
+    ///
+    /// Menyetelnya setelah view muncul membuat tab Photos sempat tampil lalu
+    /// melompat ke tab tersimpan — terlihat seperti kedipan setiap kali aplikasi
+    /// dibuka.
+    init() {
+        let stored = UserDefaults.standard.string(forKey: Self.tabKey) ?? ""
+        _selectedTab = State(initialValue: TabID(rawValue: stored) ?? .photos)
+    }
+
+    /// Binding perantara untuk menangkap penekanan tab yang SUDAH aktif.
+    ///
+    /// `TabView` tidak menyediakan callback untuk itu — setter binding adalah
+    /// satu-satunya tempat kejadian tersebut masih terlihat, karena SwiftUI
+    /// tetap memanggilnya walau nilainya tidak berubah.
+    private var tabSelection: Binding<TabID> {
+        Binding(
+            get: { selectedTab },
+            set: { newValue in
+                if newValue == selectedTab, newValue == .photos {
+                    photosResetRequest += 1
+                }
+                selectedTab = newValue
+
+                // Search sengaja TIDAK ikut disimpan: tab itu untuk tindakan
+                // sesaat, dan membuka aplikasi langsung di kolom pencarian
+                // kosong bukan tempat yang berguna untuk memulai.
+                guard newValue != .search else { return }
+                UserDefaults.standard.set(newValue.rawValue, forKey: Self.tabKey)
+            })
+    }
 
     var body: some View {
+        // `VStack`, bukan `safeAreaInset`.
+        //
+        // `safeAreaInset` memang tidak memotong tinggi, tapi harganya lain:
+        // pitanya melayang DI ATAS isi yang menembus safe area, dan yang
+        // tertutup di situ justru toolbar. VStack membuatnya benar-benar
+        // mengambil tempat sendiri, dan itu yang diinginkan.
         VStack(spacing: 0) {
-            if let syncVM {
+            if let syncVM, !suppression.isSuppressed {
                 OfflineBanner(isOnline: syncVM.isOnline)
             }
 
-            TabView {
-                TimelineView()
-                    .tabItem {
-                        Label("Photos", systemImage: "photo")
-                    }
+            TabView(selection: tabSelection) {
+                Tab("Photos", systemImage: "photo.on.rectangle.angled", value: TabID.photos) {
+                    TimelineView(resetScrollRequest: photosResetRequest)
+                }
 
-                AlbumsListView()
-                    .tabItem {
-                        Label("Albums", systemImage: "folder")
-                    }
+                Tab("Library", systemImage: "photo.stack", value: TabID.library) {
+                    LibraryView()
+                }
 
-                SearchView()
-                    .tabItem {
-                        Label("Search", systemImage: "magnifyingglass")
-                    }
-
-                PeopleView()
-                    .tabItem {
-                        Label("People", systemImage: "person.2")
-                    }
-
-                BackupView()
-                    .tabItem {
-                        Label("Backup", systemImage: "arrow.up.circle")
-                    }
-
-                MemoriesView()
-                    .tabItem {
-                        Label("Memories", systemImage: "calendar")
-                    }
-
-                SettingsView()
-                    .tabItem {
-                        Label("Settings", systemImage: "gear")
-                    }
+                // Role .search membuat sistem menempatkannya terpisah di ujung
+                // dan mengubahnya jadi kolom cari saat tab-nya dipilih.
+                //
+                // Kolomnya sendiri dipasang DI DALAM `SearchView`, pada
+                // `NavigationStack`-nya — bukan di sini. `searchable` di
+                // TabView menyebar ke setiap tab dan memunculkan kolom cari di
+                // bar atas Photos dan Library juga.
+                Tab(value: TabID.search, role: .search) {
+                    SearchView()
+                }
             }
         }
+        // Sync disuntikkan ke environment karena linimasa merender DARI hasil
+        // sync itu, bukan dari endpoint linimasa. Tanpa akses ke sini, layar
+        // Photos tidak punya cara tahu kapan datanya sudah ada.
+        .environment(syncVM)
         .task {
+            // Splash hanya menutupi pembacaan linimasa. Kalau yang terbuka bukan
+            // tab Photos, layar itu tidak pernah dibangun dan tidak ada yang
+            // perlu ditunggu — tanpa baris ini splash-nya menggantung sampai
+            // batas waktunya habis.
+            if selectedTab != .photos { AppLaunchState.shared.markReady() }
+
             if syncVM == nil {
                 let api = APIClient(session: session)
                 let dataManager = SwiftDataManager.shared
                 let repo = SyncRepository(api: api, dataManager: dataManager)
                 syncVM = SyncViewModel(repo: repo, dataManager: dataManager)
-                await syncVM?.performBackgroundSync()
             }
+            await syncVM?.performBackgroundSync()
         }
-    }
-}
-
-struct SettingsView: View {
-    @Environment(SessionManager.self) private var session
-    @State private var vm: SettingsViewModel?
-    @State private var showLogoutAlert = false
-    @State private var showChangeServerAlert = false
-
-    var body: some View {
-        NavigationStack {
-            content
-                .navigationTitle("Settings")
-        }
-        .task {
-            if vm == nil {
-                let api = APIClient(session: session)
-                let repo = SettingsRepository(api: api)
-                vm = SettingsViewModel(repo: repo)
-            }
-            await vm?.loadSettings()
-        }
-        .alert("Logout", isPresented: $showLogoutAlert) {
-            Button("Logout", role: .destructive) {
-                Task {
-                    await vm?.logout()
-                    session.logout()
-                }
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Are you sure you want to logout?")
-        }
-        .alert("Change Server", isPresented: $showChangeServerAlert) {
-            Button("Change", role: .destructive) {
-                session.logout()
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("You will be logged out and need to enter a new server URL.")
-        }
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        if let vm {
-            switch vm.phase {
-            case .idle, .loading:
-                ProgressView()
-
-            case .loaded:
-                settingsContent(vm)
-
-            case .failed(let error):
-                errorState(error, vm)
-            }
-        } else {
-            ProgressView()
-        }
-    }
-
-    @ViewBuilder
-    private func settingsContent(_ vm: SettingsViewModel) -> some View {
-        List {
-            // Profile Section
-            Section("Profile") {
-                if let user = vm.user {
-                    HStack(spacing: 12) {
-                        Image(systemName: "person.circle.fill")
-                            .font(.system(size: 36))
-                            .foregroundStyle(.blue)
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 8) {
-                                Text(user.name)
-                                    .font(.headline)
-
-                                if user.isAdmin == true {
-                                    Label("Admin", systemImage: "star.fill")
-                                        .font(.caption2)
-                                        .foregroundStyle(.orange)
-                                }
-                            }
-
-                            Text(user.email)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Spacer()
-                    }
-                }
-            }
-
-            // Storage Section
-            if let storage = vm.storage {
-                Section("Storage") {
-                    LabeledContent("Used", value: formatBytes(storage.diskUse ?? 0))
-                    LabeledContent("Total", value: formatBytes(storage.diskSize ?? 0))
-
-                    if let total = storage.diskSize, total > 0 {
-                        let used = Double(storage.diskUse ?? 0)
-                        let percentage = (used / Double(total)) * 100
-                        ProgressView(value: percentage / 100)
-                            .tint(percentage > 90 ? .red : .green)
-                    }
-                }
-            }
-
-            // Preferences Section
-            Section("Preferences") {
-                Picker("Theme", selection: Binding(
-                    get: { vm.selectedTheme },
-                    set: { theme in
-                        Task { await vm.updateTheme(theme) }
-                    }
-                )) {
-                    Text("System").tag("system")
-                    Text("Light").tag("light")
-                    Text("Dark").tag("dark")
-                }
-
-                Picker("Grid Columns", selection: Binding(
-                    get: { vm.gridColumns },
-                    set: { columns in
-                        Task { await vm.updateGridColumns(columns) }
-                    }
-                )) {
-                    Text("2 Columns").tag(2)
-                    Text("3 Columns").tag(3)
-                    Text("4 Columns").tag(4)
-                }
-            }
-
-            // Server Section
-            if let server = vm.serverInfo {
-                Section("Server") {
-                    LabeledContent("Version", value: server.version)
-                    if let url = session.baseURL {
-                        LabeledContent("URL", value: url.absoluteString)
-                            .lineLimit(1)
-                    }
-                }
-            }
-
-            // Actions Section
-            Section {
-                Button("Clear Cache", action: clearCache)
-                Button("Change Server", role: .destructive) {
-                    showChangeServerAlert = true
-                }
-                Button("Logout", role: .destructive) {
-                    showLogoutAlert = true
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func errorState(_ error: String, _ vm: SettingsViewModel) -> some View {
-        VStack(spacing: 16) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.orange)
-            Text("Failed to Load Settings")
-                .font(.headline)
-            Text(error)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Button("Retry") {
-                Task { await vm.loadSettings() }
-            }
-            .buttonStyle(.borderedProminent)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func clearCache() {
-        Task {
-            await ImageCache.shared.clear()
-        }
-    }
-
-    private func formatBytes(_ bytes: Int) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: Int64(bytes))
     }
 }

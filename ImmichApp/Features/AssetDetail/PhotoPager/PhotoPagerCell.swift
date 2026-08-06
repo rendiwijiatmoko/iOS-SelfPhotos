@@ -1,0 +1,763 @@
+import AVFoundation
+import UIKit
+
+/// Aturan tata letak foto di layar detail, dikirim dari sisi SwiftUI.
+///
+/// Nilainya berubah saat panel info ditarik, jadi ia harus bisa diteruskan ke
+/// semua sel yang sedang terlihat tanpa menyusun ulang apa pun.
+struct PhotoPagerLayout: Equatable {
+    /// Batas tinggi konten dalam poin (tinggi area aman). 0 = tanpa batas.
+    var maxContentHeight: CGFloat = 0
+    /// Titik pusat vertikal konten dalam koordinat layar. 0 = pusat bounds.
+    var contentCenterY: CGFloat = 0
+    /// 0 = layout card apa adanya, 1 = full width menempel di tepi atas.
+    var expandProgress: CGFloat = 0
+    /// Sudut membulat pada gambar (mode card); 0 = tanpa radius.
+    var cornerRadius: CGFloat = 0
+    /// false mematikan pinch dan double tap.
+    var isZoomEnabled: Bool = true
+    /// false saat perubahan berasal dari drag — layout harus mengikuti jari
+    /// seketika, dan menganimasikannya justru membuatnya tertinggal.
+    var animates: Bool = true
+}
+
+/// Satu halaman foto: scroll view untuk zoom, berisi satu `UIImageView`.
+///
+/// Sebelumnya tiap halaman menghosting view SwiftUI di `UIHostingController`
+/// sendiri. Dengan jendela 25 halaman itu 25 hosting controller sekali buka —
+/// masing-masing dengan pohon SwiftUI, pemuat gambar, dan siklus layoutnya
+/// sendiri. Di sini isinya `UIImageView` biasa, dan selnya didaur ulang.
+final class PhotoPagerCell: UICollectionViewCell {
+    static let reuseID = "PhotoPagerCell"
+
+    private let scrollView = LayoutReportingScrollView()
+    private let imageView = UIImageView()
+
+    private var loadTask: Task<Void, Never>?
+    private var currentAssetID: String?
+    private var isVideo = false
+    /// Disimpan supaya tombol putar bisa meminta URL videonya belakangan.
+    private weak var loader: PhotoPreviewLoader?
+
+    /// Pemutar dibuat SAAT tombol putar ditekan, bukan saat sel dikonfigurasi.
+    ///
+    /// Sel tetangga ikut hidup di pager; membuat pemutar untuk semuanya berarti
+    /// beberapa koneksi video terbuka sekaligus padahal cuma satu yang akan
+    /// ditonton.
+    private var player: AVPlayer?
+    private var playerLayer: AVPlayerLayer?
+    private var endObserver: NSObjectProtocol?
+    /// Pengamat waktu berkala, untuk menggerakkan slider di bar kontrol.
+    private var timeObserver: Any?
+    private let playButton = UIButton(type: .system)
+
+    /// Id video pasangan Live Photo; nil untuk foto biasa.
+    private var livePhotoVideoID: String?
+    /// Pemutar Live Photo dipisah dari pemutar video biasa.
+    ///
+    /// Keduanya punya siklus hidup yang sama sekali berbeda — yang ini hidup
+    /// hanya selama jari menekan — dan menumpangkan keduanya pada satu pemutar
+    /// membuat bar kontrol video ikut bereaksi terhadap sesuatu yang bukan
+    /// urusannya.
+    private var livePlayer: AVPlayer?
+    private var liveLayer: AVPlayerLayer?
+    private var liveEndObserver: NSObjectProtocol?
+    private let liveBadge = UIView()
+    /// Tinggi lencana LIVE; dipakai bersama oleh constraint dan radiusnya.
+    private let liveBadgeHeight: CGFloat = 28
+    /// Durasi dari metadata, dipakai sebelum pemutar dibuat — supaya bar
+    /// kontrolnya sudah punya panjang yang benar sejak sebelum diputar.
+    private var metadataDuration: Double = 0
+
+    var onPlaybackChanged: ((PhotoPlaybackState) -> Void)?
+
+    /// Pilihan bisu, DIBAGI seluruh halaman dan bertahan selama aplikasi hidup.
+    ///
+    /// Video dibuka dalam keadaan bisu — membuka galeri di tempat umum tidak
+    /// seharusnya mengejutkan. Tapi begitu pengguna menyalakan suaranya, pilihan
+    /// itu berlaku untuk video berikutnya juga; sel didaur ulang, jadi menyimpan
+    /// pilihan itu di instance berarti ia hilang setiap ganti halaman.
+    private static var prefersMuted = true
+    private var imageAspect: CGFloat = 1
+    private var layoutRules = PhotoPagerLayout()
+
+    /// Ukuran konten hasil perhitungan terakhir, untuk tahu kapan frame benar-
+    /// benar perlu ditulis ulang.
+    private var fittedSize: CGSize = .zero
+    private var isZoomed = false
+    /// true selama refit mengubah `zoomScale` secara programatik; laporan zoom
+    /// diabaikan supaya tidak memicu loop layout.
+    private var isRefitting = false
+    /// Ditandai saat perubahan datang dari SwiftUI (buka/tutup panel info),
+    /// bukan dari bounds yang bergeser.
+    private var animateNextFit = false
+    private var needsOffsetReset = false
+    /// Sudah pernah diukur sejak sel ini dipakai untuk foto sekarang.
+    ///
+    /// Pengukuran PERTAMA tidak boleh dianimasikan. Sel yang baru didaur ulang
+    /// mulai dari frame nol, jadi menganimasikannya berarti gambar tumbuh dari
+    /// pojok kiri atas sampai memenuhi tempatnya — persis yang terlihat setiap
+    /// kali berpindah foto lewat strip thumbnail.
+    private var hasFitted = false
+
+    var onZoomChanged: ((Bool) -> Void)?
+    var onTap: (() -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+
+        scrollView.delegate = self
+        scrollView.minimumZoomScale = 1
+        scrollView.maximumZoomScale = 4
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.contentInsetAdjustmentBehavior = .never
+        scrollView.backgroundColor = .clear
+        // Konten yang di-zoom dipotong di batas halaman supaya tidak menembus ke
+        // belakang toolbar atas/bawah.
+        scrollView.clipsToBounds = true
+        // Penanda untuk animator transisi: ia perlu kotak akhir fotonya, dan
+        // aturan ukurannya hidup di berkas ini — bukan di ukuran layar.
+        scrollView.accessibilityIdentifier = photoZoomContentIdentifier
+        scrollView.frame = contentView.bounds
+        scrollView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        contentView.addSubview(scrollView)
+
+        // `.fit`, bukan `.fill`: rasio dari metadata bisa sedikit meleset dari
+        // rasio berkas preview, dan dengan `.fill` selisih sekecil apa pun
+        // memotong tepi gambar — paling terasa di sisi kanan.
+        imageView.contentMode = .scaleAspectFit
+        imageView.layer.masksToBounds = true
+        scrollView.addSubview(imageView)
+
+        let doubleTap = UITapGestureRecognizer(
+            target: self, action: #selector(handleDoubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        scrollView.addGestureRecognizer(doubleTap)
+        self.doubleTap = doubleTap
+
+        let singleTap = UITapGestureRecognizer(
+            target: self, action: #selector(handleSingleTap))
+        singleTap.numberOfTapsRequired = 1
+        // Ketukan tunggal menunggu ketukan ganda gagal; tanpa ini toolbar
+        // berkedip setiap kali foto di-zoom lewat dua ketukan.
+        singleTap.require(toFail: doubleTap)
+        scrollView.addGestureRecognizer(singleTap)
+
+        var config = UIButton.Configuration.filled()
+        config.image = UIImage(
+            systemName: "play.fill",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 26, weight: .semibold))
+        config.baseForegroundColor = .white
+        config.baseBackgroundColor = UIColor.black.withAlphaComponent(0.45)
+        config.cornerStyle = .capsule
+        config.contentInsets = NSDirectionalEdgeInsets(
+            top: 18, leading: 20, bottom: 18, trailing: 16)
+        playButton.configuration = config
+        playButton.isHidden = true
+        playButton.addTarget(self, action: #selector(togglePlayback), for: .touchUpInside)
+        playButton.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(playButton)
+        NSLayoutConstraint.activate([
+            playButton.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            playButton.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+        ])
+
+        buildLiveBadge()
+
+        let longPress = UILongPressGestureRecognizer(
+            target: self, action: #selector(handleLongPress(_:)))
+        longPress.minimumPressDuration = 0.3
+        scrollView.addGestureRecognizer(longPress)
+
+        scrollView.onLayout = { [weak self] in self?.fitContent() }
+    }
+
+    /// Lencana "LIVE" di kiri atas, bergaya kapsul material seperti di Photos.
+    private func buildLiveBadge() {
+        let effect = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
+        effect.translatesAutoresizingMaskIntoConstraints = false
+        effect.isUserInteractionEnabled = false
+
+        let icon = UIImageView(image: UIImage(systemName: "livephoto"))
+        icon.tintColor = .label
+        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(
+            pointSize: 13, weight: .semibold)
+
+        let label = UILabel()
+        label.text = "LIVE"
+        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.textColor = .label
+
+        let stack = UIStackView(arrangedSubviews: [icon, label])
+        stack.spacing = 4
+        stack.alignment = .center
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        effect.contentView.addSubview(stack)
+
+        liveBadge.addSubview(effect)
+        liveBadge.isHidden = true
+        liveBadge.isUserInteractionEnabled = false
+        liveBadge.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(liveBadge)
+
+        NSLayoutConstraint.activate([
+            effect.leadingAnchor.constraint(equalTo: liveBadge.leadingAnchor),
+            effect.trailingAnchor.constraint(equalTo: liveBadge.trailingAnchor),
+            effect.topAnchor.constraint(equalTo: liveBadge.topAnchor),
+            effect.bottomAnchor.constraint(equalTo: liveBadge.bottomAnchor),
+
+            stack.leadingAnchor.constraint(equalTo: effect.contentView.leadingAnchor, constant: 10),
+            stack.trailingAnchor.constraint(equalTo: effect.contentView.trailingAnchor, constant: -10),
+            stack.centerYAnchor.constraint(equalTo: effect.contentView.centerYAnchor),
+
+            // Tinggi DIPATOK, bukan mengikuti isinya.
+            //
+            // Radius kapsulnya harus setengah tinggi, dan tinggi yang dihitung
+            // dari isi baru diketahui setelah `contentView` menata anak-anaknya —
+            // yaitu SETELAH `layoutSubviews` sel ini berjalan. Dulu radiusnya
+            // disetel di sana, jadi pada pembukaan pertama ia dihitung dari
+            // tinggi yang masih nol dan lencananya tampil bersudut siku. Baru
+            // setelah ada layout pass lain (membuka panel info, misalnya) angkanya
+            // benar. Dengan tinggi tetap, radiusnya diketahui sejak awal.
+            liveBadge.heightAnchor.constraint(equalToConstant: liveBadgeHeight),
+
+            liveBadge.leadingAnchor.constraint(
+                equalTo: contentView.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            liveBadge.topAnchor.constraint(
+                equalTo: contentView.safeAreaLayoutGuide.topAnchor, constant: 8),
+        ])
+
+        effect.clipsToBounds = true
+        effect.layer.cornerRadius = liveBadgeHeight / 2
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) tidak dipakai") }
+
+    private weak var doubleTap: UITapGestureRecognizer?
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        loadTask?.cancel()
+        loadTask = nil
+        stopPlayback()
+        stopLivePhoto()
+        livePhotoVideoID = nil
+        liveBadge.isHidden = true
+        currentAssetID = nil
+        isVideo = false
+        playButton.isHidden = true
+        imageView.image = nil
+        fittedSize = .zero
+        hasFitted = false
+        animateNextFit = false
+        isZoomed = false
+        scrollView.setZoomScale(1, animated: false)
+    }
+
+    // MARK: - Isi
+
+    func configure(with asset: AssetLite, loader: PhotoPreviewLoader) {
+        currentAssetID = asset.id
+        imageAspect = asset.ratio > 0 ? CGFloat(asset.ratio) : 1
+        isVideo = asset.isVideo
+        livePhotoVideoID = asset.livePhotoVideoID
+        liveBadge.isHidden = !asset.isLivePhoto
+        metadataDuration = asset.duration ?? 0
+        playButton.isHidden = !asset.isVideo
+        self.loader = loader
+        reportPlayback()
+
+        // Yang sudah ada di memori dipasang seketika — termasuk thumbnail
+        // seukuran grid kalau versi tajamnya belum datang.
+        setImage(loader.cachedImage(for: asset.id)
+            ?? ThumbHash.placeholder(for: asset.thumbhash))
+
+        guard !loader.hasPreview(for: asset.id) else { return }
+        startLoad(asset.id, loader: loader)
+    }
+
+    /// Mencoba lagi kalau versi tajamnya belum ada dan tidak ada pemuatan yang
+    /// sedang berjalan.
+    ///
+    /// Menggulir cepat membatalkan pemuatan halaman yang dilewati — itu memang
+    /// yang diinginkan. Tapi halaman tempat jari akhirnya berhenti bisa ikut
+    /// terbatalkan, dan tanpa ini ia berhenti di placeholder selamanya. Tidak ada
+    /// ongkos kalau gambarnya sudah ada: pertanyaannya dijawab dari memori.
+    func retryIfNeeded(loader: PhotoPreviewLoader) {
+        guard let id = currentAssetID, loadTask == nil, !loader.hasPreview(for: id)
+        else { return }
+        startLoad(id, loader: loader)
+    }
+
+    private func startLoad(_ assetID: String, loader: PhotoPreviewLoader) {
+        loadTask = Task { [weak self] in
+            let image = await loader.image(for: assetID)
+            guard let self else { return }
+            // Dikosongkan lebih dulu supaya percobaan berikutnya tidak terkunci
+            // oleh task yang sudah selesai.
+            self.loadTask = nil
+            guard !Task.isCancelled, self.currentAssetID == assetID, let image
+            else { return }
+            self.setImage(image)
+        }
+    }
+
+    /// Satu-satunya jalan memasang gambar — dan sekaligus tempat rasio aslinya
+    /// diambil.
+    ///
+    /// Rasio TIDAK boleh cuma datang dari metadata. `asset.ratio` dihitung dari
+    /// `exifInfo`, dan `/search/metadata` tidak mengirim exif kecuali diminta —
+    /// jadi untuk semua layar yang sumbernya pencarian (Favorites, People,
+    /// Search, Archived, Trash) rasionya jatuh ke nilai cadangan 1.0. Sel ini
+    /// lalu menata setiap foto sebagai PERSEGI: foto tegak digambar lebih sempit
+    /// dari lebar layar dan terlihat mengecil, sementara di linimasa — yang
+    /// rasionya datang dari kolom `ratio` server — semuanya benar.
+    ///
+    /// Gambarnya sendiri selalu tahu rasionya. Metadata cukup jadi tebakan awal
+    /// sebelum gambar apa pun ada.
+    private func setImage(_ image: UIImage?) {
+        imageView.image = image
+        if let image, image.size.width > 0, image.size.height > 0 {
+            imageAspect = image.size.width / image.size.height
+        }
+        setNeedsLayoutFit()
+    }
+
+    func apply(_ rules: PhotoPagerLayout) {
+        guard layoutRules != rules else { return }
+
+        let progressChanged = layoutRules.expandProgress != rules.expandProgress
+        animateNextFit = rules.animates
+        // Posisi konten diluruskan SEKALI per perubahan progress, bukan di setiap
+        // layout pass — umpan balik itulah sumber getarannya.
+        if progressChanged { needsOffsetReset = true }
+
+        layoutRules = rules
+        scrollView.pinchGestureRecognizer?.isEnabled = rules.isZoomEnabled
+        doubleTap?.isEnabled = rules.isZoomEnabled
+        setNeedsLayoutFit()
+    }
+
+    private func setNeedsLayoutFit() {
+        scrollView.setNeedsLayout()
+    }
+
+    // MARK: - Tata letak
+
+    /// Mengukur ulang konten agar pas dengan bounds.
+    ///
+    /// Dipanggil dari `layoutSubviews` scroll view, karena bounds-nya berubah
+    /// setiap toolbar tampil atau menghilang.
+    private func fitContent() {
+        // Jangan utak-atik zoomScale saat pinch masih berlangsung atau saat refit
+        // lain sedang jalan — itu sumber crash.
+        guard !isRefitting, !scrollView.isZooming else { return }
+
+        let bounds = scrollView.bounds.size
+        guard bounds.width > 0, bounds.height > 0 else { return }
+
+        // Selama foto masih ter-zoom, ukuran dasarnya tidak dihitung ulang;
+        // mengubah frame di tengah keadaan zoom membuat foto melompat saat
+        // toolbar sembunyi atau muncul.
+        guard scrollView.zoomScale <= 1.01 else {
+            centerContent()
+            return
+        }
+
+        let aspect = imageAspect > 0 ? imageAspect : bounds.width / bounds.height
+
+        // Batas tinggi datang dari SwiftUI (tinggi area aman), bukan dari bounds
+        // scroll view yang selalu selayar penuh. Tanpa batas (0) = layar penuh.
+        // Tidak ada batas lebar: foto yang tidak tinggi tetap memenuhi lebar.
+        let limit = layoutRules.maxContentHeight > 0
+            ? min(layoutRules.maxContentHeight, bounds.height)
+            : bounds.height
+
+        // Dua layout dihitung lalu di-interpolasi memakai `expandProgress`:
+        // `full` = lebar penuh pada rasio aslinya, `card` = dikecilkan agar muat
+        // di batas tinggi. Foto yang tidak tinggi sama saja di keduanya, jadi ia
+        // hanya terdorong naik tanpa berubah ukuran.
+        let full = CGSize(width: bounds.width, height: bounds.width / aspect)
+        var card = full
+        if card.height > limit {
+            card = CGSize(width: limit * aspect, height: limit)
+        }
+
+        let t = min(max(0, layoutRules.expandProgress), 1)
+        let fitted = CGSize(
+            width: card.width + (full.width - card.width) * t,
+            height: card.height + (full.height - card.height) * t)
+
+        // Foto yang tampil kecil butuh ruang zoom ekstra: minimal cukup untuk
+        // mencapai lebar layar, lalu 4x dari sana.
+        let widthFactor = fitted.width > 0 ? bounds.width / fitted.width : 1
+        scrollView.maximumZoomScale = max(4, widthFactor * 4)
+
+        // Radius dan garis tepi hanya untuk foto yang benar-benar dikecilkan;
+        // yang tampil full width dibiarkan polos. Radiusnya ikut memudar seiring
+        // foto melebar.
+        let isShrunk = fitted.width < bounds.width - 0.5
+        let effectiveRadius = isShrunk ? layoutRules.cornerRadius * (1 - t) : 0
+
+        // Pengukuran pertama selalu seketika; lihat catatan di `hasFitted`.
+        let shouldAnimate = animateNextFit && hasFitted
+        animateNextFit = false
+        hasFitted = true
+
+        let apply = { [self] in
+            if fitted != fittedSize {
+                fittedSize = fitted
+                imageView.frame = CGRect(origin: .zero, size: fitted)
+                scrollView.contentSize = fitted
+            }
+            // Layer video menempati kotak yang sama persis dengan fotonya.
+            // Tanpa `CATransaction`, ia ikut animasi implisit Core Animation dan
+            // tertinggal setengah frame di belakang gambarnya.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            playerLayer?.frame = CGRect(origin: .zero, size: fitted)
+            liveLayer?.frame = CGRect(origin: .zero, size: fitted)
+            CATransaction.commit()
+            imageView.layer.cornerRadius = effectiveRadius
+            imageView.layer.borderWidth = effectiveRadius > 0 ? 1 : 0
+            imageView.layer.borderColor = UIColor.systemGray
+                .withAlphaComponent(0.35).cgColor
+            centerContent()
+        }
+
+        if shouldAnimate {
+            UIView.animate(
+                withDuration: 0.3,
+                delay: 0,
+                options: [.curveEaseInOut, .beginFromCurrentState],
+                animations: apply)
+        } else {
+            apply()
+        }
+    }
+
+    /// Menempatkan konten lewat `contentInset`, di-interpolasi antara "terpusat
+    /// di kotak aman" (card) dan "menempel tepi atas" (expanded).
+    private func centerContent() {
+        let bounds = scrollView.bounds.size
+        let content = scrollView.contentSize
+        let insetX = max(0, (bounds.width - content.width) / 2)
+
+        let cardCenterY = layoutRules.contentCenterY > 0
+            ? layoutRules.contentCenterY
+            : bounds.height / 2
+        let topAlignedCenterY = content.height / 2
+
+        let t = min(max(0, layoutRules.expandProgress), 1)
+        let centerY = cardCenterY + (topAlignedCenterY - cardCenterY) * t
+
+        let insetTop = max(0, centerY - content.height / 2)
+        let insetBottom = max(0, bounds.height - centerY - content.height / 2)
+
+        scrollView.contentInset = UIEdgeInsets(
+            top: insetTop, left: insetX, bottom: insetBottom, right: insetX)
+
+        // Menyetel offset di setiap layout pass memicu layoutSubviews lagi →
+        // fitContent → setel offset → berulang. Umpan balik itulah getarannya,
+        // jadi ini hanya dijalankan saat ditandai, dan tidak selagi jari atau
+        // deselerasi masih memegang scroll view.
+        guard needsOffsetReset,
+              scrollView.zoomScale <= 1.01,
+              !scrollView.isDragging,
+              !scrollView.isDecelerating
+        else { return }
+        needsOffsetReset = false
+
+        let target = CGPoint(x: -insetX, y: -insetTop)
+        let dx = abs(scrollView.contentOffset.x - target.x)
+        let dy = abs(scrollView.contentOffset.y - target.y)
+        if dx > 0.5 || dy > 0.5 {
+            scrollView.setContentOffset(target, animated: false)
+        }
+    }
+
+    private func reportZoom() {
+        // Toolbar baru disembunyikan setelah foto benar-benar memenuhi lebar
+        // layar. Foto tinggi yang tampil kecil jadi bisa di-zoom membesar dulu
+        // tanpa mengubah toolbar — ukuran kecilnya memang cuma penanda bahwa
+        // fotonya panjang.
+        let contentWidth = fittedSize.width * scrollView.zoomScale
+        let zoomed = scrollView.zoomScale > 1.01
+            && contentWidth >= scrollView.bounds.width - 0.5
+        guard zoomed != isZoomed else { return }
+        isZoomed = zoomed
+        onZoomChanged?(zoomed)
+    }
+
+    /// true selama foto ini sedang di-zoom; pager memakainya untuk mengunci
+    /// perpindahan halaman.
+    var isCurrentlyZoomed: Bool { scrollView.zoomScale > 1.01 }
+
+    /// Boleh ditarik ke bawah untuk menutup?
+    ///
+    /// Tarikan vertikal di layar ini punya tiga arti tergantung keadaan: menggeser
+    /// foto yang sedang di-zoom, membuka panel info, atau menutup layar. Sel ini
+    /// sudah tahu dua yang pertama — `isZoomEnabled` bernilai false persis saat
+    /// panel info terbuka — jadi tidak perlu jalur kabar terpisah dari SwiftUI.
+    var allowsInteractiveDismiss: Bool {
+        layoutRules.isZoomEnabled && !isCurrentlyZoomed
+    }
+
+    // MARK: - Gestur
+
+    @objc private func handleSingleTap() {
+        // Saat video sedang berputar, ketukan berarti jeda — bukan
+        // menyembunyikan toolbar. Di luar itu perilakunya seperti foto biasa.
+        guard let player, player.timeControlStatus != .paused else {
+            onTap?()
+            return
+        }
+        player.pause()
+        playButton.isHidden = false
+        reportPlayback()
+    }
+
+    // MARK: - Video
+
+    @objc private func togglePlayback() {
+        if let player {
+            player.play()
+            playButton.isHidden = true
+            return
+        }
+
+        guard let id = currentAssetID,
+              let source = loader?.videoSource(for: id)
+        else { return }
+
+        // Suara tetap terdengar walau sakelar senyap aktif — sama seperti Photos
+        // saat video diputar dengan sengaja.
+        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        try? AVAudioSession.sharedInstance().setActive(true)
+
+        let asset = AVURLAsset(
+            url: source.url,
+            options: ["AVURLAssetHTTPHeaderFieldsKey": source.headers])
+        let player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        player.isMuted = Self.prefersMuted
+        let layer = AVPlayerLayer(player: player)
+        layer.videoGravity = .resizeAspect
+        layer.frame = imageView.bounds
+        imageView.layer.addSublayer(layer)
+
+        // Selesai diputar: kembali ke awal dan tombolnya muncul lagi, seperti
+        // Photos — bukan berhenti di frame terakhir tanpa jalan keluar.
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: player.currentItem,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                player.seek(to: .zero)
+                self?.playButton.isHidden = false
+                self?.reportPlayback()
+            }
+        }
+
+        // Melapor beberapa kali per detik supaya slider bergerak halus tanpa
+        // menuntut pembaruan tiap frame.
+        timeObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reportPlayback() }
+        }
+
+        self.player = player
+        self.playerLayer = layer
+        playButton.isHidden = true
+        player.play()
+        reportPlayback()
+    }
+
+    /// Menghentikan dan membongkar pemutarnya.
+    ///
+    /// Dipanggil saat sel didaur ulang DAN saat halaman berpindah: video yang
+    /// terus berjalan di halaman yang sudah lewat tetap memakan jaringan dan
+    /// menahan sesi audio.
+    func stopPlayback() {
+        if let timeObserver, let player {
+            player.removeTimeObserver(timeObserver)
+        }
+        timeObserver = nil
+        player?.pause()
+        playerLayer?.removeFromSuperlayer()
+        playerLayer = nil
+        player = nil
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+            self.endObserver = nil
+        }
+        playButton.isHidden = !isVideo
+        reportPlayback()
+    }
+
+    // MARK: Kendali dari bar kontrol
+
+    /// Memutar kalau berhenti, menjeda kalau sedang berjalan.
+    func togglePlayPause() {
+        guard let player else {
+            togglePlayback()
+            return
+        }
+        if player.timeControlStatus == .paused {
+            player.play()
+            playButton.isHidden = true
+        } else {
+            player.pause()
+            playButton.isHidden = false
+        }
+        reportPlayback()
+    }
+
+    /// Bisa ditekan SEBELUM videonya diputar.
+    ///
+    /// Dulu ini menunggu pemutarnya ada, jadi menekan tombol bisu di video yang
+    /// belum dijalankan tidak melakukan apa pun. Pilihannya sekarang disimpan
+    /// terpisah dari pemutar, lalu diterapkan begitu pemutarnya dibuat.
+    func toggleMute() {
+        Self.prefersMuted.toggle()
+        player?.isMuted = Self.prefersMuted
+        reportPlayback()
+    }
+
+    // MARK: - Live Photo
+
+    /// Ditekan-tahan: bagian bergeraknya diputar selama jari menempel.
+    @objc private func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
+        switch recognizer.state {
+        case .began: startLivePhoto()
+        case .ended, .cancelled, .failed: stopLivePhoto()
+        default: break
+        }
+    }
+
+    private func startLivePhoto() {
+        guard livePlayer == nil,
+              let videoID = livePhotoVideoID,
+              let source = loader?.videoSource(for: videoID)
+        else { return }
+
+        let asset = AVURLAsset(
+            url: source.url,
+            options: ["AVURLAssetHTTPHeaderFieldsKey": source.headers])
+        let player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        // Live Photo selalu senyap — bagian bergeraknya cuma sekejap, dan
+        // suaranya justru mengagetkan.
+        player.isMuted = true
+
+        let layer = AVPlayerLayer(player: player)
+        layer.videoGravity = .resizeAspect
+        layer.frame = imageView.bounds
+        imageView.layer.addSublayer(layer)
+
+        // Selesai berputar, kembali ke fotonya walau jari masih menempel —
+        // sama seperti Photos, yang tidak mengulang.
+        liveEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: player.currentItem,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stopLivePhoto() }
+        }
+
+        livePlayer = player
+        liveLayer = layer
+        player.play()
+    }
+
+    private func stopLivePhoto() {
+        livePlayer?.pause()
+        liveLayer?.removeFromSuperlayer()
+        liveLayer = nil
+        livePlayer = nil
+        if let liveEndObserver {
+            NotificationCenter.default.removeObserver(liveEndObserver)
+            self.liveEndObserver = nil
+        }
+    }
+
+    /// Melompat ke bagian tertentu, 0…1.
+    func seek(toFraction fraction: Double) {
+        guard let player, let item = player.currentItem else { return }
+        let duration = item.duration.seconds
+        guard duration.isFinite, duration > 0 else { return }
+        let target = CMTime(seconds: duration * min(max(fraction, 0), 1), preferredTimescale: 600)
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    /// Keadaan sekarang, untuk digambar bar kontrol.
+    var playbackState: PhotoPlaybackState {
+        var state = PhotoPlaybackState()
+        state.isVideo = isVideo
+        state.isMuted = Self.prefersMuted
+        state.isPlaying = player?.timeControlStatus == .playing
+        let itemDuration = player?.currentItem?.duration.seconds ?? .nan
+        state.duration = itemDuration.isFinite && itemDuration > 0 ? itemDuration : metadataDuration
+        state.time = player?.currentTime().seconds ?? 0
+        return state
+    }
+
+    private func reportPlayback() {
+        onPlaybackChanged?(playbackState)
+    }
+
+    @objc private func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
+        if scrollView.zoomScale > 1 {
+            scrollView.setZoomScale(1, animated: true)
+            return
+        }
+
+        let point = recognizer.location(in: imageView)
+        let width = scrollView.bounds.width / 2
+        let height = scrollView.bounds.height / 2
+        scrollView.zoom(
+            to: CGRect(
+                x: point.x - width / 2,
+                y: point.y - height / 2,
+                width: width,
+                height: height),
+            animated: true)
+    }
+}
+
+// MARK: - Zoom
+
+extension PhotoPagerCell: UIScrollViewDelegate {
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+        imageView
+    }
+
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        guard !isRefitting else { return }
+        centerContent()
+        reportZoom()
+    }
+
+    func scrollViewDidEndZooming(
+        _ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat
+    ) {
+        reportZoom()
+        // Kalau bounds sempat berubah di tengah pinch (toolbar sembunyi), refit
+        // yang tertunda dijalankan sekarang.
+        scrollView.setNeedsLayout()
+    }
+}
+
+/// `UIScrollView` yang melaporkan `layoutSubviews`, dipakai untuk menghitung
+/// ulang ukuran konten saat bounds berubah.
+private final class LayoutReportingScrollView: UIScrollView {
+    var onLayout: (() -> Void)?
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        onLayout?()
+    }
+}

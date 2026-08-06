@@ -1,38 +1,61 @@
+import CryptoKit
 import Foundation
 
-final class BackupRepository {
+class BackupRepository {
     private let api: APIClient
 
     init(api: APIClient) {
         self.api = api
     }
 
-    func checkDuplicates(assetIds: [String]) async throws -> [String] {
-        struct Body: Encodable {
-            let assetIds: [String]
-        }
-        struct Response: Decodable {
-            let duplicates: [String]
-        }
-        let response: Response = try await api.send(.json("/assets/bulk-upload-check", method: .post, body: Body(assetIds: assetIds)))
-        return response.duplicates
+    /// SHA1 hex dari isi file — dipakai server untuk deteksi duplikat.
+    /// Nonisolated async supaya hashing file besar tidak terjadi di main thread.
+    func checksum(for data: Data) async -> String {
+        Insecure.SHA1.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
+    /// POST /assets/bulk-upload-check menerima {assets: [{id, checksum}]} dan
+    /// menjawab {results: [{id, action, reason, ...}]}. Mengembalikan id yang
+    /// ditolak karena duplikat.
+    func checkDuplicates(_ candidates: [(id: String, checksum: String)]) async throws -> Set<String> {
+        struct AssetCheck: Encodable { let id: String; let checksum: String }
+        struct Body: Encodable { let assets: [AssetCheck] }
+        struct ResultEntry: Decodable {
+            let id: String
+            let action: String
+            let reason: String?
+        }
+        struct Response: Decodable { let results: [ResultEntry] }
+
+        let body = Body(assets: candidates.map { AssetCheck(id: $0.id, checksum: $0.checksum) })
+        let response: Response = try await api.send(.json("/assets/bulk-upload-check", method: .post, body: body))
+        return Set(response.results
+            .filter { $0.action == "reject" && $0.reason == "duplicate" }
+            .map(\.id))
+    }
+
+    /// POST /assets (multipart). Field mengikuti AssetMediaCreateDto:
+    /// assetData + fileCreatedAt + fileModifiedAt wajib; deviceAssetId/deviceId
+    /// sudah tidak ada di API dan akan ditolak validasi server.
     func uploadAsset(
-        fileURL: URL,
-        deviceAssetId: String,
-        deviceId: String,
+        data fileData: Data,
+        filename: String,
+        checksum: String,
         createdAt: Date,
         modifiedAt: Date
     ) async throws -> String {
-        guard let baseURL = api.session.baseURL else { throw APIError.invalidURL }
+        let (baseURL, authHeaders) = await api.session.requestContext
+        guard let baseURL else { throw APIError.invalidURL }
 
         let boundary = "Boundary-\(UUID().uuidString)"
         var request = URLRequest(url: baseURL.appendingPathComponent("/assets"))
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.setValue(checksum, forHTTPHeaderField: "x-immich-checksum")
 
-        for (k, v) in api.session.authHeaders {
+        for (k, v) in authHeaders {
             request.setValue(v, forHTTPHeaderField: k)
         }
 
@@ -44,15 +67,12 @@ final class BackupRepository {
             body.append("\(value)\r\n".data(using: .utf8)!)
         }
 
-        addField("deviceAssetId", deviceAssetId)
-        addField("deviceId", deviceId)
         addField("fileCreatedAt", ISO8601DateFormatter().string(from: createdAt))
         addField("fileModifiedAt", ISO8601DateFormatter().string(from: modifiedAt))
-        addField("isFavorite", "false")
+        addField("filename", filename)
 
-        let fileData = try Data(contentsOf: fileURL)
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"assetData\"; filename=\"\(fileURL.lastPathComponent)\"\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"assetData\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
         body.append("Content-Type: application/octet-stream\r\n\r\n".data(using: .utf8)!)
         body.append(fileData)
         body.append("\r\n".data(using: .utf8)!)
@@ -68,6 +88,7 @@ final class BackupRepository {
 
         struct UploadResponse: Decodable {
             let id: String
+            let status: String?
         }
 
         let result = try JSONDecoder.immich.decode(UploadResponse.self, from: data)

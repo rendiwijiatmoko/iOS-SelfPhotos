@@ -1,252 +1,1048 @@
+import CoreLocation
+import LinkPresentation
 import SwiftUI
 
 struct AssetDetailView: View {
     @State var currentAsset: AssetLite
     let assets: [AssetLite]
+    // true saat ditampilkan sebagai fullScreenCover (perlu tombol tutup sendiri).
+    var isModal = false
+    // Memberi tahu pemanggil foto mana yang sedang tampil, supaya
+    // sourceID zoom transition ikut berpindah saat user swipe.
+    var onAssetChange: ((AssetLite) -> Void)? = nil
+    /// Aset keluar dari daftar: dipindah ke arsip/locked folder atau dihapus.
+    var onAssetRemoved: ((String) -> Void)? = nil
+    /// Metadata aset berubah (tanggal, lokasi, deskripsi).
+    var onAssetUpdated: ((String) -> Void)? = nil
+    /// Dipisah dari `onAssetUpdated` karena cukup ditambal di tempat — status
+    /// favorit tidak memengaruhi pengelompokan bucket, jadi tidak perlu
+    /// memuat ulang timeline.
+    var onFavoriteChanged: ((String, Bool) -> Void)? = nil
 
     @Environment(SessionManager.self) private var session
+    @Environment(\.dismiss) private var dismiss
     @State private var vm: AssetDetailViewModel?
-    @State private var scale: CGFloat = 1.0
-    @State private var offset: CGSize = .zero
     @State private var isSharePresented = false
+    /// true selama file asli masih diunduh, sebelum share sheet dibuka.
+    @State private var isPreparingShare = false
     @State private var downloadedFileURL: URL?
+    /// Pratinjau untuk header share sheet, diambil dari cache preview.
+    @State private var sharePreviewImage: UIImage?
     @State private var showToolbar = true
+    @State private var isZoomed = false
+    @State private var showDeleteConfirm = false
+    /// Naik satu setiap toggle favorit yang berhasil; dipakai sebagai pemicu
+    /// animasi simbol dan haptic.
+    @State private var favoriteFeedback = 0
+    /// Naik satu setiap penghapusan yang dikonfirmasi server.
+    @State private var deleteFeedback = 0
+    /// Cermin dari `vm.detail.isFavorite`.
+    ///
+    /// Toolbar SwiftUI tidak andal ikut ter-invalidate oleh perubahan objek
+    /// `@Observable`, jadi statusnya disalin ke `@State` milik view ini —
+    /// perubahan `@State` pasti membangun ulang body beserta toolbar-nya.
+    @State private var isFavorite = false
+    /// Cermin dari `vm.detail != nil` — ADA INFO untuk ditampilkan.
+    ///
+    /// Alasan disalin ke `@State` sama seperti `isFavorite`: toolbar SwiftUI
+    /// tidak andal ikut ter-invalidate oleh perubahan objek `@Observable`,
+    /// sedangkan perubahan `@State` pasti membangun ulang body beserta
+    /// toolbar-nya.
+    ///
+    /// Offline biasanya TETAP true — detail foto yang pernah dibuka tersimpan
+    /// sebagai potret lokal. Yang false hanya foto yang memang belum pernah
+    /// dimuat sekali pun.
+    @State private var hasDetail = false
+    /// Tinggi panel info saat ini dalam poin. 0 = tertutup. Nilainya mengikuti
+    /// jari selama drag, lalu di-snap ke detent terdekat saat dilepas.
+    @State private var panelHeight: CGFloat = 0
+    /// Tinggi panel saat drag dimulai, supaya perpindahan bersifat relatif.
+    /// Sekaligus penanda bahwa drag sedang berlangsung — hanya ada satu
+    /// recognizer sekarang, jadi tidak perlu lagi melacak siapa pemiliknya.
+    @State private var panelDragStart: CGFloat?
+    /// Tinggi alami isi panel, dilaporkan balik oleh `AssetInfoPanel`.
+    @State private var panelContentHeight: CGFloat = 0
+    /// Posisi scroll daftar di dalam panel, dipakai recognizer untuk memutuskan
+    /// kapan harus mengalah ke daftar.
+    @State private var panelScrollOffset: CGFloat = 0
 
+    @State private var descriptionDraft = ""
+    @FocusState private var descriptionFocused: Bool
+    /// Cermin dari `descriptionFocused`. Toolbar builder tidak andal membaca
+    /// @FocusState langsung, jadi disalin seperti status toolbar lainnya.
+    @State private var isEditingDescription = false
+    @State private var isEditingDate = false
+    @State private var isEditingLocation = false
+    @State private var isPickingAlbum = false
+    /// Salinan kerja dari `assets`, milik layar ini.
+    ///
+    /// `assets` dimiliki pemanggil dan tidak bisa diubah dari sini. Dulu
+    /// penghapusan disimpan sebagai kumpulan id lalu disaring ulang setiap kali
+    /// dibaca — pada puluhan ribu foto itu penyalinan array penuh, berkali-kali
+    /// per frame. Sekarang daftarnya diubah langsung.
+    @State private var pages: [AssetLite] = []
+    /// Posisi `currentAsset` di `pages`, dipelihara alih-alih dicari ulang.
+    @State private var currentIndex = 0
+    /// Panel tetap terpasang sampai animasi menutup benar-benar selesai.
+    ///
+    /// Tanpa ini, `panelHeight` menyentuh 0 di awal `withAnimation` sehingga
+    /// view-nya langsung dilepas dan animasi mengecilnya tidak pernah terlihat
+    /// — yang tampak hanya kedipan.
+    @State private var isPanelMounted = false
+    /// Pegangan ke strip, supaya pager bisa menggesernya langsung tiap frame.
+    @State private var filmstripController: PhotoFilmstripController?
+    /// Pegangan ke pager, supaya bar kontrol video bisa menyambung langsung.
+    @State private var pagerController: PhotoPagerController?
+
+    /// Daftar yang benar-benar dipakai untuk menggambar.
+    ///
+    /// `pages` baru terisi di `start()`, yang berjalan SETELAH body pertama.
+    /// Membiarkan strip menunggu sampai saat itu membuatnya muncul terlambat —
+    /// dan karena strip mengubah safe area, fotonya sempat tergambar lebih tinggi
+    /// lalu tersentak naik begitu strip datang.
+    private var visibleAssets: [AssetLite] { pages.isEmpty ? assets : pages }
+
+    private var isPanelDragging: Bool { panelDragStart != nil }
+    private var isPanelAtMax: Bool { panelHeight >= panelMaxHeight - 1 }
+
+    private var showInfo: Bool { panelHeight > 0 }
+
+    // Body sengaja dipecah berlapis. Sebagai satu rantai modifier utuh,
+    // ekspresinya terlalu besar untuk type-checker Swift ("unable to
+    // type-check this expression in reasonable time"). Tiap lapis punya
+    // anotasi `some View` eksplisit, jadi type-checking-nya selesai per bagian.
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-
-            TabView(selection: $currentAsset) {
-                ForEach(assets) { asset in
-                    VStack {
-                        ZoomableImageView(assetId: asset.id, thumbhash: asset.thumbhash, scale: $scale, offset: $offset)
-                    }
-                    .tag(asset)
+        pager
+            .safeAreaInset(edge: .bottom, spacing: 0) { bottomAccessory }
+            .navigationTitle(navigationTitleText)
+            .navigationBarTitleDisplayMode(.inline)
+            // Tarik-untuk-menutup dimatikan saat zoom maupun saat panel info
+            // terbuka — swipe ke bawah di situ artinya menutup panel.
+            .interactiveDismissDisabled(isZoomed || showInfo)
+            .statusBarHidden(isStatusBarHidden)
+            .modifier(toolbarChrome)
+            // TANPA `onTapGesture` di sini.
+            //
+            // Modifier ini menempel pada SELURUH susunan — termasuk strip
+            // thumbnail yang dipasang lewat `safeAreaInset`. Gestur SwiftUI di
+            // leluhur itu menelan ketukan sebelum sampai ke collection view strip,
+            // jadi menekan thumbnail malah menyembunyikan toolbar alih-alih
+            // berpindah foto. Ketukan pada fotonya sendiri sudah ditangani
+            // recognizer milik `PhotoPagerCell` lewat `onTap`.
+            .overlay(alignment: .bottom) { infoPanel }
+            // URUTAN PENTING: gesture dipasang SETELAH overlay panel.
+            //
+            // `.overlay` membungkus hasil sebelumnya, jadi kalau gesture
+            // dipasang lebih dulu, panel jadi view saudara — bukan turunan —
+            // dan sentuhan di atas panel tidak pernah sampai ke recognizer.
+            // Itulah kenapa swipe ke bawah di panel tidak menutupnya.
+            //
+            // `.gesture`, bukan `.simultaneousGesture`: representable UIKit
+            // bukan `Gesture` sehingga tidak punya overload itu. Berbagi dengan
+            // scroll & pinch sudah diatur lewat delegate recognizer-nya.
+            .gesture(infoDragGesture)
+            .toolbar { detailToolbar }
+            .overlay { presentations }
+            // Kegagalan aksi lewat sendiri, tidak menunggu ditutup — lihat
+            // `ErrorToast`. Yang muncul di sini HANYA kegagalan yang dipicu
+            // pengguna; gagal memuat detail sengaja diam (lihat `load`).
+            .errorToast(actionErrorBinding)
+            // TANPA pita offline, dari jalur mana pun — termasuk saat didorong
+            // dari Library, di mana pitanya milik `MainTabView`.
+            //
+            // Pita itu keterangan tentang keadaan aplikasi, dan di sini ia
+            // menyita ruang dari satu-satunya hal yang sedang dilihat. Layar ini
+            // punya caranya sendiri untuk berterus terang: aksi yang gagal
+            // memunculkan toast, dan panel info tetap terisi dari potret lokal.
+            .onAppear { OfflineBannerSuppression.shared.begin() }
+            .onDisappear { OfflineBannerSuppression.shared.end() }
+            .task { await start() }
+            // Untuk pemanggil yang mendorong lewat navigationDestination
+            // (People, Album) — jalur fullScreenCover menolaknya di akar scene
+            // yang dipresentasikan, lihat TimelineView dan SearchResultsGrid.
+            .ignoresSafeArea(.keyboard, edges: .bottom)
+            .onChange(of: currentAsset) { oldAsset, newAsset in
+                onAssetChange?(newAsset)
+                // Foto lain = metadata lain = tinggi isi lain. Nilai maksimum
+                // yang tersimpan harus dilupakan, bukan dibawa-bawa.
+                panelContentHeight = 0
+                // Deskripsi milik foto sebelumnya: simpan dulu, lalu lepas
+                // fokusnya. Tanpa ini keyboard dan toolbar mode edit bertahan
+                // di foto baru sambil menyunting teks milik foto lama.
+                if isEditingDescription {
+                    saveDescriptionEdit(for: oldAsset.id)
+                }
+                Task {
+                    await vm?.load(newAsset.id)
+                    await vm?.loadContainingAlbums(newAsset.id)
                 }
             }
-            .tabViewStyle(.page(indexDisplayMode: .never))
-            .ignoresSafeArea()
+    }
 
-            VStack {
-                HStack {
-                    if showToolbar {
-                        Text("\(currentAssetIndex + 1) / \(assets.count)")
-                            .font(.caption)
-                            .foregroundStyle(.white)
-                            .padding(8)
-                            .background(.black.opacity(0.6))
-                            .cornerRadius(4)
-                    }
-                    Spacer()
-                }
-                .padding(16)
+    private var navigationTitleText: String {
+        currentAsset.createdAt.formatted(date: .abbreviated, time: .omitted)
+    }
 
-                Spacer()
+    private var isStatusBarHidden: Bool {
+        (!showToolbar || showInfo) && !isEditingDescription
+    }
 
-                if showToolbar && !assets.isEmpty {
-                    PreviewIndicator(
-                        assets: assets,
-                        currentAsset: $currentAsset,
-                        onSelect: { asset in
-                            currentAsset = asset
-                            resetZoom()
-                        }
-                    )
-                    .background(.black.opacity(0.7))
-                }
-            }
+    private var toolbarChrome: ToolbarChrome {
+        ToolbarChrome(
+            showToolbar: showToolbar,
+            showInfo: showInfo,
+            isEditing: isEditingDescription)
+    }
+
+    private func toggleToolbar() {
+        // Saat panel info terbuka, toolbar bawah adalah satu-satunya jalan
+        // menutupnya lewat tombol — jangan disembunyikan.
+        guard panelHeight <= 0 else { return }
+        withAnimation(.easeInOut(duration: 0.28)) {
+            showToolbar.toggle()
         }
-        .onTapGesture {
-            withAnimation {
-                showToolbar.toggle()
-            }
+    }
+
+    /// Semua sheet/alert plus sinkronisasi status toolbar, ditempel lewat
+    /// overlay kosong supaya rantai modifier di `body` tetap pendek.
+    private var presentations: some View {
+        stateSync
+            .sheet(isPresented: $isSharePresented) { shareSheet }
+            .sheet(isPresented: $isEditingDate) { dateEditor }
+            .sheet(isPresented: $isEditingLocation) { locationEditor }
+            .sheet(isPresented: $isPickingAlbum) { albumPicker }
+    }
+
+    private var albumPicker: some View {
+        AlbumPickerSheet(albums: albums) { album in
+            Task { await vm?.addToAlbum(currentAsset.id, album: album) }
         }
-        .sheet(isPresented: Binding(
-            get: { vm?.showInfoPanel ?? false },
-            set: { vm?.showInfoPanel = $0 }
-        )) {
-            if let detail = vm?.detail {
-                InfoPanel(detail: detail)
-                    .presentationDetents([.medium, .large])
-            }
-        }
-        .sheet(isPresented: $isSharePresented) {
-            if let url = downloadedFileURL {
-                ShareSheet(url: url)
-            }
-        }
-        .toolbar(showToolbar ? .visible : .hidden, for: .bottomBar)
-        .toolbar {
-            ToolbarItemGroup(placement: .bottomBar) {
-                Button {
-                    Task { await vm?.delete(currentAsset.id) }
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .foregroundStyle(.red)
+    }
 
-                Spacer()
-
-                if let vm, let detail = vm.detail {
-                    Button {
-                        Task { await vm.toggleArchive(currentAsset.id) }
-                    } label: {
-                        Image(systemName: detail.isArchived ? "archivebox.fill" : "archivebox")
-                    }
-
-                    Button {
-                        Task { await vm.toggleFavorite(currentAsset.id) }
-                    } label: {
-                        Image(systemName: detail.isFavorite ? "heart.fill" : "heart")
-                            .foregroundStyle(detail.isFavorite ? .red : .white)
-                    }
-
-                    Button {
-                        vm.showInfoPanel = true
-                    } label: {
-                        Image(systemName: "info.circle")
-                    }
-
-                    Button {
-                        Task {
-                            await shareFile()
-                        }
-                    } label: {
-                        Image(systemName: "square.and.arrow.up")
-                    }
+    @ViewBuilder
+    private var dateEditor: some View {
+        if let detail = vm?.detail {
+            AssetDateEditor(initialDate: detail.fileCreatedAt) { newDate in
+                let id = currentAsset.id
+                Task {
+                    await vm?.updateDate(id, to: newDate)
+                    onAssetUpdated?(id)
                 }
             }
         }
-        .task {
-            if vm == nil {
-                let api = APIClient(session: session)
-                let repo = AssetDetailRepository(api: api)
-                vm = AssetDetailViewModel(repo: repo)
-            }
-            await vm?.load(currentAsset.id)
-        }
-        .onChange(of: currentAsset) { _, newAsset in
-            resetZoom()
+    }
+
+    @ViewBuilder
+    private var locationEditor: some View {
+        AssetLocationEditor(initialCoordinate: currentCoordinate) { coordinate in
+            let id = currentAsset.id
             Task {
-                await vm?.load(newAsset.id)
+                await vm?.updateLocation(
+                    id,
+                    latitude: coordinate.latitude,
+                    longitude: coordinate.longitude)
+                onAssetUpdated?(id)
             }
         }
     }
 
-    private var currentAssetIndex: Int {
-        assets.firstIndex(of: currentAsset) ?? 0
+    private var currentCoordinate: CLLocationCoordinate2D? {
+        guard let exif = vm?.detail?.exifInfo,
+              let lat = exif.latitude,
+              let lon = exif.longitude,
+              lat != 0 || lon != 0 else { return nil }
+        return CLLocationCoordinate2D(latitude: lat, longitude: lon)
     }
 
-    private func resetZoom() {
-        withAnimation {
-            scale = 1.0
-            offset = .zero
+    /// Menyalin status dari view model ke @State milik view ini.
+    ///
+    /// Nilai yang diamati diekstrak lebih dulu ke properti bertipe eksplisit;
+    /// menulis `vm?.detail?.isFavorite` langsung di dalam `onChange` memaksa
+    /// type-checker menyelesaikan optional chaining + generic `onChange` +
+    /// closure sekaligus, dan itulah yang membuat ekspresinya meledak.
+    private var stateSync: some View {
+        vmStateSync
+            // TANPA withAnimation.
+            //
+            // `isEditingDescription` dibaca di `body` (status bar, ToolbarChrome,
+            // topToolbar), jadi membungkusnya dalam withAnimation menjadikan
+            // SELURUH body satu transaksi beranimasi — pager, panel, dan foto
+            // ikut bergerak walau tidak ada hubungannya dengan mode edit. Itu
+            // yang terlihat sebagai "semuanya beranimasi aneh". Perpindahan
+            // toolbar sendiri sudah punya animasi bawaan.
+            .onChange(of: descriptionFocused) { _, focused in
+                isEditingDescription = focused
+                // Panel dinaikkan ke detent tertinggi begitu mulai menyunting.
+                //
+                // Keyboard menutupi bagian bawah layar tanpa menggeser panel —
+                // itu memang disengaja (lihat catatan di `infoPanel`). Tapi
+                // kalau tingginya dibiarkan, kolom deskripsinya justru berada di
+                // balik keyboard: yang terlihat cuma keyboard muncul dan panel
+                // diam di tempat.
+                guard focused, panelMaxHeight > panelHeight else { return }
+                animatePanel(to: panelMaxHeight)
+            }
+            // Haptic dipasang di luar toolbar builder karena modifier pada
+            // tombol di dalamnya tidak selalu ikut aktif. Trigger-nya counter,
+            // bukan nilai isFavorite — kalau memakai isFavorite, berpindah foto
+            // yang status favoritnya berbeda ikut memicu haptic palsu.
+            .sensoryFeedback(favoriteHaptic, trigger: favoriteFeedback)
+            // Ketukan tegas sebagai tanda foto benar-benar sudah dihapus di
+            // server, bukan sekadar dialog yang tertutup.
+            .sensoryFeedback(.impact(weight: .heavy), trigger: deleteFeedback)
+    }
+
+    private var vmStateSync: some View {
+        Color.clear
+            .allowsHitTesting(false)
+            .onChange(of: favoriteValue) { _, newValue in
+                isFavorite = newValue == true
+            }
+            .onChange(of: detailID, initial: true) { _, newValue in
+                hasDetail = newValue != nil
+            }
+    }
+
+    private var favoriteValue: Bool? { vm?.detail?.isFavorite }
+    private var detailID: String? { vm?.detail?.id }
+
+    private var favoriteHaptic: SensoryFeedback {
+        isFavorite ? .success : .impact(flexibility: .soft)
+    }
+
+    @ViewBuilder
+    private var shareSheet: some View {
+        if let url = downloadedFileURL {
+            ShareSheet(url: url, previewImage: sharePreviewImage)
         }
+    }
+
+    @ViewBuilder
+    private var bottomAccessory: some View {
+        // Indicator ikut toolbar hanya saat tidak zoom — dalam mode zoom
+        // pindah halaman dikunci, jadi indicator tidak ditampilkan.
+        if !showInfo && showToolbar && !isZoomed && !visibleAssets.isEmpty {
+            VStack(spacing: 10) {
+                // Bar kontrol hanya untuk video, dan letaknya DI ATAS strip —
+                // strip tetap dipakai untuk berpindah aset.
+                if currentAsset.isVideo, let pagerController {
+                    PhotoVideoControlsView(pager: pagerController)
+                        .frame(height: 46)
+                        .padding(.horizontal, 12)
+                }
+
+                PhotoFilmstripView(
+                    assets: visibleAssets,
+                    currentAssetID: currentAsset.id,
+                    onSelect: { asset in currentAsset = asset },
+                    onControllerReady: { filmstripController = $0 },
+                    session: session)
+                    .frame(height: 54)
+            }
+        }
+    }
+
+    /// Panel info sebagai OVERLAY, bukan `safeAreaInset`.
+    ///
+    /// Lewat safe area, munculnya panel mengubah tinggi yang tersedia untuk
+    /// foto, sehingga foto dihitung ulang dan diubah ukurannya di UIKit — itu
+    /// yang membuat animasinya patah. Sebagai overlay, layout foto tidak
+    /// terganggu: foto cukup berpindah ke mode full width dan menempel di atas,
+    /// lalu panel menutupinya secara bertahap.
+    @ViewBuilder
+    private var infoPanel: some View {
+        if isPanelMounted, let detail = vm?.detail {
+            panelBody(for: detail)
+                // alignment .top itu wajib: tanpa itu VStack dipusatkan di
+                // dalam frame, sehingga saat panel masih pendek baris
+                // description (pegangan drag-nya) terdorong ke luar area
+                // terlihat dan tidak bisa disentuh sama sekali.
+                .frame(height: panelHeight, alignment: .top)
+                .clipped()
+                // Overlay berhenti di batas safe area, jadi tanpa ini area
+                // toolbar bawah + home indicator tetap tembus pandang dan foto
+                // di belakangnya terlihat menyembul.
+                .background(Color(.systemGroupedBackground))
+                // INI kuncinya: panel dipatok ke tepi bawah LAYAR, bukan ke
+                // safe area.
+                //
+                // Sebagai overlay bottom-aligned, posisinya dulu mengikuti safe
+                // area view induk — dan safe area itu berubah dua kali saat
+                // mulai mengedit: keyboard muncul, lalu bottom toolbar
+                // disembunyikan. Setiap perubahan menggeser panel, dan
+                // mengoreksinya dengan offset hanya menambah gerakan kedua yang
+                // tidak pernah sinkron dengan yang pertama.
+                //
+                // Dengan mengabaikan safe area bawah sepenuhnya, tepi bawah
+                // panel selalu di tepi layar: keyboard naik menutupinya tanpa
+                // menggesernya, persis seperti di Photos.
+                .ignoresSafeArea(.all, edges: .bottom)
+        }
+    }
+
+    private func panelBody(for detail: AssetResponseDTO) -> AssetInfoPanel {
+        AssetInfoPanel(
+            detail: detail,
+            // Daftar baru bisa di-scroll di detent tertinggi; di bawah itu
+            // panel inert supaya tarikan mengubah tingginya.
+            isScrollEnabled: isPanelAtMax,
+            // Hanya diambil nilai terbesar yang pernah terukur.
+            //
+            // Tinggi isi itu sifatnya intrinsik, tapi laporannya bisa datang
+            // dalam keadaan setengah jadi — mis. baris description sudah
+            // terukur sementara isi scroll masih 0, atau saat panel mengecil di
+            // animasi menutup. Nilai parsial semacam itu dulu tersimpan dan
+            // membuat bukaan berikutnya jadi pendek sekali.
+            //
+            // Juga diabaikan selagi drag: nilai ini menentukan panelMaxHeight
+            // yang dipakai clampPanel, jadi perubahannya di tengah tarikan bisa
+            // balik menggeser panelHeight dan memicu osilasi.
+            onIntrinsicHeightChange: { newHeight in
+                guard !isPanelDragging, newHeight > 0 else { return }
+                panelContentHeight = max(panelContentHeight, newHeight)
+            },
+            onScrollOffsetChange: { panelScrollOffset = $0 },
+            descriptionDraft: $descriptionDraft,
+            descriptionFocus: $descriptionFocused,
+            onAdjustDate: { isEditingDate = true },
+            onAdjustLocation: { isEditingLocation = true },
+            containingAlbums: vm?.containingAlbums ?? [])
+    }
+
+    // MARK: - Detent panel
+
+    /// Dihitung sekali, bukan setiap kali dibaca.
+    ///
+    /// Nilainya mengalir ke `expandProgress`, yang dibaca oleh SETIAP halaman
+    /// pager pada setiap evaluasi body. Menelusuri daftar scene sebanyak itu —
+    /// hanya untuk tinggi layar yang tidak berubah — biaya yang tidak perlu ada.
+    private var screenHeight: CGFloat { Self.screenHeightValue }
+
+    private static let screenHeightValue: CGFloat = {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first?
+            .screen.bounds.height ?? 800
+    }()
+
+    /// Tinggi standar saat panel dibuka — SELALU proporsi layar, tidak pernah
+    /// bergantung pada tinggi isi.
+    ///
+    /// Dulu nilai ini ikut di-clamp oleh `panelContentHeight`, sehingga bukaan
+    /// pertama (saat isi belum terukur) berbeda dari bukaan berikutnya.
+    private var panelMediumHeight: CGFloat {
+        screenHeight * 0.55
+    }
+
+    /// Batas atas tarikan: menyisakan seperempat layar teratas untuk foto, dan
+    /// tidak melebihi tinggi alami isi panel — konten yang sedikit tidak boleh
+    /// ditarik lebih tinggi dari isinya. Tidak pernah lebih pendek dari tinggi
+    /// standar, supaya bukaan normal selalu bisa dicapai.
+    private var panelMaxHeight: CGFloat {
+        let ceiling = screenHeight * 0.75
+        guard panelContentHeight > 0 else { return ceiling }
+        return min(ceiling, max(panelMediumHeight, panelContentHeight))
+    }
+
+    /// Tertutup, standar, dan penuh — panel di-snap ke salah satunya saat jari
+    /// dilepas. Detent penuh dilewati kalau isinya memang tidak setinggi itu.
+    private var panelDetents: [CGFloat] {
+        var detents: [CGFloat] = [0, panelMediumHeight]
+        if panelMaxHeight > panelMediumHeight + 24 {
+            detents.append(panelMaxHeight)
+        }
+        return detents
+    }
+
+    /// Satu-satunya gesture untuk panel — berlaku di area foto maupun di badan
+    /// panel. Aturan arah dan siapa yang mengalah diputuskan di dalam
+    /// recognizer-nya, bukan di sini.
+    private var infoDragGesture: PanelPanGesture {
+        PanelPanGesture(
+            panelHeight: panelHeight,
+            panelScrollEnabled: isPanelAtMax,
+            panelScrollAtTop: panelScrollOffset <= 0.5,
+            onChanged: { translationY in
+                guard !isZoomed else { return }
+                // Menarik ke atas dari layar detail yang belum punya info hanya
+                // menyeret panel kosong; gerakannya dibiarkan lewat kalau
+                // panelnya memang sudah terbuka, supaya tetap bisa ditutup.
+                guard hasDetail || panelHeight > 0 else { return }
+                dragChanged(translationY)
+            },
+            onEnded: { translationY, velocityY in
+                dragEnded(translationY, velocity: velocityY)
+            }
+        )
+    }
+
+    private func dragChanged(_ translationY: CGFloat) {
+        let start = panelDragStart ?? panelHeight
+        // Tarikan ke BAWAH saat panel sudah tertutup bukan urusan panel — itu
+        // gestur menutup layar.
+        //
+        // Membiarkannya lewat berarti satu peristiwa yang arahnya sempat terbaca
+        // ke atas bisa membuka panel sekejap, dan begitu panel terbuka toolbar
+        // langsung dilepas dari hierarki — bukan memudar. Itu yang terlihat
+        // seperti toolbar hilang seketika saat mulai menarik.
+        if start <= 0, translationY > 0 { return }
+        if panelDragStart == nil { panelDragStart = start }
+        // Tarik ke atas (translation negatif) = panel membesar.
+        panelHeight = clampPanel(start - translationY)
+        if panelHeight > 0 { isPanelMounted = true }
+    }
+
+    private func dragEnded(_ translationY: CGFloat, velocity velocityY: CGFloat) {
+        guard let start = panelDragStart else { return }
+        panelDragStart = nil
+        settlePanel(from: start, translationY: translationY, velocityY: velocityY)
+    }
+
+    private func clampPanel(_ value: CGFloat) -> CGFloat {
+        min(max(0, value), panelMaxHeight)
+    }
+
+    /// 0 = foto masih dalam mode card, 1 = sudah full width menempel di atas.
+    /// Dipakai untuk menginterpolasi layout foto mengikuti jari, bukan
+    /// melompat ke mode lain begitu panel mulai ditarik.
+    private var expandProgress: CGFloat {
+        guard panelDetents[1] > 0 else { return 0 }
+        return min(1, panelHeight / panelDetents[1])
+    }
+
+    /// Snap ke detent terdekat dengan memperhitungkan kecepatan lemparan.
+    private func settlePanel(
+        from start: CGFloat,
+        translationY: CGFloat,
+        velocityY: CGFloat
+    ) {
+        // Proyeksi posisi akhir ala UIKit decelerate: seperempat detik ke depan.
+        let projected = start - (translationY + velocityY * 0.25)
+        let target = panelDetents.min {
+            abs($0 - projected) < abs($1 - projected)
+        } ?? 0
+
+        animatePanel(to: target)
+    }
+
+    /// Menganimasikan tinggi panel, lalu melepas view-nya hanya setelah animasi
+    /// menutup benar-benar selesai.
+    private func animatePanel(to target: CGFloat) {
+        // Panel ditutup sementara field deskripsi masih fokus = keyboard dan
+        // toolbar mode edit tertinggal di layar tanpa panel yang memilikinya.
+        // Perlakukan seperti menekan tombol simpan.
+        if target <= 0 && isEditingDescription {
+            saveDescriptionEdit()
+        }
+        if target > 0 { isPanelMounted = true }
+
+        withAnimation(.interpolatingSpring(stiffness: 300, damping: 30)) {
+            panelHeight = target
+            // Panel terbuka → toolbar atas dan strip thumbnail ikut hilang.
+            if target > 0 { showToolbar = true }
+        } completion: {
+            if panelHeight <= 0 { isPanelMounted = false }
+        }
+    }
+
+    private var savedDescription: String {
+        vm?.detail?.exifInfo?.description ?? ""
+    }
+
+    private func cancelDescriptionEdit() {
+        descriptionDraft = savedDescription
+        descriptionFocused = false
+    }
+
+    /// `assetID` harus diberikan eksplisit saat dipanggil dari `onChange(of:
+    /// currentAsset)` — di sana `currentAsset` sudah berpindah ke foto baru,
+    /// sehingga teks milik foto lama akan tersimpan ke foto yang salah.
+    private func saveDescriptionEdit(for assetID: String? = nil) {
+        let trimmed = descriptionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        descriptionDraft = trimmed
+        descriptionFocused = false
+        guard trimmed != savedDescription else { return }
+        let id = assetID ?? currentAsset.id
+        Task { await vm?.updateDescription(id, to: trimmed) }
+    }
+
+    private func setInfo(_ open: Bool) {
+        animatePanel(to: open ? panelDetents[1] : 0)
+    }
+
+    /// Pesannya sendiri yang dijadikan binding, bukan bool + teks terpisah.
+    /// Toast-nya mengosongkannya sendiri setelah beberapa detik.
+    private var actionErrorBinding: Binding<ErrorEvent?> {
+        Binding(
+            get: { vm?.actionError },
+            set: { vm?.actionError = $0 }
+        )
+    }
+
+    // MARK: - Jendela halaman
+
+    private func start() async {
+        if pages.isEmpty {
+            pages = assets
+            currentIndex = assets.firstIndex(of: currentAsset) ?? 0
+        }
+        if vm == nil {
+            let api = APIClient(session: session)
+            let repo = AssetDetailRepository(api: api)
+            vm = AssetDetailViewModel(repo: repo, albumRepo: AlbumRepository(api: api))
+        }
+        await vm?.load(currentAsset.id)
+        await vm?.loadContainingAlbums(currentAsset.id)
+        await vm?.loadAlbumsIfNeeded()
+    }
+
+    private var pager: some View {
+        // GeometryReader ini SENGAJA tidak ikut mengabaikan safe area:
+        // `geo.size` = tinggi area aman sesungguhnya (di bawah navigation bar,
+        // di atas strip thumbnail). Nilai itu dikirim ke sel sebagai batas tinggi
+        // konten. Mengandalkan bounds scroll view tidak bisa — scroll view-nya
+        // memang selalu selayar penuh supaya paging dan zoom memakai seluruh
+        // layar.
+        GeometryReader { geo in
+            // Kotak area aman di koordinat layar: tingginya sudah mengecualikan
+            // navigation bar dan strip thumbnail, dan titik tengahnya sedikit di
+            // atas titik tengah layar — kalau konten dipusatkan ke tengah layar
+            // penuh, bagian bawahnya menabrak strip.
+            let box = geo.frame(in: .global)
+
+            PhotoPagerView(
+                // `assets` dipakai sampai salinan kerjanya terisi.
+                //
+                // `pages` baru diisi di `start()`, yang berjalan SETELAH body
+                // pertama. Artinya pada evaluasi pertama pagernya kosong — dan
+                // animator transisi membaca kotak foto tujuan tepat di saat itu,
+                // lalu menemukan tidak ada apa-apa. Itulah kenapa membukanya tidak
+                // berangkat dari sel yang ditekan.
+                assets: visibleAssets,
+                currentAssetID: currentAsset.id,
+                layout: pagerLayout(available: max(1, box.height - 16), centerY: box.midY),
+                // Panel terbuka berarti fotonya sedang jadi latar, bukan objek
+                // utama — usapan mendatar di situ tidak boleh memindahkannya.
+                isPagingEnabled: !showInfo && !isEditingDescription,
+                onPageChanged: { asset in
+                    currentAsset = asset
+                    currentIndex = pages.firstIndex(of: asset) ?? currentIndex
+                },
+                onZoomChanged: { handleZoomChange($0) },
+                onTap: { toggleToolbar() },
+                // Strip digeser LANGSUNG dari pager, tanpa melewati `@State`.
+                //
+                // Nilainya berubah tiap frame selama usapan; menyalurkannya lewat
+                // SwiftUI berarti membangun ulang body sebanyak itu juga.
+                onScrollProgress: { filmstripController?.track(page: $0) },
+                onControllerReady: { pagerController = $0 },
+                session: session)
+                // Yang mengabaikan safe area HANYA pagernya, bukan
+                // `GeometryReader`-nya.
+                //
+                // Kalau modifier ini dipasang di luar, `geo.height` ikut menjadi
+                // tinggi layar penuh — dan batas tinggi yang dikirim ke sel jadi
+                // begitu longgar sehingga tidak ada foto yang pernah dianggap
+                // terlalu tinggi. Itu yang membuat foto panjang berhenti mengecil
+                // dan kehilangan sudut membulatnya.
+                .ignoresSafeArea(.all, edges: .all)
+        }
+    }
+
+    /// Aturan tata letak foto, dirakit dari keadaan layar ini.
+    ///
+    /// Nilai `available` dan `centerY` menggambarkan layout CARD; layout expanded
+    /// dihitung di sisi UIKit, lalu keduanya di-interpolasi memakai
+    /// `expandProgress`.
+    private func pagerLayout(available: CGFloat, centerY: CGFloat) -> PhotoPagerLayout {
+        PhotoPagerLayout(
+            maxContentHeight: cardLayout ? available : 0,
+            contentCenterY: cardLayout ? centerY : 0,
+            expandProgress: expandProgress,
+            cornerRadius: cardLayout ? 24 : 0,
+            // Panel terbuka → pinch dan double tap dimatikan; foto sedang jadi
+            // latar, bukan objek utama.
+            isZoomEnabled: panelHeight <= 0,
+            // Drag = ikuti jari tanpa animasi. Tombol info atau snap = animasikan.
+            animates: !isPanelDragging)
+    }
+
+    private func handleZoomChange(_ zoomed: Bool) {
+        // Hanya tulis saat berubah; kalau tidak, parent ikut re-render di
+        // setiap frame pinch.
+        guard isZoomed != zoomed else { return }
+        isZoomed = zoomed
+        // Mulai zoom → toolbar langsung sembunyi; kembali ke skala 1 →
+        // toolbar (dan indicator) muncul lagi.
+        withAnimation(.easeInOut(duration: 0.28)) {
+            showToolbar = !zoomed
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var detailToolbar: some ToolbarContent {
+        topToolbar
+        bottomToolbar
+    }
+
+    @ToolbarContentBuilder
+    private var topToolbar: some ToolbarContent {
+        // Mode edit deskripsi mengambil alih navigation bar: batal di kiri,
+        // simpan di kanan. Aksesori keyboard tidak dipakai karena pendaftaran
+        // `placement: .keyboard` dari dalam overlay tidak konsisten.
+        if isEditingDescription {
+            ToolbarItem(placement: .topBarLeading) { cancelEditButton }
+            ToolbarItem(placement: .topBarTrailing) { saveEditButton }
+        } else if isModal {
+            ToolbarItem(placement: .topBarLeading) { closeButton }
+        }
+    }
+
+    private var cancelEditButton: some View {
+        Button {
+            cancelDescriptionEdit()
+        } label: {
+            Image(systemName: "xmark")
+        }
+    }
+
+    private var saveEditButton: some View {
+        Button {
+            saveDescriptionEdit()
+        } label: {
+            Image(systemName: "checkmark")
+        }
+        .buttonStyle(.borderedProminent)
+    }
+
+    private var closeButton: some View {
+        Button {
+            dismiss()
+        } label: {
+            Image(systemName: "xmark")
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var bottomToolbar: some ToolbarContent {
+        // Kiri: share. Sheet baru dibuka setelah file aslinya selesai
+        // diunduh; selama menunggu, ikonnya berganti spinner supaya
+        // jeda-nya jelas dan tombolnya tidak bisa ditekan dua kali.
+        ToolbarItem(placement: .bottomBar) { shareButton }
+
+        ToolbarSpacer(.flexible, placement: .bottomBar)
+
+        // Tengah: favorite, info, add to album dalam satu grup. Grupnya
+        // selalu tampil; tombol di-disable sampai datanya siap. Kondisi
+        // enable/disable WAJIB dari @State — membacanya langsung dari vm di
+        // sini membuat nilainya beku di kondisi render pertama.
+        ToolbarItemGroup(placement: .bottomBar) {
+            favoriteButton
+            infoButton
+            albumMenu
+        }
+
+        ToolbarSpacer(.flexible, placement: .bottomBar)
+
+        ToolbarItem(placement: .bottomBar) { deleteButton }
+    }
+
+    private var shareButton: some View {
+        Button {
+            Task { await shareFile() }
+        } label: {
+            shareIcon
+        }
+        .disabled(isPreparingShare)
+    }
+
+    @ViewBuilder
+    private var shareIcon: some View {
+        if isPreparingShare {
+            ProgressView()
+        } else {
+            Image(systemName: "square.and.arrow.up")
+        }
+    }
+
+    private var favoriteButton: some View {
+        Button {
+            let id = currentAsset.id
+            Task {
+                if await vm?.toggleFavorite(id) == true {
+                    favoriteFeedback += 1
+                    onFavoriteChanged?(id, vm?.detail?.isFavorite == true)
+                }
+            }
+        } label: {
+            favoriteIcon
+        }
+
+    }
+
+    /// Rantai symbol effect ini mahal untuk type-checker, jadi dipisah sendiri.
+    private var favoriteIcon: some View {
+        Image(systemName: isFavorite ? "heart.fill" : "heart")
+            .foregroundStyle(isFavorite ? Color.red : Color.primary)
+            // Morph heart ↔ heart.fill, lalu bounce sekali.
+            .contentTransition(.symbolEffect(.replace))
+            .symbolEffect(.bounce, value: favoriteFeedback)
+    }
+
+    /// Tombol info jadi toggle: menekannya lagi menutup panel.
+    /// Satu-satunya tombol yang DIMATIKAN saat tidak ada isinya.
+    ///
+    /// Yang lain tetap hidup meski offline — mereka mengirim sesuatu ke server,
+    /// dan kalau gagal, kegagalannya dikabarkan lewat toast. Tombol ini tidak
+    /// mengirim apa pun; ia membuka panel. Membiarkannya bisa ditekan berarti
+    /// menjanjikan panel yang tidak punya satu baris pun untuk digambar.
+    private var infoButton: some View {
+        Button {
+            setInfo(!showInfo)
+        } label: {
+            Image(systemName: showInfo ? "info.circle.fill" : "info.circle")
+        }
+        .disabled(!hasDetail)
+    }
+
+    private var albumMenu: some View {
+        Menu {
+            Button {
+                isPickingAlbum = true
+            } label: {
+                Label("Add to Album", systemImage: "rectangle.stack.badge.plus")
+            }
+
+            Section("Move to") {
+                Button {
+                    moveAsset(to: .archive)
+                } label: {
+                    Label("Archive", systemImage: "archivebox")
+                }
+
+                Button {
+                    moveAsset(to: .locked)
+                } label: {
+                    Label("Locked Folder", systemImage: "lock")
+                }
+            }
+        } label: {
+            Image(systemName: "rectangle.stack.badge.plus")
+        }
+
+    }
+
+    private func moveAsset(to visibility: AssetDetailRepository.Visibility) {
+        Task {
+            if await vm?.move(currentAsset.id, to: visibility) == true {
+                removeCurrentAsset()
+            }
+        }
+    }
+
+    /// Aset yang dipindah keluar dari timeline tidak lagi ada di daftar ini.
+    /// Lanjut ke foto berikutnya; kalau sudah di ujung, mundur ke sebelumnya;
+    /// kalau memang tidak ada sisa, tutup layarnya.
+    private func removeCurrentAsset() {
+        guard pages.indices.contains(currentIndex),
+              pages[currentIndex].id == currentAsset.id
+        else {
+            dismiss()
+            return
+        }
+
+        onAssetRemoved?(currentAsset.id)
+        pages.remove(at: currentIndex)
+
+        guard !pages.isEmpty else {
+            dismiss()
+            return
+        }
+
+        // Lanjut ke foto berikutnya; kalau tadi yang terakhir, mundur satu.
+        currentIndex = min(currentIndex, pages.count - 1)
+        currentAsset = pages[currentIndex]
+    }
+
+    private var albums: [AlbumResponseDTO] {
+        vm?.albums ?? []
+    }
+
+    /// Trash dengan konfirmasi yang menempel ke tombolnya.
+    private var deleteButton: some View {
+        Button(role: .destructive) {
+            showDeleteConfirm = true
+        } label: {
+            Image(systemName: "trash")
+        }
+        .confirmationDialog(
+            "Delete Photo",
+            isPresented: $showDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) { performDelete() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Are you sure you want to delete this photo?")
+        }
+    }
+
+    private func performDelete() {
+        Task {
+            if await vm?.delete(currentAsset.id) == true {
+                deleteFeedback += 1
+                removeCurrentAsset()
+            }
+        }
+    }
+
+    /// Mode "card": foto normal (tidak zoom) dengan toolbar tampil — foto
+    /// mengecil di tengah dengan sudut membulat.
+    /// Layout dasar foto = mode card. Panel info TIDAK lagi mematikan mode ini;
+    /// perpindahan ke full width diurus lewat interpolasi `expandProgress`
+    /// supaya tidak ada lompatan saat panel mulai ditarik.
+    private var cardLayout: Bool {
+        showToolbar && !isZoomed
     }
 
     private func shareFile() async {
-        guard let vm, let url = vm.downloadUrl(currentAsset.id) else { return }
+        guard let vm, !isPreparingShare else { return }
 
+        isPreparingShare = true
+        defer { isPreparingShare = false }
+
+        // Sheet sengaja tidak dibuka lebih dulu: UIActivityViewController
+        // butuh URL file yang sudah ada isinya, jadi unduhan harus selesai
+        // dulu. Spinner di tombol yang menutupi jedanya.
+        guard let data = await vm.downloadOriginal(currentAsset.id) else { return }
+
+        let filename = vm.detail?.originalFileName ?? "\(currentAsset.id).jpg"
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(filename)
         do {
-            let data = try await URLSession.shared.data(from: url).0
-            let tempURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString)
-                .appendingPathExtension("jpg")
             try data.write(to: tempURL)
             downloadedFileURL = tempURL
+            // Didecode dari file yang baru saja diunduh, bukan diambil dari
+            // cache: byte-nya sudah ada di tangan, dan pratinjau share sheet
+            // hanya sekali dipakai — tidak sepadan dengan mengintip cache.
+            sharePreviewImage = UIImage(data: data)
             isSharePresented = true
         } catch {
-            // Handle error
+            vm.actionError = ErrorEvent(error.localizedDescription)
         }
     }
 }
 
-struct PreviewIndicator: View {
-    let assets: [AssetLite]
-    @Binding var currentAsset: AssetLite
-    var onSelect: (AssetLite) -> Void
+/// Empat modifier visibilitas/latar toolbar dibungkus jadi satu, supaya tidak
+/// ikut memperpanjang rantai modifier di `body`.
+private struct ToolbarChrome: ViewModifier {
+    let showToolbar: Bool
+    /// Saat panel info terbuka, hanya bottom bar yang tersisa — navigation bar
+    /// ikut disembunyikan supaya foto punya ruang naik.
+    let showInfo: Bool
+    /// Mode edit deskripsi membalik keadaan itu: navigation bar wajib tampil
+    /// (di situ tombol batal & simpan), bottom bar justru disembunyikan.
+    let isEditing: Bool
 
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(assets) { asset in
-                        Button {
-                            onSelect(asset)
-                        } label: {
-                            AuthImage(assetId: asset.id, thumbhash: asset.thumbhash)
-                                .frame(width: 50, height: 50)
-                                .clipped()
-                                .cornerRadius(4)
-                                .opacity(currentAsset.id == asset.id ? 1.0 : 0.6)
-                                .border(
-                                    currentAsset.id == asset.id ? Color.blue : Color.clear,
-                                    width: 2
-                                )
-                        }
-                        .id(asset.id)
-                    }
-                }
-                .padding(8)
-                .onAppear {
-                    proxy.scrollTo(currentAsset.id, anchor: .center)
-                }
-                .onChange(of: currentAsset) { _, newAsset in
-                    withAnimation {
-                        proxy.scrollTo(newAsset.id, anchor: .center)
-                    }
-                }
-            }
-            .frame(height: 66)
-        }
+    private var topVisibility: Visibility {
+        if isEditing { return .visible }
+        return showToolbar && !showInfo ? .visible : .hidden
     }
-}
 
-struct ZoomableImageView: View {
-    let assetId: String
-    var thumbhash: String?
-    @Binding var scale: CGFloat
-    @Binding var offset: CGSize
+    private var bottomVisibility: Visibility {
+        if isEditing { return .hidden }
+        return showToolbar ? .visible : .hidden
+    }
 
-    var body: some View {
-        ZStack {
-            AuthImage(assetId: assetId, size: "preview", thumbhash: thumbhash)
-                .scaledToFit()
-                .scaleEffect(scale)
-                .offset(offset)
-                .gesture(
-                    SimultaneousGesture(
-                        MagnificationGesture()
-                            .onChanged { value in
-                                scale = max(1, min(value, 4))
-                            },
-                        DragGesture()
-                            .onChanged { value in
-                                if scale > 1 {
-                                    offset = value.translation
-                                }
-                            }
-                            .onEnded { _ in
-                                withAnimation {
-                                    scale = 1
-                                    offset = .zero
-                                }
-                            }
-                    )
-                )
-                .animation(.spring, value: scale)
-        }
+    func body(content: Content) -> some View {
+        content
+            .toolbar(topVisibility, for: .navigationBar)
+            .toolbar(bottomVisibility, for: .bottomBar)
+        // TANPA `toolbarBackground(.visible, …)`.
+        //
+        // Memaksa latar bar jadi "visible" menuntut SwiftUI menyediakan bar
+        // dengan latar yang digambar sendiri, dan di iOS 26 itu melawan kaca
+        // bawaannya — persis alasan yang sama kenapa latar toolbar di Timeline
+        // dilepas. Diserahkan ke sistem, bar-nya jadi kaca yang memburamkan foto
+        // di belakangnya, dan tidak ada bar berlatar sendiri yang perlu
+        // ditempelkan ke hierarki view.
     }
 }
 
 struct ShareSheet: UIViewControllerRepresentable {
     let url: URL
+    /// Gambar untuk header share sheet. Tanpa ini iOS hanya menampilkan ikon
+    /// tipe file generik (mis. "JPG"), bukan isi fotonya.
+    var previewImage: UIImage? = nil
 
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        let item = ShareItemSource(url: url, previewImage: previewImage)
+        return UIActivityViewController(activityItems: [item], applicationActivities: nil)
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+/// Share sheet untuk banyak file sekaligus.
+///
+/// Tidak memakai `ShareItemSource`: metadata pratinjau hanya masuk akal untuk
+/// satu item, dan iOS sendiri menampilkan ringkasan "N Items" untuk kumpulan.
+struct MultiShareSheet: UIViewControllerRepresentable {
+    let urls: [URL]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: urls, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+/// Membungkus URL file supaya share sheet punya metadata pratinjau.
+///
+/// `UIActivityViewController` hanya menampilkan thumbnail asli kalau item-nya
+/// menyediakan `LPLinkMetadata`; kalau cuma diberi `URL` mentah, header-nya
+/// jatuh ke ikon ekstensi file.
+private final class ShareItemSource: NSObject, UIActivityItemSource {
+    private let url: URL
+    private let previewImage: UIImage?
+
+    init(url: URL, previewImage: UIImage?) {
+        self.url = url
+        self.previewImage = previewImage
+    }
+
+    // Placeholder harus bertipe sama dengan item aslinya (URL), bukan gambar —
+    // kalau beda, sebagian extension salah menebak tipe kontennya.
+    func activityViewControllerPlaceholderItem(_ controller: UIActivityViewController) -> Any {
+        url
+    }
+
+    func activityViewController(
+        _ controller: UIActivityViewController,
+        itemForActivityType activityType: UIActivity.ActivityType?
+    ) -> Any? {
+        url
+    }
+
+    func activityViewController(
+        _ controller: UIActivityViewController,
+        subjectForActivityType activityType: UIActivity.ActivityType?
+    ) -> String {
+        url.lastPathComponent
+    }
+
+    func activityViewControllerLinkMetadata(
+        _ controller: UIActivityViewController
+    ) -> LPLinkMetadata? {
+        let metadata = LPLinkMetadata()
+        metadata.title = url.lastPathComponent
+        metadata.originalURL = url
+        if let previewImage {
+            metadata.imageProvider = NSItemProvider(object: previewImage)
+            metadata.iconProvider = NSItemProvider(object: previewImage)
+        }
+        return metadata
+    }
 }
 
 struct VideoPlayerView: View {
@@ -263,84 +1059,6 @@ struct VideoPlayerView: View {
     }
 }
 
-struct InfoPanel: View {
-    let detail: AssetResponseDTO
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section("File") {
-                    LabeledContent("Name", value: detail.originalFileName)
-                    LabeledContent("Created", value: detail.fileCreatedAt.formatted(date: .abbreviated, time: .standard))
-                    if let size = detail.exifInfo?.fileSizeInByte {
-                        LabeledContent("Size", value: formatBytes(size))
-                    }
-                }
-
-                if let exif = detail.exifInfo {
-                    Section("Camera") {
-                        if let make = exif.make, let model = exif.model {
-                            LabeledContent("Camera", value: "\(make) \(model)")
-                        }
-                        if let lens = exif.lensModel {
-                            LabeledContent("Lens", value: lens)
-                        }
-                        if let focal = exif.focalLength {
-                            LabeledContent("Focal Length", value: "\(focal)mm")
-                        }
-                        if let f = exif.fNumber {
-                            LabeledContent("Aperture", value: String(format: "f/%.1f", f))
-                        }
-                        if let iso = exif.iso {
-                            LabeledContent("ISO", value: "\(iso)")
-                        }
-                        if let exposure = exif.exposureTime {
-                            LabeledContent("Shutter Speed", value: exposure)
-                        }
-                    }
-
-                    if let width = exif.exifImageWidth, let height = exif.exifImageHeight {
-                        Section("Image") {
-                            LabeledContent("Resolution", value: "\(width) × \(height)")
-                        }
-                    }
-
-                    if let lat = exif.latitude, let lon = exif.longitude {
-                        Section("Location") {
-                            LabeledContent("Coordinates", value: String(format: "%.4f, %.4f", lat, lon))
-                            if let city = exif.city {
-                                LabeledContent("City", value: city)
-                            }
-                            if let state = exif.state {
-                                LabeledContent("State", value: state)
-                            }
-                            if let country = exif.country {
-                                LabeledContent("Country", value: country)
-                            }
-                        }
-                    }
-                }
-
-                if let people = detail.people, !people.isEmpty {
-                    Section("People") {
-                        ForEach(people) { person in
-                            Text(person.name)
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Details")
-            .navigationBarTitleDisplayMode(.inline)
-        }
-    }
-
-    private func formatBytes(_ bytes: Int) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useAll]
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: Int64(bytes))
-    }
-}
 
 #Preview {
     let asset = AssetLite(id: "test-123", isVideo: false, ratio: 1.0, thumbhash: nil, createdAt: Date())

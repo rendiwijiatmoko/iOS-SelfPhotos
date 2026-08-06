@@ -1,31 +1,125 @@
 import CryptoKit
+import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
-/// Cache gambar dua lapis.
+/// Cache gambar dua lapis, plus penjadwal unduhan.
 ///
-/// - **L1 (memori)**: `NSCache` dengan batas jumlah *dan* batas biaya (perkiraan
-///   byte gambar setelah didekode), supaya scroll ribuan foto tidak menekan
-///   memori. `NSCache` melepas isinya sendiri saat sistem kekurangan memori.
-/// - **L2 (disk)**: file dengan nama SHA256 dari key (stabil lintas sesi),
-///   dievict secara LRU saat melewati batas ukuran.
+/// Tiga hal yang membedakannya dari versi sebelumnya, dan ketiganya penyebab
+/// panas serta tersendat saat menggulir perpustakaan besar:
+///
+/// 1. **Byte dari server disimpan APA ADANYA.** Dulu tiap gambar di-decode lalu
+///    di-encode ulang jadi JPEG sebelum ditulis ke disk — satu decode dan satu
+///    encode penuh untuk setiap thumbnail yang lewat di layar.
+/// 2. **Decode dilakukan sekali, langsung di ukuran tampil,** lewat ImageIO di
+///    luar main thread. `UIImage(data:)` menunda decode sampai frame digambar,
+///    jadi seluruh biayanya jatuh ke main thread tepat saat menggulir.
+/// 3. **Permintaan yang sama digabung dan jumlah unduhan serentak dibatasi.**
+///    Tanpa itu, gulir cepat melepas ratusan permintaan sekaligus yang saling
+///    memperlambat — dan sebagian besar hasilnya sudah tidak terlihat lagi.
+/// Cache memori gambar — SENGAJA di luar actor.
+///
+/// `NSCache` sudah aman diakses dari thread mana pun, jadi menaruhnya di dalam
+/// actor tidak menambah keamanan apa pun; yang ia tambahkan hanyalah penantian.
+/// Dan penantian itu terjadi justru di jalur tersibuk: setiap sel yang kembali
+/// ke layar, setiap perpindahan tab, setiap gulir balik — semuanya gambar yang
+/// SUDAH ada di memori, tapi tetap harus antre di belakang decode dan unduhan
+/// yang sedang berjalan.
+///
+/// Sekarang cache hit dijawab seketika, di thread pemanggil, tanpa `await`.
+final class ImageMemoryCache: @unchecked Sendable {
+    static let shared = ImageMemoryCache()
+
+    /// Gambar yang SUDAH didecode, dikunci pada ukuran pikselnya.
+    ///
+    /// Satu aset bisa tampil sebagai petak grid dan sebagai layar penuh; keduanya
+    /// butuh ukuran decode yang berbeda dan tidak boleh saling menimpa.
+    private let cache = NSCache<NSString, UIImage>()
+
+    /// `totalCostLimit` adalah plafon, bukan alokasi: `NSCache` hanya menyimpan
+    /// sebanyak yang benar-benar dipakai, dan melepasnya sendiri saat sistem
+    /// kekurangan memori.
+    /// Thumbnail Immich sekitar 250px — setelah didecode kira-kira 250 KB.
+    /// Dua ratus lima puluh entri berarti sekitar 60 MB: cukup untuk beberapa
+    /// layar ke atas dan ke bawah, jauh dari cukup untuk membuat aplikasi
+    /// menggenggam ratusan megabyte tanpa alasan.
+    private static let countLimit = 250
+    private static let costLimit = 64 * 1024 * 1024
+
+    private init() {
+        cache.countLimit = Self.countLimit
+        cache.totalCostLimit = Self.costLimit
+    }
+
+    func image(for key: String) -> UIImage? {
+        cache.object(forKey: key as NSString)
+    }
+
+    func insert(_ image: UIImage, for key: String) {
+        cache.setObject(image, forKey: key as NSString, cost: Self.cost(of: image))
+    }
+
+    func removeAll() {
+        cache.removeAllObjects()
+    }
+
+    /// Perkiraan byte gambar setelah didecode — inilah yang benar-benar menempati
+    /// memori, bukan ukuran file terkompresinya.
+    private static func cost(of image: UIImage) -> Int {
+        guard let cgImage = image.cgImage else { return 1 }
+        return cgImage.bytesPerRow * cgImage.height
+    }
+}
+
+/// Cache disk + penjadwal unduhan dan decode.
 actor ImageCache {
     static let shared = ImageCache()
 
-    private let memoryCache = NSCache<NSString, UIImage>()
     private let diskCacheURL: URL
 
-    /// Batas L1. `totalCostLimit` adalah plafon, bukan alokasi: `NSCache`
-    /// hanya menyimpan sebanyak yang benar-benar dipakai.
-    private static let memoryCountLimit = 400
-    private static let memoryCostLimit = 128 * 1024 * 1024
-
-    /// Batas L2, bisa diubah lewat Settings (UI-nya menyusul di #30).
     private static let diskLimitDefaultsKey = "imageCache.diskLimitBytes"
-    private static let defaultDiskLimit = 250 * 1024 * 1024
+    private static let defaultDiskLimit = 512 * 1024 * 1024
 
     private var maxDiskCacheSize: Int
 
-    nonisolated private static let diskCacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+    /// Total byte L2 yang dipelihara secara berjalan, supaya insert tidak perlu
+    /// memindai seluruh direktori (pemicu tersendat saat scroll).
+    private var runningDiskUsage: Int?
+
+    /// Pekerjaan yang sedang berjalan per (key, ukuran).
+    ///
+    /// Sepuluh sel yang meminta gambar yang sama hanya menghasilkan satu
+    /// unduhan; sisanya menunggu hasil yang sama.
+    private var inFlight: [String: Task<UIImage, Error>] = [:]
+
+    /// Pembatas pekerjaan berat yang berjalan serentak — baca disk, decode, DAN
+    /// unduhan.
+    ///
+    /// Dulu hanya unduhan yang dibatasi, padahal decode-lah yang paling mahal:
+    /// gulir cepat melepas ratusan `Task.detached` yang masing-masing membuka
+    /// piksel sebuah gambar, dan kolam thread kooperatif habis. Sisa aplikasi —
+    /// termasuk penyusunan linimasa — ikut mengantre di belakangnya.
+    private static let maxConcurrentWork = 4
+    private var activeWork = 0
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    /// Jatah TERPISAH untuk prefetch.
+    ///
+    /// Dulu prefetch memakai jatah yang sama dengan gambar yang sedang terlihat.
+    /// Karena prefetch menghangatkan puluhan foto sekaligus, keempat jatahnya
+    /// selalu terisi olehnya — dan foto yang benar-benar ada di layar menunggu
+    /// di belakang foto yang bahkan belum digulir ke sana. Antrean itu tidak
+    /// pernah habis, dan aplikasi berhenti menjawab.
+    private static let maxConcurrentPrefetch = 2
+    private var activePrefetch = 0
+    private var prefetchWaiting: [CheckedContinuation<Void, Never>] = []
+
+    /// Penjaga supaya pemindaian dan pembersihan disk tidak berjalan berlapis.
+    private var isScanning = false
+    private var isEvicting = false
+
+    nonisolated private static let diskCacheDir = FileManager.default
+        .urls(for: .cachesDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("immich-image-cache")
 
     init() {
@@ -34,46 +128,321 @@ actor ImageCache {
         let stored = UserDefaults.standard.integer(forKey: Self.diskLimitDefaultsKey)
         maxDiskCacheSize = stored > 0 ? stored : Self.defaultDiskLimit
 
-        memoryCache.countLimit = Self.memoryCountLimit
-        memoryCache.totalCostLimit = Self.memoryCostLimit
-
-        try? FileManager.default.createDirectory(at: diskCacheURL, withIntermediateDirectories: true)
-        Task { await purgeLegacyFiles() }
+        try? FileManager.default.createDirectory(
+            at: diskCacheURL, withIntermediateDirectories: true)
     }
 
-    func image(for key: String) -> UIImage? {
-        if let cached = memoryCache.object(forKey: key as NSString) {
+    // MARK: - Jalur utama
+
+    /// Mengembalikan gambar siap gambar untuk `key`, mengunduh hanya bila perlu.
+    ///
+    /// - Parameter maxPixelSize: sisi terpanjang yang benar-benar dibutuhkan di
+    ///   layar. Petak grid tidak perlu didecode pada 1440px hanya untuk
+    ///   ditampilkan setinggi 130pt.
+    ///
+    ///   `nil` berarti pakai ukuran aslinya. Untuk layar detail itu yang benar:
+    ///   endpoint `preview` sudah mengirim gambar seukuran yang pantas, dan
+    ///   menebak-nebak lebar layar hanya menghasilkan angka ajaib yang salah di
+    ///   sebagian perangkat.
+    /// - Parameter fetch: cara mengambil byte-nya kalau belum ada di disk.
+    func image(
+        key: String,
+        maxPixelSize: Int?,
+        isPrefetch: Bool = false,
+        fetch: @escaping @Sendable () async throws -> Data
+    ) async throws -> UIImage {
+        let memoryKey = Self.memoryKey(key, maxPixelSize)
+
+        if let cached = ImageMemoryCache.shared.image(for: memoryKey) {
             return cached
         }
 
+        if let running = inFlight[memoryKey] {
+            return try await running.value
+        }
+
+        let task = Task<UIImage, Error> { [weak self] in
+            guard let self else { throw CancellationError() }
+            return try await self.produce(
+                key: key, memoryKey: memoryKey,
+                maxPixelSize: maxPixelSize, isPrefetch: isPrefetch, fetch: fetch)
+        }
+        inFlight[memoryKey] = task
+
+        defer { inFlight[memoryKey] = nil }
+        return try await task.value
+    }
+
+    /// Menghangatkan gambar SEBELUM selnya sampai di layar.
+    ///
+    /// Tanpa ini, sebuah foto baru mulai dimuat pada saat ia sudah terlihat — dan
+    /// pada gulir cepat ia sudah lewat sebelum gambarnya datang. Yang tampak
+    /// hanyalah petak abu-abu, sementara pekerjaannya tetap dibayar.
+    ///
+    /// Prioritasnya rendah dan hasilnya dibuang: yang dituju cuma mengisi cache.
+    /// - Parameter onFailure: dikabari untuk key yang gagal. Kegagalan prefetch
+    ///   biasanya memang tidak menarik — tapi kegagalan yang berarti "aset ini
+    ///   tidak bisa dibaca lagi" harus diketahui SEKARANG, selagi selnya masih di
+    ///   luar layar. Kalau menunggu sampai selnya terlihat, pembuangannya terjadi
+    ///   tepat di depan mata pengguna.
+    nonisolated func prefetch(
+        keys: [String],
+        maxPixelSize: Int?,
+        fetch: @escaping @Sendable (String) async throws -> Data,
+        onFailure: (@Sendable (String, Error) -> Void)? = nil
+    ) {
+        Task(priority: .background) {
+            for key in keys {
+                // Sudah ada di memori — tidak ada yang perlu dikerjakan.
+                let memoryKey = Self.memoryKey(key, maxPixelSize)
+                if ImageMemoryCache.shared.image(for: memoryKey) != nil { continue }
+
+                do {
+                    _ = try await image(
+                        key: key,
+                        maxPixelSize: maxPixelSize,
+                        isPrefetch: true,
+                        fetch: { try await fetch(key) })
+                } catch {
+                    onFailure?(key, error)
+                }
+            }
+        }
+    }
+
+    private func produce(
+        key: String,
+        memoryKey: String,
+        maxPixelSize: Int?,
+        isPrefetch: Bool,
+        fetch: @Sendable () async throws -> Data
+    ) async throws -> UIImage {
         let diskPath = diskCacheURL.appendingPathComponent(hashKey(key))
-        if let data = try? Data(contentsOf: diskPath), let image = UIImage(data: data) {
-            memoryCache.setObject(image, forKey: key as NSString, cost: Self.cost(of: image))
+
+        // Jatah diambil SEBELUM pekerjaan apa pun, termasuk baca disk.
+        await acquireSlot(isPrefetch: isPrefetch)
+        defer { releaseSlot(isPrefetch: isPrefetch) }
+
+        // Diperiksa setelah mengantre, bukan hanya setelah mengunduh.
+        //
+        // Sel yang sudah tergulir jauh dari layar sempat menunggu giliran di
+        // sini; melanjutkannya berarti membayar decode untuk gambar yang tidak
+        // akan dilihat siapa pun, sementara sel yang benar-benar terlihat
+        // menunggu di belakangnya.
+        try Task.checkCancellation()
+
+        // Baca disk DAN decode dilakukan di luar actor, dalam satu perjalanan.
+        //
+        // Keduanya sinkron dan memakan waktu. Dijalankan di actor, setiap sel
+        // yang lewat di layar harus mengantre di belakang sel sebelumnya —
+        // seluruh I/O gambar berubah jadi satu barisan tunggal, dan itulah yang
+        // terasa sebagai tersendat saat menggulir cepat.
+        //
+        // Actor tetap memegang pembukuannya: cache memori, tabel permintaan yang
+        // sedang berjalan, dan jatah unduhan.
+        if let image = await Self.loadFromDisk(diskPath, maxPixelSize: maxPixelSize) {
             touch(diskPath)
+            remember(image, for: memoryKey)
             return image
         }
-        return nil
+
+        let data = try await fetch()
+        try Task.checkCancellation()
+
+        store(data, at: diskPath)
+
+        guard let image = await Self.decode(data, maxPixelSize: maxPixelSize) else {
+            throw APIError.unknown
+        }
+        remember(image, for: memoryKey)
+        return image
     }
 
-    func insert(_ img: UIImage, for key: String) {
-        memoryCache.setObject(img, forKey: key as NSString, cost: Self.cost(of: img))
+    /// Membaca berkas cache lalu men-decode-nya, seluruhnya di luar actor.
+    ///
+    /// Berkas yang gagal di-decode dibuang di tempat: isinya rusak (mis. tulisan
+    /// terpotong karena aplikasi ditutup), dan menyimpannya berarti percobaan
+    /// berikutnya gagal dengan cara yang sama, selamanya.
+    nonisolated private static func loadFromDisk(
+        _ path: URL,
+        maxPixelSize: Int?
+    ) async -> UIImage? {
+        await Task.detached(priority: .utility) {
+            // Dibaca biasa, BUKAN `.mappedIfSafe`.
+            //
+            // Pemetaan berkas menambahkan halaman ke jejak memori proses dan
+            // menahannya sampai sistem memutuskan membuangnya. Untuk ribuan
+            // thumbnail berukuran ratusan kilobyte, pemetaan tidak memberi
+            // keuntungan apa pun — tapi jejak memorinya menumpuk sampai ratusan
+            // megabyte yang tidak pernah turun.
+            guard let data = try? Data(contentsOf: path) else { return nil }
 
-        if let data = img.jpegData(compressionQuality: 0.8) {
-            let diskPath = diskCacheURL.appendingPathComponent(hashKey(key))
-            try? data.write(to: diskPath)
-            evictIfNeeded()
+            if let image = decodeSync(data, maxPixelSize: maxPixelSize) {
+                return image
+            }
+            try? FileManager.default.removeItem(at: path)
+            return nil
+        }.value
+    }
+
+    // MARK: - Decode
+
+    /// Decode (dan perkecil kalau diminta) di luar main thread.
+    ///
+    /// `kCGImageSourceShouldCacheImmediately` memaksa pikselnya dibongkar di
+    /// sini juga; tanpa itu Core Graphics menundanya sampai frame digambar, dan
+    /// seluruh biayanya jatuh ke main thread persis saat jari sedang menggulir.
+    nonisolated private static func decode(
+        _ data: Data,
+        maxPixelSize: Int?
+    ) async -> UIImage? {
+        await Task.detached(priority: .utility) {
+            decodeSync(data, maxPixelSize: maxPixelSize)
+        }.value
+    }
+
+    nonisolated private static func decodeSync(
+        _ data: Data,
+        maxPixelSize: Int?
+    ) -> UIImage? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions)
+        else { return nil }
+
+        var options: [CFString: Any] = [
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+
+        guard let maxPixelSize else {
+            // Ukuran asli, tapi tetap dibongkar sekarang juga.
+            let cgImage = CGImageSourceCreateImageAtIndex(
+                source, 0, options as CFDictionary)
+            return cgImage.map(UIImage.init(cgImage:))
+        }
+
+        options[kCGImageSourceCreateThumbnailFromImageAlways] = true
+        options[kCGImageSourceCreateThumbnailWithTransform] = true
+        options[kCGImageSourceThumbnailMaxPixelSize] = maxPixelSize
+
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(
+            source, 0, options as CFDictionary)
+        else { return nil }
+
+        return UIImage(cgImage: cgImage)
+    }
+
+    // MARK: - Penyimpanan
+
+    /// Kunci cache memori: satu aset bisa punya beberapa ukuran decode.
+    nonisolated static func memoryKey(_ key: String, _ maxPixelSize: Int?) -> String {
+        maxPixelSize.map { "\(key)@\($0)" } ?? "\(key)@full"
+    }
+
+    private func remember(_ image: UIImage, for memoryKey: String) {
+        ImageMemoryCache.shared.insert(image, for: memoryKey)
+    }
+
+    /// Penulisan ke disk dilepas sebagai pekerjaan latar.
+    ///
+    /// Pemanggilnya sedang menunggu gambarnya, bukan menunggu berkasnya tersimpan
+    /// — dan menahannya di actor akan memblokir permintaan gambar berikutnya.
+    private func store(_ data: Data, at path: URL) {
+        Task.detached(priority: .background) {
+            try? data.write(to: path, options: .atomic)
+        }
+
+        guard let usage = runningDiskUsage else {
+            // Ukuran cache belum diketahui. Memindai direktori berisi ribuan
+            // berkas itu lambat, dan di actor ia menahan SELURUH permintaan
+            // gambar berikutnya — jadi dijalankan di latar, hasilnya menyusul.
+            startUsageScan()
+            return
+        }
+
+        runningDiskUsage = usage + data.count
+        if usage + data.count > maxDiskCacheSize { startEviction() }
+    }
+
+    /// Menghitung ukuran cache di latar, lalu menyimpan hasilnya.
+    private func startUsageScan() {
+        guard !isScanning else { return }
+        isScanning = true
+
+        let directory = diskCacheURL
+        Task { [weak self] in
+            let total = await Self.scan(directory).total
+            await self?.finishUsageScan(total)
         }
     }
 
-    func clear() {
-        memoryCache.removeAllObjects()
-        try? FileManager.default.removeItem(at: diskCacheURL)
-        try? FileManager.default.createDirectory(at: diskCacheURL, withIntermediateDirectories: true)
+    private func finishUsageScan(_ total: Int) {
+        isScanning = false
+        runningDiskUsage = total
+        if total > maxDiskCacheSize { startEviction() }
     }
 
-    /// Total byte yang dipakai L2 saat ini.
-    func diskCacheSize() -> Int {
-        scanDiskCache().total
+    /// Membuang berkas terlama di latar sampai kembali di bawah batas.
+    private func startEviction() {
+        guard !isEvicting else { return }
+        isEvicting = true
+
+        let directory = diskCacheURL
+        let limit = maxDiskCacheSize
+        Task { [weak self] in
+            let remaining = await Self.evict(in: directory, limit: limit)
+            await self?.finishEviction(remaining)
+        }
+    }
+
+    private func finishEviction(_ remaining: Int) {
+        isEvicting = false
+        runningDiskUsage = remaining
+    }
+
+    // MARK: - Pembatas unduhan
+
+    private func acquireSlot(isPrefetch: Bool) async {
+        if isPrefetch {
+            guard activePrefetch >= Self.maxConcurrentPrefetch else {
+                activePrefetch += 1
+                return
+            }
+            await withCheckedContinuation { prefetchWaiting.append($0) }
+            activePrefetch += 1
+        } else {
+            guard activeWork >= Self.maxConcurrentWork else {
+                activeWork += 1
+                return
+            }
+            await withCheckedContinuation { waiting.append($0) }
+            activeWork += 1
+        }
+    }
+
+    private func releaseSlot(isPrefetch: Bool) {
+        if isPrefetch {
+            activePrefetch -= 1
+            guard !prefetchWaiting.isEmpty else { return }
+            prefetchWaiting.removeFirst().resume()
+        } else {
+            activeWork -= 1
+            guard !waiting.isEmpty else { return }
+            waiting.removeFirst().resume()
+        }
+    }
+
+    // MARK: - Pemeliharaan
+
+    func clear() {
+        ImageMemoryCache.shared.removeAll()
+        try? FileManager.default.removeItem(at: diskCacheURL)
+        try? FileManager.default.createDirectory(
+            at: diskCacheURL, withIntermediateDirectories: true)
+        runningDiskUsage = 0
+    }
+
+    func diskCacheSize() async -> Int {
+        await Self.scan(diskCacheURL).total
     }
 
     func diskCacheLimit() -> Int {
@@ -83,95 +452,80 @@ actor ImageCache {
     func setDiskCacheLimit(_ bytes: Int) {
         maxDiskCacheSize = max(16 * 1024 * 1024, bytes)
         UserDefaults.standard.set(maxDiskCacheSize, forKey: Self.diskLimitDefaultsKey)
-        evictIfNeeded()
-    }
-
-    /// Perkiraan byte gambar setelah didekode — inilah yang benar-benar
-    /// menempati memori, bukan ukuran file JPEG-nya.
-    nonisolated private static func cost(of image: UIImage) -> Int {
-        guard let cgImage = image.cgImage else { return 1 }
-        return cgImage.bytesPerRow * cgImage.height
+        startEviction()
     }
 
     /// Menandai file sebagai baru dipakai, supaya eviction yang mengurutkan
-    /// berdasarkan tanggal modifikasi benar-benar LRU (bukan sekadar FIFO
-    /// menurut kapan file ditulis).
+    /// berdasarkan tanggal modifikasi benar-benar LRU.
     ///
     /// Hanya ditulis kalau stempelnya sudah cukup lama, supaya scroll panjang
     /// tidak berubah jadi ribuan penulisan metadata.
     private func touch(_ url: URL) {
-        let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
-        if let modified, Date().timeIntervalSince(modified) < Self.touchInterval { return }
-        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
-    }
-
-    private static let touchInterval: TimeInterval = 60 * 60
-
-    private func scanDiskCache() -> (total: Int, files: [(url: URL, date: Date, size: Int)]) {
-        let fileManager = FileManager.default
-        guard let contents = try? fileManager.contentsOfDirectory(at: diskCacheURL, includingPropertiesForKeys: [.contentModificationDateKey]) else {
-            return (0, [])
-        }
-
-        var totalSize = 0
-        var files: [(url: URL, date: Date, size: Int)] = []
-
-        for fileURL in contents {
-            guard let attrs = try? fileManager.attributesOfItem(atPath: fileURL.path),
-                  let size = attrs[.size] as? Int else { continue }
-
-            totalSize += size
-            let date = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
-            files.append((fileURL, date, size))
-        }
-
-        return (totalSize, files)
-    }
-
-    private func evictIfNeeded() {
-        let fileManager = FileManager.default
-        var (totalSize, files) = scanDiskCache()
-
-        guard totalSize > maxDiskCacheSize else { return }
-
-        // Buang yang paling lama dulu sampai turun ke bawah batas dengan
-        // sisa ruang 25%, supaya eviction tidak terpicu lagi tiap insert.
-        // Ukuran dibaca dari hasil scan di atas — bukan dari file yang sudah
-        // dihapus (yang selalu gagal dan dulu membuat seluruh cache terkuras).
-        files.sort { $0.date < $1.date }
-        let target = maxDiskCacheSize - maxDiskCacheSize / 4
-
-        for file in files {
-            if totalSize <= target { break }
-            try? fileManager.removeItem(at: file.url)
-            totalSize -= file.size
+        // Di latar: ini murni pembukuan untuk eviction, dan tidak ada yang
+        // menunggunya.
+        Task.detached(priority: .background) {
+            let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate
+            if let modified, Date().timeIntervalSince(modified) < touchInterval { return }
+            try? FileManager.default.setAttributes(
+                [.modificationDate: Date()], ofItemAtPath: url.path)
         }
     }
 
-    /// Sisa file dari skema key lama (`hashValue`, nama berupa angka desimal).
-    /// File-file itu tidak akan pernah kena hit lagi, jadi dibuang sekali saja
-    /// supaya tidak menghabiskan kuota disk cache.
-    private func purgeLegacyFiles() {
-        let fileManager = FileManager.default
-        guard let contents = try? fileManager.contentsOfDirectory(at: diskCacheURL, includingPropertiesForKeys: nil) else {
-            return
-        }
+    /// Pemindaian direktori — selalu di luar actor.
+    nonisolated private static func scan(
+        _ directory: URL
+    ) async -> (total: Int, files: [(url: URL, date: Date, size: Int)]) {
+        await Task.detached(priority: .utility) {
+            let fileManager = FileManager.default
+            guard let contents = try? fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey])
+            else { return (0, []) }
 
-        for fileURL in contents where !Self.isStableKeyFilename(fileURL.lastPathComponent) {
-            try? fileManager.removeItem(at: fileURL)
-        }
+            var totalSize = 0
+            var files: [(url: URL, date: Date, size: Int)] = []
+
+            for fileURL in contents {
+                let values = try? fileURL.resourceValues(
+                    forKeys: [.contentModificationDateKey, .fileSizeKey])
+                guard let size = values?.fileSize else { continue }
+                totalSize += size
+                files.append((fileURL, values?.contentModificationDate ?? Date(), size))
+            }
+
+            return (totalSize, files)
+        }.value
     }
 
-    nonisolated private static func isStableKeyFilename(_ name: String) -> Bool {
-        name.count == 64 && name.allSatisfy(\.isHexDigit)
+    /// Membuang berkas terlama sampai turun ke bawah batas dengan sisa ruang 25%,
+    /// supaya eviction tidak terpicu lagi pada penyimpanan berikutnya.
+    ///
+    /// - Returns: sisa pemakaian disk setelah pembersihan.
+    nonisolated private static func evict(in directory: URL, limit: Int) async -> Int {
+        var (totalSize, files) = await scan(directory)
+        guard totalSize > limit else { return totalSize }
+
+        return await Task.detached(priority: .utility) {
+            let fileManager = FileManager.default
+            files.sort { $0.date < $1.date }
+            let target = limit - limit / 4
+
+            for file in files {
+                if totalSize <= target { break }
+                try? fileManager.removeItem(at: file.url)
+                totalSize -= file.size
+            }
+            return totalSize
+        }.value
     }
 
     /// Nama file disk untuk sebuah cache key.
     ///
     /// Harus **stabil lintas proses**: `String.hashValue` di Swift di-seed acak
-    /// tiap app dijalankan, jadi nama file lama berubah tiap app dibuka dan
-    /// disk cache tidak pernah hit di sesi berikutnya. SHA256 selalu
-    /// menghasilkan nama yang sama untuk key yang sama.
+    /// tiap app dijalankan, jadi nama file lama berubah tiap app dibuka dan disk
+    /// cache tidak pernah hit di sesi berikutnya. SHA256 selalu menghasilkan nama
+    /// yang sama untuk key yang sama.
     nonisolated private func hashKey(_ key: String) -> String {
         SHA256.hash(data: Data(key.utf8))
             .map { String(format: "%02x", $0) }
@@ -179,31 +533,77 @@ actor ImageCache {
     }
 }
 
+/// Jarak minimum antar penulisan stempel waktu berkas cache.
+///
+/// Tanpa ini, menggulir panjang berubah jadi ribuan penulisan metadata — padahal
+/// yang dibutuhkan eviction hanya urutan kasar "mana yang lama dipakai".
+private let touchInterval: TimeInterval = 60 * 60
+
+// MARK: - View
+
 @MainActor
 struct AuthImage: View {
     let assetId: String
     var size: String = "thumbnail"
     /// Thumbhash asset, kalau ada — dipakai sebagai placeholder blur instan
-    /// sebelum thumbnail asli datang.
+    /// sebelum gambar aslinya datang.
     var thumbhash: String? = nil
+    /// Path kustom (mis. "/people/{id}/thumbnail"); default thumbnail aset.
+    var path: String? = nil
+    /// `.fill` (default) untuk grid/thumbnail yang memang dipotong ke kotak;
+    /// `.fit` untuk tampilan detail supaya gambar tidak pernah ter-crop meski
+    /// rasio metadata sedikit meleset dari rasio file aslinya.
+    var contentMode: ContentMode = .fill
+    /// Batas sisi terpanjang, kalau pemanggil tahu ruangnya jauh lebih kecil
+    /// daripada bawaan `size`.
+    ///
+    /// Kartu memori setinggi 240pt tidak butuh bitmap 2048px — itu 12 MB untuk
+    /// petak yang tidak pernah lebih dari 720px. `nil` berarti ikut bawaan.
+    var pixelSize: Int? = nil
 
     @Environment(SessionManager.self) private var session
-    @State private var image: UIImage?
+    /// TIDAK ada `UIImage` yang disimpan di sini.
+    ///
+    /// Inilah sumber memori yang tidak pernah turun. `LazyVGrid` membuat view
+    /// selnya secara malas, tapi ia TIDAK membuangnya lagi saat selnya keluar
+    /// layar — state milik view itu tetap hidup selama scroll view-nya hidup.
+    /// Dengan `@State image: UIImage?`, setiap sel yang PERNAH terlihat menahan
+    /// bitmap hasil decode-nya selamanya. Menggulir melewati tiga ribu foto
+    /// berarti tiga ribu bitmap tertahan — ratusan megabyte yang tidak pernah
+    /// dilepas, persis grafik datar yang kamu lihat.
+    ///
+    /// Sekarang bitmap hanya dimiliki `ImageMemoryCache`, yang punya batas dan
+    /// membuang sendiri isinya. Yang tersimpan di view cuma penanda revisi untuk
+    /// memicu gambar ulang saat pemuatan selesai.
+    ///
+    /// Nilainya HARUS ikut dibaca saat `body` dijalankan — lihat
+    /// `displayedImage(revision:)`.
+    ///
+    /// Memakai `.id(revision)` justru salah: itu mengganti IDENTITAS view, jadi
+    /// `task` di dalamnya ikut dimulai ulang setiap gambar selesai dimuat.
+    @State private var revision = 0
     @State private var hasError = false
 
-    private var placeholder: UIImage? {
-        ThumbHash.placeholder(for: thumbhash)
-    }
-
     var body: some View {
-        ZStack {
-            // Lapisan bawah selalu ada, jadi tidak pernah ada kotak kosong dan
-            // gambar asli bisa muncul dengan crossfade di atasnya.
-            if let placeholder {
-                Image(uiImage: placeholder)
+        // Dibaca DI SINI, bukan di dalam `ZStack`.
+        //
+        // SwiftUI menghubungkan sebuah view ke `@State` hanya ketika nilainya
+        // benar-benar dibaca selama `body` berjalan. `@State` yang cuma DITULIS
+        // tidak menggambar ulang apa pun — tidak ada ketergantungan yang pernah
+        // terbentuk.
+        //
+        // Itulah bug "gambar baru muncul setelah baris ditutup lalu dibuka
+        // lagi": pemuatan selesai, gambarnya masuk cache, `revision` naik — dan
+        // tidak terjadi apa-apa. Yang memunculkannya bukan pemuatan itu,
+        // melainkan pembangunan ulang view-nya, dan pada saat itu gambarnya
+        // memang sudah ada di cache sehingga terlihat seketika.
+        let shown = displayedImage(revision: revision)
+
+        return ZStack {
+            if let shown {
+                Image(uiImage: shown)
                     .resizable()
-                    .scaledToFill()
-                    .accessibilityHidden(true)
+                    .aspectRatio(contentMode: contentMode)
             } else if hasError {
                 Rectangle()
                     .fill(.fill.tertiary)
@@ -212,47 +612,105 @@ struct AuthImage: View {
                             .foregroundStyle(.secondary)
                     }
             } else {
-                Rectangle()
-                    .fill(.fill.quaternary)
-            }
-
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .transition(.opacity)
+                Rectangle().fill(.fill.quaternary)
             }
         }
-        .task(id: assetId) {
-            await load()
+        .task(id: cacheKey) { await load() }
+    }
+
+    /// Selalu dari cache, tidak pernah dari state view.
+    ///
+    /// Kalau versi tajamnya belum ada, thumbnail seukuran grid dipakai lebih
+    /// dulu; kalau itu pun belum ada, barulah thumbhash. Ketiganya murah dicari
+    /// dan tidak satu pun ditahan oleh view ini.
+    ///
+    /// - Parameter revision: isinya TIDAK dipakai. Ia parameter, bukan properti
+    ///   yang dibaca di dalam badan fungsi, supaya pembacaannya terjadi di
+    ///   `body` dan tidak bisa hilang — bentuk `_ = revision` di dalam sini
+    ///   terlihat seperti baris tak berguna dan akan dihapus orang berikutnya.
+    private func displayedImage(revision: Int) -> UIImage? {
+        if let image = ImageMemoryCache.shared.image(for: memoryKey) { return image }
+        if let thumbnailMemoryKey,
+           let thumbnail = ImageMemoryCache.shared.image(for: thumbnailMemoryKey) {
+            return thumbnail
+        }
+        return ThumbHash.placeholder(for: thumbhash)
+    }
+
+    private var cacheKey: String {
+        path ?? "\(assetId)-\(size)"
+    }
+
+    private var memoryKey: String {
+        ImageCache.memoryKey(cacheKey, maxPixelSize)
+    }
+
+    /// Sisi terpanjang yang benar-benar dibutuhkan di layar.
+    ///
+    /// Petak grid tidak perlu bitmap 1440px hanya untuk mengisi ruang 130pt.
+    /// Layar detail pun tidak perlu ukuran penuh: 2048px sudah melampaui
+    /// resolusi layar mana pun, sementara membongkar bitmap 4000px berarti
+    /// puluhan megabyte dan puluhan milidetik untuk setiap usapan halaman.
+    private var maxPixelSize: Int? {
+        if let pixelSize { return pixelSize }
+        switch size {
+        case "preview", "fullsize": return 2048
+        default: return 600
         }
     }
 
+    /// Kunci thumbnail dari aset yang sama, seukuran grid.
+    ///
+    /// Layar detail hampir selalu dibuka dari grid, jadi versi kecilnya sudah
+    /// ada di memori. Menampilkannya lebih dulu membuat foto muncul SEKETIKA,
+    /// lalu dipertajam saat preview-nya datang — inilah yang membuat aplikasi
+    /// resmi terasa tanpa loading.
+    private var thumbnailMemoryKey: String? {
+        guard path == nil, size != "thumbnail" else { return nil }
+        return ImageCache.memoryKey("\(assetId)-thumbnail", 600)
+    }
+
     private func load() async {
-        let key = "\(assetId)-\(size)"
+        let key = cacheKey
 
-        // Cache hit tidak perlu crossfade — gambarnya sudah ada, memudarkannya
-        // justru terasa seperti lag.
-        if let cached = await ImageCache.shared.image(for: key) {
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) { image = cached }
-            return
-        }
+        // Sudah tergambar dari cache di `body`; tidak ada yang perlu dikerjakan.
+        if ImageMemoryCache.shared.image(for: memoryKey) != nil { return }
 
-        hasError = false
+        let endpoint = Endpoint(
+            path: path ?? "/assets/\(assetId)/thumbnail",
+            query: path == nil ? [.init(name: "size", value: size)] : [])
+        // Satu klien untuk seluruh gambar, bukan satu per sel. Objeknya memang
+        // ringan, tapi membuatnya ribuan kali per gulir tetap sampah yang tidak
+        // perlu ada.
+        let api = session.imageAPI
 
         do {
-            let api = APIClient(session: session)
-            let data = try await api.rawData(.init(
-                path: "/assets/\(assetId)/thumbnail",
-                query: [.init(name: "size", value: size)]))
+            let loaded = try await ImageCache.shared.image(
+                key: key,
+                maxPixelSize: maxPixelSize,
+                fetch: { try await api.rawData(endpoint) })
 
-            if let ui = UIImage(data: data) {
-                await ImageCache.shared.insert(ui, for: key)
-                withAnimation(.easeOut(duration: 0.2)) { image = ui }
-            }
+            // Hasilnya DIPASANG meski task-nya sudah dibatalkan.
+            //
+            // Dulu di sini ada `guard !Task.isCancelled else { return }`, dan
+            // itulah sumber "gambar tidak muncul sampai barisnya ditutup lalu
+            // dibuka lagi". Gambarnya sudah terlanjur diunduh, didecode, dan
+            // masuk cache — yang dibatalkan hanya penantiannya. View ini tidak
+            // menyimpan gambar apa pun; ia MEMBACA cache setiap kali digambar,
+            // dan `revision` cuma pemicu gambar ulang. Membuang pemicu itu
+            // berarti view yang masih ada di layar tetap abu-abu padahal
+            // gambarnya sudah siap, dan satu-satunya cara memunculkannya adalah
+            // membangun ulang view-nya — persis yang terjadi saat baris dilipat
+            // lalu dibuka lagi.
+            //
+            // Menulis `@State` milik view yang memang sudah tidak ada tidak
+            // berbahaya: SwiftUI mengabaikannya.
+            _ = loaded
+            revision &+= 1
+        } catch is CancellationError {
+            // Digulir lewat; bukan kegagalan.
         } catch {
+            guard thumbhash == nil else { return }
             hasError = true
         }
     }

@@ -1,106 +1,187 @@
 import SwiftUI
 
+/// Detail album: sampul besar + grid, memakai `PhotoCollectionScreen`.
+///
+/// Yang tersisa di sini hanyalah hal-hal yang MEMANG khas album — menu Edit /
+/// Add User / Shared Link / Delete, sheet menambah foto, dan arti khusus
+/// "keluarkan dari album". Tata letak, mode pilih, dan context menu-nya dipakai
+/// bersama dengan Favorites dan foto per orang.
 struct AlbumDetailView: View {
     let album: AlbumResponseDTO
+
     @Environment(SessionManager.self) private var session
+    @Environment(\.dismiss) private var dismiss
     @State private var vm: AlbumDetailViewModel?
-    @Namespace private var sourceNamespace
-    private let columns = [GridItem(.adaptive(minimum: 110), spacing: 2)]
+    @State private var showAddSheet = false
+    @State private var showDeleteConfirm = false
+    @State private var showEditSheet = false
+    @State private var showAddUserSheet = false
+    @State private var sharedLink: SharedLinkPresentation?
+    @State private var albumPickerSelection: SelectedAssetIDs?
+    @State private var albumPickerAsset: AssetLite?
+    @State private var actionMessage: ErrorEvent?
+    /// Salinan lokal album, supaya hasil sunting langsung terlihat di sampul
+    /// tanpa menunggu daftar album di layar sebelumnya dimuat ulang.
+    @State private var editedAlbum: AlbumResponseDTO?
 
     var body: some View {
-        content
-            .navigationTitle(album.albumName)
-            .navigationBarTitleDisplayMode(.inline)
-            .task {
-                if vm == nil {
-                    let api = APIClient(session: session)
-                    let repo = AlbumRepository(api: api)
-                    vm = AlbumDetailViewModel(repo: repo)
-                }
-                await vm?.loadAlbumDetail(album.id)
+        screen
+            .sheet(isPresented: $showAddSheet) { addSheet }
+            .sheet(isPresented: $showEditSheet) { editSheet }
+            .sheet(isPresented: $showAddUserSheet) { addUserSheet }
+            .sheet(item: $sharedLink) { link in
+                ShareSheet(url: link.url)
             }
+            .sheet(item: $albumPickerAsset) { asset in
+                albumPicker(for: [asset.id])
+            }
+            .sheet(item: $albumPickerSelection) { selection in
+                albumPicker(for: selection.ids)
+            }
+            .errorToast($actionMessage)
+            .confirmationDialog(
+                "Delete Album",
+                isPresented: $showDeleteConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Delete", role: .destructive) { deleteAlbum() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("The photos will stay in your library.")
+            }
+            .task { await start() }
     }
 
-    @ViewBuilder
-    private var content: some View {
-        if let vm {
-            switch vm.phase {
-            case .idle, .loading:
-                ProgressView()
+    private var screen: some View {
+        PhotoCollectionScreen(
+            title: LocalizedStringKey(currentAlbum.albumName),
+            subtitle: currentAlbum.description,
+            assets: assets,
+            phase: vm?.phase ?? .loading,
+            onRetry: { Task { await vm?.retry(album.id) } },
+            onToggleFavorite: { await vm?.toggleFavorite($0) },
+            onDelete: { await vm?.deleteAssets($0) },
+            shareURLs: { await vm?.shareURLs(for: $0) ?? [] },
+            onAddPhotos: { showAddSheet = true },
+            removal: PhotoCollectionRemoval(title: "Remove from Album") { ids in
+                await vm?.removeAssets(ids, from: album.id)
+            },
+            onAddToAlbum: { albumPickerAsset = $0 },
+            onFavoriteSelection: { await vm?.setFavorite($0, to: true) },
+            onArchiveSelection: { await vm?.setArchived($0, to: true) },
+            onMoveToLocked: { await vm?.setLocked($0) },
+            onShareLink: { createAssetLink(for: $0) },
+            selectionMenu: selectionMenu,
+            options: {
+                // Isinya sama persis dengan context menu di daftar album —
+                // lihat AlbumActionsMenu.
+                AlbumActionsMenu(
+                    onEdit: { showEditSheet = true },
+                    onAddUser: { showAddUserSheet = true },
+                    onCreateLink: { createSharedLink() },
+                    onDelete: { showDeleteConfirm = true })
+            })
+    }
 
-            case .loaded:
-                if vm.assets.isEmpty {
-                    emptyState
-                } else {
-                    grid
-                }
+    private func start() async {
+        if vm == nil {
+            let api = APIClient(session: session)
+            vm = AlbumDetailViewModel(
+                timelineRepo: TimelineRepository(api: api),
+                albumRepo: AlbumRepository(api: api),
+                assetRepo: AssetDetailRepository(api: api))
+        }
+        await vm?.loadAlbumDetail(album.id)
+    }
 
-            case .failed(let error):
-                errorState(error, vm)
-            }
-        } else {
-            ProgressView()
+    private var assets: [AssetLite] {
+        vm?.assets ?? []
+    }
+
+    private var currentAlbum: AlbumResponseDTO {
+        editedAlbum ?? album
+    }
+
+    // MARK: - Sheet khas album
+
+    private var editSheet: some View {
+        AlbumEditSheet(album: currentAlbum) { name, description in
+            var updated = currentAlbum
+            updated.albumName = name.trimmingCharacters(in: .whitespaces)
+            updated.description = description
+            editedAlbum = updated
+            Task { await vm?.updateAlbum(album.id, name: name, description: description) }
         }
     }
 
-    @ViewBuilder
-    private var grid: some View {
-        if let vm {
-            ScrollView {
-                LazyVGrid(columns: columns, spacing: 2) {
-                    ForEach(vm.assets) { asset in
-                        NavigationLink(value: asset) {
-                            AuthImage(assetId: asset.id, thumbhash: asset.thumbhash)
-                                .aspectRatio(asset.ratio, contentMode: .fill)
-                                .clipped()
-                        }
-                    }
+    private var addUserSheet: some View {
+        AlbumAddUserSheet(album: currentAlbum) { userIDs in
+            Task { await vm?.addUsers(userIDs, to: album.id) }
+        }
+    }
+
+    private var addSheet: some View {
+        AddPhotosToAlbumSheet(existingIDs: Set(assets.map(\.id))) { ids in
+            Task { await vm?.addAssets(ids, to: album.id) }
+        }
+    }
+
+    /// Menu elipsis mode pilih — isinya sama dengan Photos.
+    ///
+    /// "Move to Locked Folder" ditambahkan `PhotoCollectionScreen` sendiri dari
+    /// `onMoveToLocked`, supaya semua layar memakai susunan yang sama.
+    private func selectionMenu(_ ids: Set<String>) -> [SelectionMenuAction] {
+        [
+            SelectionMenuAction(title: "Share Link", systemImage: "link") {
+                createAssetLink(for: Array(ids))
+            },
+            SelectionMenuAction(
+                title: "Add to Album",
+                systemImage: "rectangle.stack.badge.plus"
+            ) {
+                albumPickerSelection = SelectedAssetIDs(ids: Array(ids))
+            },
+        ]
+    }
+
+    private func albumPicker(for ids: [String]) -> some View {
+        AlbumPickerLoader { album in
+            Task {
+                if let message = await vm?.addToOtherAlbum(ids, album: album) {
+                    actionMessage = ErrorEvent(message)
                 }
-                .padding(2)
-            }
-            .navigationDestination(for: AssetLite.self) { asset in
-                let allAssets = vm.assets
-                AssetDetailView(currentAsset: asset, assets: allAssets)
-                    .navigationTransition(.zoom(sourceID: asset.id, in: sourceNamespace))
-                    .toolbarVisibility(.hidden, for: .tabBar)
             }
         }
     }
 
-    @ViewBuilder
-    private var emptyState: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "photo.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
-            Text("No Photos")
-                .font(.headline)
-            Text("Add photos to this album")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+    /// Tautan untuk FOTO, bukan untuk albumnya — dua hal berbeda di layar yang
+    /// sama, jadi namanya dibedakan.
+    private func createAssetLink(for ids: [String]) {
+        guard !ids.isEmpty else { return }
+        let repo = SharedLinkRepository(api: APIClient(session: session))
+        Task {
+            guard let link = try? await repo.create(assetIds: ids),
+                  let url = link.publicURL(base: session.baseURL)
+            else { return }
+            sharedLink = SharedLinkPresentation(url: url)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    @ViewBuilder
-    private func errorState(_ error: String, _ vm: AlbumDetailViewModel) -> some View {
-        VStack(spacing: 16) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.orange)
-            Text("Failed to Load")
-                .font(.headline)
-            Text(error)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Button("Retry") {
-                Task {
-                    await vm.retry(album.id)
-                }
-            }
-            .buttonStyle(.borderedProminent)
+    private func createSharedLink() {
+        Task {
+            guard let link = await vm?.createSharedLink(albumId: album.id),
+                  let url = link.publicURL(base: session.baseURL)
+            else { return }
+            sharedLink = SharedLinkPresentation(url: url)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func deleteAlbum() {
+        Task {
+            if await vm?.deleteAlbum(album.id) == true {
+                dismiss()
+            }
+        }
     }
 }
 
@@ -110,29 +191,262 @@ final class AlbumDetailViewModel {
     var assets: [AssetLite] = []
     var phase: LoadingPhase<Void> = .idle
 
-    private let repo: AlbumRepository
+    private let timelineRepo: TimelineRepository
+    private let albumRepo: AlbumRepository
+    private let assetRepo: AssetDetailRepository
+    /// Album yang sedang dibuka; dipakai untuk menamai potret lokalnya.
+    private var albumId: String?
 
-    init(repo: AlbumRepository) {
-        self.repo = repo
+    init(
+        timelineRepo: TimelineRepository,
+        albumRepo: AlbumRepository,
+        assetRepo: AssetDetailRepository
+    ) {
+        self.timelineRepo = timelineRepo
+        self.albumRepo = albumRepo
+        self.assetRepo = assetRepo
     }
 
-    func loadAlbumDetail(_ albumId: String) async {
-        phase = .loading
+    func updateAlbum(_ id: String, name: String, description: String) async {
+        try? await albumRepo.update(
+            id,
+            name: name.trimmingCharacters(in: .whitespaces),
+            description: description)
+    }
+
+    func addUsers(_ userIDs: [String], to albumId: String) async {
+        guard !userIDs.isEmpty else { return }
+        try? await albumRepo.addUsers(userIDs, to: albumId)
+    }
+
+    func createSharedLink(albumId: String) async -> SharedLinkDTO? {
+        try? await albumRepo.createSharedLink(albumId: albumId)
+    }
+
+    /// Status favorit ditambal di tempat, bukan lewat muat ulang — hanya satu
+    /// nilai boolean yang berubah.
+    func toggleFavorite(_ asset: AssetLite) async {
+        let newValue = !asset.isFavorite
         do {
-            let albumDetail = try await repo.detail(albumId)
-            if let albumAssets = albumDetail.assets {
-                assets = albumAssets.map { asset in
-                    AssetLite(
-                        id: asset.id,
-                        isVideo: asset.isVideo,
-                        ratio: Double(asset.exifInfo?.exifImageWidth ?? 1000) / Double(asset.exifInfo?.exifImageHeight ?? 1000),
-                        thumbhash: asset.thumbhash,
-                        createdAt: asset.fileCreatedAt
-                    )
+            try await assetRepo.toggleFavorite(asset.id, to: newValue)
+            if let index = assets.firstIndex(where: { $0.id == asset.id }) {
+                assets[index].isFavorite = newValue
+                persist()
+            }
+        } catch {
+            phase = .failed((error as? APIError)?.errorDescription
+                ?? String(localized: "Failed to update favorite"))
+        }
+    }
+
+    /// Favorit MASSAL selalu menyalakan, bukan membalik satu per satu: seleksi
+    /// bisa berisi campuran, dan membalik masing-masing menghasilkan separuh
+    /// menyala separuh padam.
+    func setFavorite(_ ids: [String], to value: Bool) async {
+        guard !ids.isEmpty else { return }
+        // Lihat alasan `defer` di AssetGridViewModel.setFavorite.
+        defer { persist() }
+        do {
+            for id in ids {
+                try await assetRepo.toggleFavorite(id, to: value)
+                if let index = assets.firstIndex(where: { $0.id == id }) {
+                    assets[index].isFavorite = value
                 }
+            }
+        } catch {
+            phase = .failed((error as? APIError)?.errorDescription
+                ?? String(localized: "Failed to update favorite"))
+        }
+    }
+
+    /// Mengarsipkan TIDAK mengeluarkan foto dari album.
+    ///
+    /// Album adalah kumpulan pilihan pengguna; arsip adalah status foto itu di
+    /// perpustakaan. Keduanya berdiri sendiri, jadi daftarnya dibiarkan utuh.
+    func setArchived(_ ids: [String], to archived: Bool) async {
+        guard !ids.isEmpty else { return }
+        do {
+            for id in ids {
+                try await assetRepo.setVisibility(id, to: archived ? .archive : .timeline)
+            }
+            // Linimasa dirender dari cache lokal — lihat AssetGridViewModel.
+            try? SwiftDataManager.shared.setTimelineVisibility(ids, inTimeline: !archived)
+        } catch {
+            phase = .failed((error as? APIError)?.errorDescription
+                ?? String(localized: "Failed to archive photos"))
+        }
+    }
+
+    /// Menghapus dari PERPUSTAKAAN, bukan sekadar mengeluarkan dari album.
+    func deleteAssets(_ ids: [String]) async {
+        guard !ids.isEmpty else { return }
+        do {
+            try await assetRepo.delete(ids)
+            let removed = Set(ids)
+            assets.removeAll { removed.contains($0.id) }
+            persist()
+        } catch {
+            phase = .failed((error as? APIError)?.errorDescription
+                ?? String(localized: "Failed to delete photos"))
+        }
+    }
+
+    /// Memindahkan ke folder terkunci; fotonya keluar dari album di layar ini.
+    func setLocked(_ ids: [String]) async {
+        guard !ids.isEmpty else { return }
+        do {
+            for id in ids {
+                try await assetRepo.setVisibility(id, to: .locked)
+            }
+            let moved = Set(ids)
+            assets.removeAll { moved.contains($0.id) }
+            persist()
+            // Linimasa dirender dari cache lokal — lihat AssetGridViewModel.
+            try? SwiftDataManager.shared.setTimelineVisibility(ids, inTimeline: false)
+        } catch {
+            phase = .failed((error as? APIError)?.errorDescription
+                ?? String(localized: "Failed to move photos"))
+        }
+    }
+
+    /// Menambahkan ke album LAIN dari dalam sebuah album.
+    ///
+    /// - Returns: pesan untuk pengguna; nil berarti semuanya masuk tanpa cerita.
+    func addToOtherAlbum(_ ids: [String], album: AlbumResponseDTO) async -> String? {
+        guard !ids.isEmpty else { return nil }
+        guard let duplicates = try? await albumRepo.addAssets(ids, to: album.id) else {
+            return String(localized: "Failed to add to album")
+        }
+        guard !duplicates.isEmpty else { return nil }
+        return duplicates.count == ids.count
+            ? String(localized: "Already in this album")
+            : String(localized: "\(duplicates.count) already in this album")
+    }
+
+    /// Potretnya ikut ditulis ulang setiap daftarnya berubah di sini — kalau
+    /// tidak, foto yang sudah dikeluarkan muncul lagi saat album dibuka offline.
+    private func persist() {
+        guard let albumId else { return }
+        LocalSnapshot.save(assets, for: LocalSnapshot.Key.album(albumId))
+    }
+
+    /// Yang gagal diunduh dilewati, bukan membatalkan seluruh operasi.
+    func shareURLs(for ids: [String]) async -> [URL] {
+        var urls: [URL] = []
+        for id in ids {
+            guard let data = try? await assetRepo.downloadOriginal(id) else { continue }
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(id).jpg")
+            if (try? data.write(to: url)) != nil {
+                urls.append(url)
+            }
+        }
+        return urls
+    }
+
+    /// Aset dibuang dari daftar lokal lebih dulu, tanpa memuat ulang album.
+    ///
+    /// Memuat ulang berarti menarik seluruh bucket lagi hanya untuk kehilangan
+    /// beberapa baris — dan grid akan berkedip kosong sesaat.
+    func removeAssets(_ ids: [String], from albumId: String) async {
+        guard !ids.isEmpty else { return }
+        do {
+            try await albumRepo.removeAssets(ids, from: albumId)
+            let removed = Set(ids)
+            assets.removeAll { removed.contains($0.id) }
+            persist()
+        } catch {
+            phase = .failed((error as? APIError)?.errorDescription
+                ?? String(localized: "Failed to remove photos"))
+        }
+    }
+
+    /// Setelah menambah, album dimuat ulang — urutan aset baru ditentukan
+    /// server, jadi menyisipkannya sendiri berisiko meleset dari urutan asli.
+    func addAssets(_ ids: [String], to albumId: String) async {
+        guard !ids.isEmpty else { return }
+        // Duplikat di layar album itu sendiri sengaja DIABAIKAN: sheet
+        // penambah foto sudah menyaring yang sudah ada (`existingIDs`), jadi
+        // kalau sampai muncul, itu balapan dengan perubahan dari perangkat lain
+        // — dan hasilnya tetap benar setelah dimuat ulang di bawah.
+        _ = try? await albumRepo.addAssets(ids, to: albumId)
+        await loadAlbumDetail(albumId)
+    }
+
+    @discardableResult
+    func deleteAlbum(_ id: String) async -> Bool {
+        do {
+            try await albumRepo.delete(id)
+            // Potretnya ikut dibuang. Album yang sudah tidak ada tidak boleh
+            // meninggalkan berkas yang akan terus dibaca kalau id-nya kebetulan
+            // dipakai lagi.
+            LocalSnapshot.remove(LocalSnapshot.Key.album(id))
+            return true
+        } catch {
+            phase = .failed((error as? APIError)?.errorDescription
+                ?? String(localized: "Failed to delete album"))
+            return false
+        }
+    }
+
+    /// Potret lokal dulu, jaringan menyusul — lihat `LocalSnapshot`.
+    ///
+    /// Album adalah yang paling mahal dimuat di seluruh aplikasi: satu
+    /// permintaan daftar bucket, lalu satu permintaan lagi untuk SETIAP bulan
+    /// yang ada isinya. Album tiga tahun berarti tiga puluh enam perjalanan
+    /// sebelum satu petak pun tergambar — dan offline berarti tidak ada yang
+    /// tergambar sama sekali.
+    func loadAlbumDetail(_ albumId: String) async {
+        self.albumId = albumId
+        let key = LocalSnapshot.Key.album(albumId)
+        if assets.isEmpty {
+            if let cached = LocalSnapshot.load([AssetLite].self, for: key) {
+                assets = cached
+                phase = .loaded(())
+            } else {
+                phase = .loading
+            }
+        }
+
+        do {
+            // GET /albums/{id} tidak lagi menyertakan daftar aset;
+            // isi album diambil lewat endpoint timeline dengan filter albumId.
+            let buckets = try await timelineRepo.buckets(albumId: albumId)
+
+            // Bucket ditarik BERSAMAAN, bukan satu per satu.
+            //
+            // Berurutan berarti album berisi tiga tahun foto menunggu 36
+            // perjalanan bolak-balik yang saling antre — dan tidak satu pun di
+            // antaranya bergantung pada hasil sebelumnya.
+            //
+            // Hasilnya dikumpulkan berikut indeksnya lalu diurutkan lagi, karena
+            // task group menyelesaikan pekerjaan sesuai siapa yang lebih dulu
+            // selesai, bukan urutan pengirimannya.
+            let repo = timelineRepo
+            var chunks: [(Int, [AssetLite])] = try await withThrowingTaskGroup(
+                of: (Int, [AssetLite]).self
+            ) { group in
+                for (index, bucket) in buckets.enumerated() {
+                    group.addTask {
+                        (index, try await repo.bucket(bucket.timeBucket, albumId: albumId))
+                    }
+                }
+                var collected: [(Int, [AssetLite])] = []
+                for try await result in group { collected.append(result) }
+                return collected
+            }
+            chunks.sort { $0.0 < $1.0 }
+            let fetched = chunks.flatMap(\.1)
+            if LocalSnapshot.save(fetched, for: key) || assets.isEmpty {
+                assets = fetched
             }
             phase = .loaded(())
         } catch {
+            // Sudah ada jawaban yang sah di layar — potret maupun muatan
+            // sebelumnya — jadi kegagalannya diam. Album yang memang kosong pun
+            // punya potret `[]` yang sah, jadi yang diperiksa `phase`, bukan
+            // "isinya kosong".
+            if case .loaded = phase { return }
             phase = .failed((error as? APIError)?.errorDescription ?? String(localized: "Failed to load album"))
         }
     }

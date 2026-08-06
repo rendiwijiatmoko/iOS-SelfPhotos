@@ -24,6 +24,11 @@ struct ServerConfigDTO: Decodable {
 }
 
 struct ServerStorageDTO: Decodable {
-    let diskUse: Int?
-    let diskSize: Int?
+    // diskUse/diskSize di API berupa string terformat ("1TB");
+    // varian *Raw yang berupa byte count.
+    let diskUse: String?
+    let diskSize: String?
+    let diskUseRaw: Int?
+    let diskSizeRaw: Int?
+    let diskUsagePercentage: Double?
 }

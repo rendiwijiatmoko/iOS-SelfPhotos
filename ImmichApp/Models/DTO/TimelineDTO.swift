@@ -12,6 +12,7 @@ struct TimelineBucketDTO: Decodable {
     let isFavorite: [Bool]?
     let thumbhash: [String?]?
     let fileCreatedAt: [String]?
-    let duration: [String?]?
+    /// Bukan `[Int?]` — lihat `DurationColumn`.
+    let duration: [DurationColumn]?
     let ratio: [Double]?
 }

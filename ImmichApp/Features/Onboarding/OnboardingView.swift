@@ -1,154 +1,179 @@
 import SwiftUI
 
+/// Layar masuk: alamat server dan kredensial dalam SATU halaman.
+///
+/// Sebelumnya dua langkah berurutan. Memisahkannya tidak memberi apa pun kepada
+/// pengguna — keduanya sama-sama harus benar sebelum ada yang terjadi — dan
+/// justru menambah satu ketukan serta satu layar yang harus di-"Back".
 struct OnboardingView: View {
     @Environment(SessionManager.self) private var session
     @State private var vm: OnboardingViewModel?
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if let vm {
-                    content(vm)
-                } else {
-                    ProgressView()
-                        .onAppear { vm = OnboardingViewModel(session: session) }
-                }
+        Group {
+            if let vm {
+                form(vm)
+            } else {
+                Color.clear.onAppear { vm = OnboardingViewModel(session: session) }
             }
-            .navigationTitle("Immich")
         }
     }
 
-    @ViewBuilder
-    private func content(_ vm: OnboardingViewModel) -> some View {
+    private func form(_ vm: OnboardingViewModel) -> some View {
         @Bindable var vm = vm
 
-        VStack(spacing: 24) {
-            switch vm.step {
-            case .server:
-                serverStep(vm)
-            case .login:
-                loginStep(vm)
+        return ScrollView {
+            VStack(spacing: 28) {
+                masthead
+                serverField(vm)
+                credentials(vm)
+                submitArea(vm)
             }
-
-            Spacer()
-
-            if case .loading = vm.phase {
-                ProgressView()
-            }
-
-            if case .failed(let msg) = vm.phase {
-                Text(msg)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .multilineTextAlignment(.center)
-            }
+            .padding(.horizontal, 24)
+            .padding(.top, 48)
+            .padding(.bottom, 32)
+            .frame(maxWidth: 480)
+            .frame(maxWidth: .infinity)
         }
-        .padding(24)
+        // Kolom terakhir tidak boleh tertutup papan ketik pada layar pendek.
+        .scrollDismissesKeyboard(.interactively)
     }
 
-    @ViewBuilder
-    private func serverStep(_ vm: OnboardingViewModel) -> some View {
+    // MARK: - Kepala
+
+    private var masthead: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "photo.stack.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(.tint)
+
+            Text("Immich")
+                .font(.largeTitle.bold())
+
+            Text("Sign in to your own photo server.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.bottom, 8)
+    }
+
+    // MARK: - Kolom
+
+    private func serverField(_ vm: OnboardingViewModel) -> some View {
         @Bindable var vm = vm
 
-        VStack(spacing: 16) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Server Address")
-                    .font(.headline)
-                Text("Enter your Immich server URL")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
+        return field("Server") {
             TextField("https://immich.example.com", text: $vm.serverText)
                 .textInputAutocapitalization(.never)
+                .textContentType(.URL)
                 .keyboardType(.URL)
-                .textFieldStyle(.roundedBorder)
                 .autocorrectionDisabled()
-
-            Button("Connect") {
-                Task { await vm.connect() }
-            }
-            .buttonStyle(.borderedProminent)
-            .frame(maxWidth: .infinity)
-            .disabled(vm.serverText.isEmpty || vm.phase.isLoading)
+                .submitLabel(.next)
         }
     }
 
     @ViewBuilder
-    private func loginStep(_ vm: OnboardingViewModel) -> some View {
+    private func credentials(_ vm: OnboardingViewModel) -> some View {
         @Bindable var vm = vm
 
         VStack(spacing: 16) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Sign In")
-                    .font(.headline)
-                Text("Enter your credentials")
+            methodPicker(vm)
+
+            switch vm.method {
+            case .password:
+                field("Email") {
+                    TextField("you@example.com", text: $vm.email)
+                        .textInputAutocapitalization(.never)
+                        .textContentType(.username)
+                        .keyboardType(.emailAddress)
+                        .autocorrectionDisabled()
+                        .submitLabel(.next)
+                }
+                field("Password") {
+                    SecureField("Required", text: $vm.password)
+                        .textContentType(.password)
+                        .submitLabel(.go)
+                        .onSubmit { Task { await vm.submit() } }
+                }
+
+            case .apiKey:
+                field("API Key") {
+                    SecureField("Required", text: $vm.apiKey)
+                        .textContentType(.password)
+                        .submitLabel(.go)
+                        .onSubmit { Task { await vm.submit() } }
+                }
+                Text("Generate an API key in your Immich account settings.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-
-            Picker("Login Method", selection: $vm.showApiKeyTab) {
-                Text("Email").tag(false)
-                if vm.features?.passwordLogin == true {
-                    Text("API Key").tag(true)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            if !vm.showApiKeyTab {
-                emailPasswordForm(vm)
-            } else {
-                apiKeyForm(vm)
-            }
-
-            Button("Back") {
-                vm.reset()
-            }
-            .frame(maxWidth: .infinity)
         }
     }
 
-    @ViewBuilder
-    private func emailPasswordForm(_ vm: OnboardingViewModel) -> some View {
+    /// API Key selalu tersedia — justru di server OAuth-only, tempat login kata
+    /// sandi dimatikan, itulah satu-satunya cara masuk.
+    private func methodPicker(_ vm: OnboardingViewModel) -> some View {
         @Bindable var vm = vm
 
-        VStack(spacing: 12) {
-            TextField("Email", text: $vm.email)
-                .textInputAutocapitalization(.never)
-                .keyboardType(.emailAddress)
-                .textFieldStyle(.roundedBorder)
-                .autocorrectionDisabled()
-
-            SecureField("Password", text: $vm.password)
-                .textFieldStyle(.roundedBorder)
-
-            Button("Sign In") {
-                Task { await vm.loginPassword() }
+        return Picker("Sign in with", selection: $vm.method) {
+            if vm.features?.passwordLogin != false {
+                Text("Email").tag(OnboardingViewModel.Method.password)
             }
-            .buttonStyle(.borderedProminent)
-            .frame(maxWidth: .infinity)
-            .disabled(vm.email.isEmpty || vm.password.isEmpty || vm.phase.isLoading)
+            Text("API Key").tag(OnboardingViewModel.Method.apiKey)
+        }
+        .pickerStyle(.segmented)
+        .onChange(of: vm.features?.passwordLogin) { _, enabled in
+            if enabled == false { vm.method = .apiKey }
         }
     }
 
-    @ViewBuilder
-    private func apiKeyForm(_ vm: OnboardingViewModel) -> some View {
-        @Bindable var vm = vm
-
-        VStack(spacing: 12) {
-            SecureField("API Key", text: $vm.apiKey)
-                .textFieldStyle(.roundedBorder)
-
-            Text("Generate API key in your Immich settings")
-                .font(.caption)
+    /// Label kecil di atas kolom, bukan placeholder di dalamnya: placeholder
+    /// hilang begitu diketik, dan pengguna kehilangan penanda kolom mana itu.
+    private func field<Content: View>(
+        _ label: LocalizedStringKey,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label)
+                .font(.footnote.weight(.medium))
                 .foregroundStyle(.secondary)
 
-            Button("Sign In with API Key") {
-                Task { await vm.loginApiKey() }
+            content()
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .background(.fill.quaternary, in: .rect(cornerRadius: 12))
+        }
+    }
+
+    // MARK: - Kirim
+
+    @ViewBuilder
+    private func submitArea(_ vm: OnboardingViewModel) -> some View {
+        VStack(spacing: 12) {
+            if case .failed(let message) = vm.phase {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(Color.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            Button {
+                Task { await vm.submit() }
+            } label: {
+                Group {
+                    if vm.phase.isLoading {
+                        ProgressView()
+                    } else {
+                        Text("Sign In")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 22)
             }
             .buttonStyle(.borderedProminent)
-            .frame(maxWidth: .infinity)
-            .disabled(vm.apiKey.isEmpty || vm.phase.isLoading)
+            .controlSize(.large)
+            .disabled(!vm.canSubmit || vm.phase.isLoading)
         }
     }
 }

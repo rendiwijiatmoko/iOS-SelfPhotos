@@ -1,19 +1,21 @@
 import XCTest
 @testable import ImmichApp
 
-class AssetDetailViewModelTests: XCTestCase {
+@MainActor
+final class AssetDetailViewModelTests: XCTestCase {
     var mockRepo: MockAssetDetailRepository!
     var viewModel: AssetDetailViewModel!
 
-    override func setUp() {
-        super.setUp()
-        mockRepo = MockAssetDetailRepository()
+    override func setUp() async throws {
+        try await super.setUp()
+        mockRepo = MockAssetDetailRepository(api: makeStubAPIClient())
         viewModel = AssetDetailViewModel(repo: mockRepo)
     }
 
     func testInitialState() {
         XCTAssertNil(viewModel.detail)
         XCTAssertFalse(viewModel.showInfoPanel)
+        XCTAssertNil(viewModel.actionError)
         if case .idle = viewModel.phase {
             // Success
         } else {
@@ -22,21 +24,7 @@ class AssetDetailViewModelTests: XCTestCase {
     }
 
     func testLoadAssetSuccess() async {
-        let mockAsset = AssetResponseDTO(
-            id: "asset-123",
-            type: "IMAGE",
-            originalFileName: "photo.jpg",
-            fileCreatedAt: Date(),
-            isFavorite: false,
-            isArchived: false,
-            isTrashed: false,
-            duration: nil,
-            thumbhash: "hash",
-            localDateTime: Date(),
-            exifInfo: nil,
-            people: nil
-        )
-        mockRepo.mockAsset = mockAsset
+        mockRepo.mockAsset = makeTestAsset(id: "asset-123", thumbhash: "hash")
 
         await viewModel.load("asset-123")
 
@@ -62,53 +50,84 @@ class AssetDetailViewModelTests: XCTestCase {
     }
 
     func testToggleFavorite() async {
-        let mockAsset = AssetResponseDTO(
-            id: "asset-123",
-            type: "IMAGE",
-            originalFileName: "photo.jpg",
-            fileCreatedAt: Date(),
-            isFavorite: false,
-            isArchived: false,
-            isTrashed: false,
-            duration: nil,
-            thumbhash: nil,
-            localDateTime: Date(),
-            exifInfo: nil,
-            people: nil
-        )
-        mockRepo.mockAsset = mockAsset
+        mockRepo.mockAsset = makeTestAsset(id: "asset-123", isFavorite: false)
         await viewModel.load("asset-123")
 
-        let initialState = viewModel.detail?.isFavorite ?? false
         await viewModel.toggleFavorite("asset-123")
 
-        XCTAssertNotEqual(viewModel.detail?.isFavorite, initialState)
         XCTAssertTrue(viewModel.detail?.isFavorite ?? false)
+        XCTAssertTrue(mockRepo.mockAsset?.isFavorite ?? false)
+        XCTAssertNil(viewModel.actionError)
+
+        await viewModel.toggleFavorite("asset-123")
+        XCTAssertFalse(viewModel.detail?.isFavorite ?? true)
+    }
+
+    func testToggleFavoriteFailureSetsActionErrorAndKeepsState() async {
+        mockRepo.mockAsset = makeTestAsset(id: "asset-123", isFavorite: false)
+        await viewModel.load("asset-123")
+
+        mockRepo.shouldFail = true
+        await viewModel.toggleFavorite("asset-123")
+
+        XCTAssertNotNil(viewModel.actionError)
+        XCTAssertFalse(viewModel.detail?.isFavorite ?? true)
     }
 
     func testToggleArchive() async {
-        let mockAsset = AssetResponseDTO(
-            id: "asset-123",
-            type: "IMAGE",
-            originalFileName: "photo.jpg",
-            fileCreatedAt: Date(),
-            isFavorite: false,
-            isArchived: false,
-            isTrashed: false,
-            duration: nil,
-            thumbhash: nil,
-            localDateTime: Date(),
-            exifInfo: nil,
-            people: nil
-        )
-        mockRepo.mockAsset = mockAsset
+        mockRepo.mockAsset = makeTestAsset(id: "asset-123", isArchived: false)
         await viewModel.load("asset-123")
 
-        let initialState = viewModel.detail?.isArchived ?? false
         await viewModel.toggleArchive("asset-123")
 
-        XCTAssertNotEqual(viewModel.detail?.isArchived, initialState)
         XCTAssertTrue(viewModel.detail?.isArchived ?? false)
+        // Repository translates archive toggle into a visibility update.
+        XCTAssertEqual(mockRepo.lastVisibility, "archive")
+
+        await viewModel.toggleArchive("asset-123")
+        XCTAssertFalse(viewModel.detail?.isArchived ?? true)
+        XCTAssertEqual(mockRepo.lastVisibility, "timeline")
+    }
+
+    func testDeleteSuccessReturnsTrue() async {
+        mockRepo.mockAsset = makeTestAsset(id: "asset-123")
+        await viewModel.load("asset-123")
+
+        let deleted = await viewModel.delete("asset-123")
+
+        XCTAssertTrue(deleted)
+        XCTAssertNil(viewModel.actionError)
+        XCTAssertEqual(mockRepo.deletedIds, ["asset-123"])
+    }
+
+    func testDeleteFailureReturnsFalseAndSetsActionError() async {
+        mockRepo.mockAsset = makeTestAsset(id: "asset-123")
+        await viewModel.load("asset-123")
+
+        mockRepo.shouldFail = true
+        let deleted = await viewModel.delete("asset-123")
+
+        XCTAssertFalse(deleted)
+        XCTAssertNotNil(viewModel.actionError)
+    }
+
+    func testDownloadOriginalSuccess() async {
+        let expected = Data([0xFF, 0xD8, 0xFF, 0xE0])
+        mockRepo.mockDownloadData = expected
+
+        let data = await viewModel.downloadOriginal("asset-123")
+
+        XCTAssertEqual(data, expected)
+        XCTAssertNil(viewModel.actionError)
+    }
+
+    func testDownloadOriginalFailureReturnsNil() async {
+        mockRepo.shouldFail = true
+
+        let data = await viewModel.downloadOriginal("asset-123")
+
+        XCTAssertNil(data)
+        XCTAssertNotNil(viewModel.actionError)
     }
 
     func testInfoPanelToggle() {
@@ -127,22 +146,8 @@ class AssetDetailViewModelTests: XCTestCase {
             XCTFail("Expected failed phase")
         }
 
-        let mockAsset = AssetResponseDTO(
-            id: "asset-123",
-            type: "IMAGE",
-            originalFileName: "photo.jpg",
-            fileCreatedAt: Date(),
-            isFavorite: false,
-            isArchived: false,
-            isTrashed: false,
-            duration: nil,
-            thumbhash: nil,
-            localDateTime: Date(),
-            exifInfo: nil,
-            people: nil
-        )
         mockRepo.shouldFail = false
-        mockRepo.mockAsset = mockAsset
+        mockRepo.mockAsset = makeTestAsset(id: "asset-123")
 
         await viewModel.retry("asset-123")
 
@@ -157,21 +162,18 @@ class AssetDetailViewModelTests: XCTestCase {
 class MockAssetDetailRepository: AssetDetailRepository {
     var mockAsset: AssetResponseDTO?
     var shouldFail = false
-
-    init() {
-        let mockSession = SessionManager()
-        let mockAPI = MockAPIClient()
-        super.init(api: mockAPI)
-    }
+    var mockDownloadData = Data()
+    var deletedIds: [String] = []
+    var lastVisibility: String?
 
     override func fetchAsset(_ id: String) async throws -> AssetResponseDTO {
         if shouldFail {
             throw APIError.unknown
         }
-        guard let asset = mockAsset else {
+        guard let mockAsset else {
             throw APIError.unknown
         }
-        return asset
+        return mockAsset
     }
 
     override func toggleFavorite(_ id: String, to value: Bool) async throws {
@@ -185,6 +187,7 @@ class MockAssetDetailRepository: AssetDetailRepository {
         if shouldFail {
             throw APIError.unknown
         }
+        lastVisibility = value ? "archive" : "timeline"
         mockAsset?.isArchived = value
     }
 
@@ -192,5 +195,13 @@ class MockAssetDetailRepository: AssetDetailRepository {
         if shouldFail {
             throw APIError.unknown
         }
+        deletedIds.append(id)
+    }
+
+    override func downloadOriginal(_ id: String) async throws -> Data {
+        if shouldFail {
+            throw APIError.unknown
+        }
+        return mockDownloadData
     }
 }

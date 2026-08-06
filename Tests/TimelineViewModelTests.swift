@@ -1,147 +1,95 @@
 import XCTest
 @testable import ImmichApp
 
-class TimelineViewModelTests: XCTestCase {
-    var mockRepo: MockTimelineRepository!
+/// Linimasa kini dibangun dari cache lokal, bukan dari `/timeline/buckets`.
+/// Yang diuji karena itu bukan lagi jalur jaringannya, melainkan pengelompokan
+/// per bulan dan penyusunan ulang setelah ada aset yang dibuang.
+@MainActor
+final class TimelineViewModelTests: XCTestCase {
     var viewModel: TimelineViewModel!
 
-    override func setUp() {
-        super.setUp()
-        mockRepo = MockTimelineRepository()
-        viewModel = TimelineViewModel(repo: mockRepo)
+    override func setUp() async throws {
+        try await super.setUp()
+        viewModel = TimelineViewModel()
+    }
+
+    override func tearDown() async throws {
+        viewModel = nil
+        try await super.tearDown()
     }
 
     func testInitialState() {
         XCTAssertTrue(viewModel.sections.isEmpty)
-        if case .idle = viewModel.phase {
-            // Success
-        } else {
+        if case .idle = viewModel.phase {} else {
             XCTFail("Expected idle phase")
         }
     }
 
-    func testLoadBucketsSuccess() async {
-        mockRepo.mockBuckets = [
-            TimeBucketDTO(timeBucket: "2026-08", count: 42),
-            TimeBucketDTO(timeBucket: "2026-07", count: 30),
-        ]
+    /// Tanpa `SwiftDataManager`, tidak ada apa pun yang bisa dibaca — dan itu
+    /// bukan kegagalan, hanya perpustakaan yang belum tersinkron.
+    func testLoadWithoutStoreLeavesEmptyTimeline() async {
+        await viewModel.loadTimeline()
 
-        await viewModel.loadBuckets()
-
-        XCTAssertEqual(viewModel.sections.count, 2)
-        XCTAssertEqual(viewModel.sections[0].id, "2026-08")
-        XCTAssertEqual(viewModel.sections[1].id, "2026-07")
-        if case .loaded = viewModel.phase {
-            // Success
-        } else {
+        XCTAssertTrue(viewModel.sections.isEmpty)
+        if case .loaded = viewModel.phase {} else {
             XCTFail("Expected loaded phase")
         }
     }
 
-    func testLoadBucketsError() async {
-        mockRepo.shouldFail = true
-
-        await viewModel.loadBuckets()
-
-        if case .failed = viewModel.phase {
-            XCTAssertTrue(viewModel.sections.isEmpty)
-        } else {
-            XCTFail("Expected failed phase")
-        }
-    }
-
-    func testLoadSectionLazy() async {
-        mockRepo.mockBuckets = [TimeBucketDTO(timeBucket: "2026-08", count: 5)]
-        mockRepo.mockAssets = [
-            AssetLite(id: "1", isVideo: false, ratio: 1.0, thumbhash: nil, createdAt: Date()),
-            AssetLite(id: "2", isVideo: true, ratio: 0.75, thumbhash: "hash", createdAt: Date()),
+    func testSetFavoritePatchesInPlace() async {
+        viewModel.sections = [
+            TimelineSection(
+                id: "2024-08",
+                title: "August 2024",
+                assets: [
+                    makeAsset("a"),
+                    makeAsset("b"),
+                ],
+                count: 2,
+                startIndex: 0),
         ]
 
-        await viewModel.loadBuckets()
-        await viewModel.loadSectionIfNeeded("2026-08")
+        viewModel.setFavorite("b", to: true)
 
-        XCTAssertEqual(viewModel.sections[0].assets.count, 2)
-        XCTAssertEqual(viewModel.sections[0].assets[0].id, "1")
-        XCTAssertEqual(viewModel.sections[0].assets[1].id, "2")
+        XCTAssertFalse(viewModel.sections[0].assets[0].isFavorite)
+        XCTAssertTrue(viewModel.sections[0].assets[1].isFavorite)
     }
 
-    func testLazyLoadOnlyOnce() async {
-        mockRepo.mockBuckets = [TimeBucketDTO(timeBucket: "2026-08", count: 1)]
-        mockRepo.mockAssets = [AssetLite(id: "1", isVideo: false, ratio: 1.0, thumbhash: nil, createdAt: Date())]
+    /// Section yang kehilangan seluruh isinya ikut hilang, dan offset section
+    /// berikutnya dirapatkan — offset itu dipakai sebagai identitas sel di grid,
+    /// jadi lubang di tengahnya akan menabrakkan identitas.
+    func testRemovingAssetsCompactsSections() async {
+        viewModel.sections = [
+            TimelineSection(
+                id: "2024-08", title: "August 2024",
+                assets: [makeAsset("a")], count: 1, startIndex: 0),
+            TimelineSection(
+                id: "2024-07", title: "July 2024",
+                assets: [makeAsset("b"), makeAsset("c")], count: 2, startIndex: 1),
+        ]
 
-        await viewModel.loadBuckets()
-        await viewModel.loadSectionIfNeeded("2026-08")
+        viewModel.assetWasRemoved("a")
 
-        let callCountAfterFirst = mockRepo.bucketCallCount
-
-        await viewModel.loadSectionIfNeeded("2026-08")
-
-        // Should not load again
-        XCTAssertEqual(mockRepo.bucketCallCount, callCountAfterFirst)
+        XCTAssertEqual(viewModel.sections.count, 1)
+        XCTAssertEqual(viewModel.sections[0].id, "2024-07")
+        XCTAssertEqual(viewModel.sections[0].startIndex, 0)
+        XCTAssertEqual(viewModel.sections[0].count, 2)
     }
 
-    func testRetry() async {
-        mockRepo.shouldFail = true
-        await viewModel.loadBuckets()
-
-        if case .failed = viewModel.phase {
-            // Expected
-        } else {
-            XCTFail("Expected failed phase")
-        }
-
-        mockRepo.shouldFail = false
-        mockRepo.mockBuckets = [TimeBucketDTO(timeBucket: "2026-08", count: 1)]
-
-        await viewModel.retry()
-
-        if case .loaded = viewModel.phase {
-            XCTAssertEqual(viewModel.sections.count, 1)
-        } else {
-            XCTFail("Expected loaded phase after retry")
-        }
+    func testFormatBucketTitle() {
+        XCTAssertEqual(TimelineViewModel.formatBucketTitle("2024-08"), "August 2024")
+        // Kunci yang tidak bisa diurai dikembalikan apa adanya, bukan jadi teks
+        // kosong yang menyesatkan.
+        XCTAssertEqual(TimelineViewModel.formatBucketTitle("not-a-month"), "not-a-month")
     }
 
-    func testBucketTitleFormatting() async {
-        mockRepo.mockBuckets = [TimeBucketDTO(timeBucket: "2026-08", count: 1)]
-
-        await viewModel.loadBuckets()
-
-        let title = viewModel.sections[0].title
-        XCTAssertTrue(title.contains("August") || title.contains("2026"))
-    }
-}
-
-class MockTimelineRepository: TimelineRepository {
-    var mockBuckets: [TimeBucketDTO] = []
-    var mockAssets: [AssetLite] = []
-    var shouldFail = false
-    var bucketCallCount = 0
-
-    init() {
-        let mockAPI = MockAPIClient()
-        super.init(api: mockAPI)
-    }
-
-    override func buckets() async throws -> [TimeBucketDTO] {
-        if shouldFail {
-            throw APIError.unknown
-        }
-        return mockBuckets
-    }
-
-    override func bucket(_ timeBucket: String) async throws -> [AssetLite] {
-        bucketCallCount += 1
-        if shouldFail {
-            throw APIError.unknown
-        }
-        return mockAssets
-    }
-}
-
-class MockAPIClient: APIClient {
-    init() {
-        let mockSession = SessionManager()
-        super.init(session: mockSession)
+    private func makeAsset(_ id: String) -> AssetLite {
+        AssetLite(
+            id: id,
+            isVideo: false,
+            ratio: 1,
+            thumbhash: nil,
+            createdAt: Date(timeIntervalSince1970: 0),
+            isFavorite: false)
     }
 }

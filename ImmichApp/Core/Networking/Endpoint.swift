@@ -1,6 +1,6 @@
 import Foundation
 
-enum HTTPMethod: String { case get = "GET", post = "POST", put = "PUT", delete = "DELETE" }
+enum HTTPMethod: String { case get = "GET", post = "POST", put = "PUT", patch = "PATCH", delete = "DELETE" }
 
 struct Endpoint {
     var path: String

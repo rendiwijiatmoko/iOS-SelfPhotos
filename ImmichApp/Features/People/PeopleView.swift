@@ -3,22 +3,26 @@ import SwiftUI
 struct PeopleView: View {
     @Environment(SessionManager.self) private var session
     @State private var vm: PeopleListViewModel?
+    @State private var query = ""
+    /// Namespace zoom transition. Dideklarasikan di layar daftar, bukan di
+    /// selnya: sumber dan tujuan transisi harus berbagi namespace yang SAMA,
+    /// sedangkan tiap sel akan punya `@Namespace`-nya sendiri.
+    @Namespace private var personNamespace
     private let columns = [
         GridItem(.adaptive(minimum: 100), spacing: 12)
     ]
 
     var body: some View {
-        NavigationStack {
-            content
-                .navigationTitle("People")
-                .toolbar {
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        if case .loading = vm?.phase {
-                            ProgressView()
-                        }
+        content
+            .navigationTitle("People")
+            .searchable(text: $query, prompt: "Search People")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    if case .loading = vm?.phase {
+                        ProgressView()
                     }
                 }
-        }
+            }
         .task {
             if vm == nil {
                 let api = APIClient(session: session)
@@ -34,14 +38,19 @@ struct PeopleView: View {
         if let vm {
             switch vm.phase {
             case .idle, .loading:
-                ProgressView()
+            // Spinner HANYA kalau memang belum ada apa-apa.
+            //
+            // Potret lokal dibaca di `task`, yaitu setelah render pertama, jadi
+            // tanpa gerbang ini layar berkedip spinner satu frame sebelum isi
+            // yang sebenarnya sudah tersedia tergambar.
+                if vm.people.isEmpty {
+                    ProgressView()
+                } else {
+                    loadedContent(vm)
+                }
 
             case .loaded:
-                if vm.people.isEmpty {
-                    emptyState
-                } else {
-                    peopleGrid(vm)
-                }
+                loadedContent(vm)
 
             case .failed(let error):
                 errorState(error, vm)
@@ -52,24 +61,70 @@ struct PeopleView: View {
     }
 
     @ViewBuilder
-    private func peopleGrid(_ vm: PeopleListViewModel) -> some View {
+    private func loadedContent(_ vm: PeopleListViewModel) -> some View {
+        let people = visiblePeople(vm)
+
+        if people.isEmpty {
+            // Dibedakan: belum ada orang sama sekali vs. pencarian tanpa hasil.
+            // Pesan "Faces will appear here" akan menyesatkan kalau sebenarnya
+            // datanya ada, hanya tidak cocok dengan yang diketik.
+            if query.isEmpty {
+                emptyState
+            } else {
+                ContentUnavailableView.search(text: query)
+            }
+        } else {
+            peopleGrid(people, vm)
+        }
+    }
+
+    /// Pencarian dilakukan DI KLIEN, bukan lewat endpoint.
+    ///
+    /// Daftar orang sudah dimuat seluruhnya sejak awal dan jumlahnya kecil, jadi
+    /// menyaringnya di tempat jauh lebih cepat daripada bolak-balik ke server
+    /// tiap ketukan huruf.
+    private func visiblePeople(_ vm: PeopleListViewModel) -> [PersonDTO] {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return vm.people }
+        return vm.people.filter {
+            $0.name.localizedCaseInsensitiveContains(trimmed)
+        }
+    }
+
+    /// Tautan memakai TUJUAN LANGSUNG, bukan `NavigationLink(value:)` +
+    /// `navigationDestination(for:)`.
+    ///
+    /// Layar ini sendiri sudah didorong ke dalam stack milik Collections.
+    /// Mendaftarkan tujuan berbasis nilai dari posisi itu membuat SwiftUI
+    /// mendorong dua entri sekaligus — halaman yang sama muncul di atas, dan
+    /// detailnya baru terlihat setelah ditekan back. Jalur dari Collections
+    /// tidak pernah bermasalah justru karena memakai tujuan langsung.
+    @ViewBuilder
+    private func peopleGrid(
+        _ people: [PersonDTO],
+        _ vm: PeopleListViewModel
+    ) -> some View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 12) {
-                ForEach(vm.people) { person in
-                    NavigationLink(value: person) {
+                ForEach(people) { person in
+                    NavigationLink {
+                        PersonDetailView(
+                            person: person,
+                            repo: PeopleRepository(api: APIClient(session: session)),
+                            listVM: vm)
+                        .navigationTransition(
+                            .zoom(sourceID: person.id, in: personNamespace))
+                    } label: {
                         VStack(spacing: 8) {
                             ZStack(alignment: .topTrailing) {
                                 Circle()
                                     .fill(.gray.opacity(0.2))
 
-                                if let thumbnailPath = person.thumbnailPath {
-                                    AsyncImage(url: URL(string: thumbnailPath)) { image in
-                                        image
-                                            .resizable()
-                                            .scaledToFill()
-                                    } placeholder: {
-                                        Color.gray.opacity(0.2)
-                                    }
+                                if person.thumbnailPath?.isEmpty == false {
+                                    // thumbnailPath adalah path filesystem server;
+                                    // gambarnya harus diambil lewat endpoint terautentikasi.
+                                    AuthImage(assetId: person.id,
+                                              path: "/people/\(person.id)/thumbnail")
                                 } else {
                                     Image(systemName: "person.crop.circle.fill")
                                         .resizable()
@@ -93,13 +148,12 @@ struct PeopleView: View {
                                 .lineLimit(2)
                                 .multilineTextAlignment(.center)
                         }
+                        .matchedTransitionSource(id: person.id, in: personNamespace)
                     }
+                    .buttonStyle(.plain)
                 }
             }
             .padding(12)
-        }
-        .navigationDestination(for: PersonDTO.self) { person in
-            PersonDetailView(person: person, repo: PeopleRepository(api: APIClient(session: session)))
         }
     }
 
@@ -138,109 +192,150 @@ struct PeopleView: View {
     }
 }
 
+/// Foto seseorang, memakai `PhotoCollectionScreen` yang sama dengan detail
+/// album — yang khas di sini hanya menu Rename / Hide.
 struct PersonDetailView: View {
     @State var person: PersonDTO
     let repo: PeopleRepository
+    var listVM: PeopleListViewModel?
+
     @Environment(SessionManager.self) private var session
-    @State private var personDetail: PersonDetailDTO?
-    @State private var phase: LoadingPhase<Void> = .idle
+    @State private var vm: AssetGridViewModel?
+    @State private var albumPickerAsset: AssetLite?
+    @State private var albumPickerSelection: SelectedAssetIDs?
+    @State private var sharedLink: SharedLinkPresentation?
     @State private var showRenameSheet = false
     @State private var newName = ""
-    private let columns = [GridItem(.adaptive(minimum: 110), spacing: 2)]
+    @State private var actionError: String?
+    /// Kabar singkat dari aksi — mis. "sudah ada di album ini". Toast, bukan
+    /// alert: ini bukan kegagalan yang menuntut jawaban.
+    @State private var actionMessage: ErrorEvent?
 
     var body: some View {
-        content
-            .navigationTitle(person.name)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Menu {
-                        Button("Rename") { showRenameSheet = true }
-                        Button(person.isHidden ? "Show" : "Hide") {
-                            Task { await toggleHidden() }
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                }
-            }
+        screen
             .sheet(isPresented: $showRenameSheet) {
                 RenameSheet(name: $newName, onSave: {
                     Task { await rename() }
                 })
             }
-            .task {
-                await loadDetail()
-            }
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        switch phase {
-        case .idle, .loading:
-            ProgressView()
-
-        case .loaded:
-            if let detail = personDetail, !detail.assets.isEmpty {
-                assetsGrid(detail)
-            } else {
-                Text("No photos of this person")
-                    .foregroundStyle(.secondary)
-            }
-
-        case .failed(let error):
-            VStack(spacing: 16) {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                Button("Retry") {
-                    Task { await loadDetail() }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func assetsGrid(_ detail: PersonDetailDTO) -> some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: 2) {
-                ForEach(detail.assets) { asset in
-                    NavigationLink(value: AssetLite(
-                        id: asset.id,
-                        isVideo: asset.isVideo,
-                        ratio: 1.0,
-                        thumbhash: asset.thumbhash,
-                        createdAt: asset.fileCreatedAt
-                    )) {
-                        AuthImage(assetId: asset.id, thumbhash: asset.thumbhash)
-                            .aspectRatio(1, contentMode: .fill)
-                            .clipped()
+            .sheet(item: $albumPickerAsset) { asset in
+                AlbumPickerLoader { album in
+                    Task {
+                        if let message = await vm?.addToAlbum([asset.id], album: album) {
+                            actionMessage = ErrorEvent(message)
+                        }
                     }
                 }
             }
-            .padding(2)
-        }
-        .navigationDestination(for: AssetLite.self) { asset in
-            let allAssets = detail.assets.map { AssetLite(
-                id: $0.id,
-                isVideo: $0.isVideo,
-                ratio: 1.0,
-                thumbhash: $0.thumbhash,
-                createdAt: $0.fileCreatedAt
-            ) }
-            AssetDetailView(currentAsset: asset, assets: allAssets)
-                .toolbarVisibility(.hidden, for: .tabBar)
+            .alert("Action Failed", isPresented: .init(
+                get: { actionError != nil },
+                set: { if !$0 { actionError = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(actionError ?? "")
+            }
+            .sheet(item: $albumPickerSelection) { selection in
+                AlbumPickerLoader { album in
+                    Task {
+                        if let message = await vm?.addToAlbum(selection.ids, album: album) {
+                            actionMessage = ErrorEvent(message)
+                        }
+                    }
+                }
+            }
+            .sheet(item: $sharedLink) { ShareSheet(url: $0.url) }
+            .errorToast($actionMessage)
+            .task { await start() }
+    }
+
+    private var screen: some View {
+        PhotoCollectionScreen(
+            title: LocalizedStringKey(person.name),
+            assets: vm?.assets ?? [],
+            phase: vm?.phase ?? .loading,
+            onRetry: { Task { await vm?.load() } },
+            onToggleFavorite: { await vm?.toggleFavorite($0) },
+            onDelete: { await vm?.delete($0) },
+            shareURLs: { await vm?.shareURLs(for: $0) ?? [] },
+            onAddToAlbum: { albumPickerAsset = $0 },
+            onFavoriteSelection: { await vm?.setFavorite($0, to: true) },
+            onArchiveSelection: { await vm?.setArchived($0, to: true) },
+            onMoveToLocked: { await vm?.setLocked($0) },
+            onShareLink: { createSharedLink(for: $0) },
+            selectionMenu: selectionMenu,
+            options: { personMenu })
+    }
+
+    /// Menu elipsis mode pilih — isinya sama dengan Photos.
+    ///
+    /// "Move to Locked Folder" tidak ikut di sini: `PhotoCollectionScreen`
+    /// menambahkannya sendiri dari `onMoveToLocked`, supaya semua layar yang
+    /// punya aksi itu memakai satu susunan yang sama.
+    private func selectionMenu(_ ids: Set<String>) -> [SelectionMenuAction] {
+        [
+            SelectionMenuAction(title: "Share Link", systemImage: "link") {
+                createSharedLink(for: Array(ids))
+            },
+            SelectionMenuAction(
+                title: "Add to Album",
+                systemImage: "rectangle.stack.badge.plus"
+            ) {
+                albumPickerSelection = SelectedAssetIDs(ids: Array(ids))
+            },
+        ]
+    }
+
+    private func createSharedLink(for ids: [String]) {
+        guard !ids.isEmpty else { return }
+        let repo = SharedLinkRepository(api: APIClient(session: session))
+        Task {
+            guard let link = try? await repo.create(assetIds: ids),
+                  let url = link.publicURL(base: session.baseURL)
+            else { return }
+            sharedLink = SharedLinkPresentation(url: url)
         }
     }
 
-    private func loadDetail() async {
-        phase = .loading
-        do {
-            personDetail = try await repo.detail(person.id)
-            phase = .loaded(())
-        } catch {
-            phase = .failed((error as? APIError)?.errorDescription ?? String(localized: "Failed to load"))
+    @ViewBuilder
+    private var personMenu: some View {
+        Button {
+            newName = person.name
+            showRenameSheet = true
+        } label: {
+            Label("Rename", systemImage: "pencil")
         }
+
+        Button {
+            Task { await toggleHidden() }
+        } label: {
+            Label(
+                person.isHidden ? "Show" : "Hide",
+                systemImage: person.isHidden ? "eye" : "eye.slash")
+        }
+    }
+
+    private func start() async {
+        if vm == nil {
+            let api = APIClient(session: session)
+            let repo = repo
+            let personId = person.id
+            vm = AssetGridViewModel(
+                assetRepo: AssetDetailRepository(api: api),
+                albumRepo: AlbumRepository(api: api),
+                snapshotKey: LocalSnapshot.Key.person(personId),
+                loader: {
+                    // /people/{id} tidak lagi menyertakan aset; isinya diambil
+                    // lewat search metadata.
+                    let result = try await repo.assets(personId: personId)
+                    return result.assets.items.map(AssetLite.init)
+                })
+        }
+        await vm?.load()
+
+        // Nama bisa berubah di server sejak daftar dimuat; diambil ulang supaya
+        // judul sampulnya benar.
+        if let detail = try? await repo.detail(person.id) { person = detail }
     }
 
     private func rename() async {
@@ -248,18 +343,20 @@ struct PersonDetailView: View {
         do {
             try await repo.rename(person.id, to: newName)
             person.name = newName
-            showRenameSheet = false
+            listVM?.applyRename(person.id, to: newName)
         } catch {
-            // Handle error
+            actionError = (error as? APIError)?.errorDescription ?? error.localizedDescription
         }
     }
 
     private func toggleHidden() async {
         do {
-            try await repo.setHidden(person.id, to: !person.isHidden)
-            person.isHidden.toggle()
+            let newValue = !person.isHidden
+            try await repo.setHidden(person.id, to: newValue)
+            person.isHidden = newValue
+            listVM?.applyHidden(person.id, to: newValue)
         } catch {
-            // Handle error
+            actionError = (error as? APIError)?.errorDescription ?? error.localizedDescription
         }
     }
 }
@@ -298,4 +395,11 @@ struct RenameSheet: View {
 #Preview {
     PeopleView()
         .environment(SessionManager())
+}
+
+
+/// Pembungkus supaya sekumpulan id bisa dipakai `sheet(item:)`.
+struct SelectedAssetIDs: Identifiable {
+    let id = UUID()
+    let ids: [String]
 }

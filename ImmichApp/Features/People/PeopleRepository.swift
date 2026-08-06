@@ -1,30 +1,38 @@
 import Foundation
 
-final class PeopleRepository {
+class PeopleRepository {
     private let api: APIClient
 
     init(api: APIClient) {
         self.api = api
     }
 
-    func all() async throws -> [PersonDTO] {
+    /// - Parameter size: batas dari SERVER, bukan dipotong setelah diterima.
+    ///   Baris di Library cuma menampilkan belasan orang; menarik seluruhnya
+    ///   lalu membuang sisanya hanya membuang waktu dan memori.
+    func all(size: Int? = nil) async throws -> [PersonDTO] {
         struct Response: Decodable {
             let people: [PersonDTO]
         }
-        let response: Response = try await api.send(.init(path: "/people"))
+        var query: [URLQueryItem] = [.init(name: "withHidden", value: "false")]
+        if let size { query.append(.init(name: "size", value: String(size))) }
+
+        let response: Response = try await api.send(
+            .init(path: "/people", query: query))
         return response.people
     }
 
-    func detail(_ id: String) async throws -> PersonDetailDTO {
-        struct Response: Decodable {
-            let id: String
-            let name: String
-            let birthDate: Date?
-            let thumbnailPath: String?
-            let isHidden: Bool
-            let assets: [AssetResponseDTO]
-        }
-        return try await api.send(.init(path: "/people/\(id)"))
+    /// GET /people/{id} hanya mengembalikan data orangnya; asetnya
+    /// diambil terpisah lewat POST /search/metadata.
+    func detail(_ id: String) async throws -> PersonDTO {
+        try await api.send(.init(path: "/people/\(id)"))
+    }
+
+    func assets(personId: String, page: Int = 1) async throws -> SearchResponseDTO {
+        var request = SearchRequestDTO(page: page)
+        request.personIds = [personId]
+        request.size = 100
+        return try await api.send(.json("/search/metadata", method: .post, body: request))
     }
 
     func rename(_ id: String, to name: String) async throws {
@@ -40,13 +48,4 @@ final class PeopleRepository {
         }
         try await api.sendVoid(.json("/people/\(id)", method: .put, body: Body(isHidden: value)))
     }
-}
-
-struct PersonDetailDTO: Decodable, Identifiable {
-    let id: String
-    let name: String
-    let birthDate: Date?
-    let thumbnailPath: String?
-    let isHidden: Bool
-    let assets: [AssetResponseDTO]
 }

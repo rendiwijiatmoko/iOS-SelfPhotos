@@ -1,6 +1,6 @@
 import Foundation
 
-final class MemoriesRepository {
+class MemoriesRepository {
     private let api: APIClient
 
     init(api: APIClient) {
@@ -8,10 +8,7 @@ final class MemoriesRepository {
     }
 
     func getMemories() async throws -> [MemoryDTO] {
-        struct Response: Decodable {
-            let memories: [MemoryDTO]
-        }
-        let response: Response = try await api.send(.init(path: "/memories"))
-        return response.memories
+        // GET /memories mengembalikan array polos, bukan {memories: [...]}.
+        try await api.send(.init(path: "/memories"))
     }
 }

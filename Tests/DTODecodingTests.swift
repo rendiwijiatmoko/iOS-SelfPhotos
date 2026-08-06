@@ -1,8 +1,28 @@
 import XCTest
 @testable import ImmichApp
 
-class DTODecodingTests: XCTestCase {
+final class DTODecodingTests: XCTestCase {
     let decoder = JSONDecoder.immich
+
+    // MARK: - Date strategy
+
+    func testDateStrategyVariants() throws {
+        // JSONDecoder.immich must accept fractional ISO8601, plain ISO8601 and date-only.
+        let json = #"["2024-01-01T12:00:00.000Z", "2024-01-01T12:00:00Z", "2024-01-01"]"#
+        let dates = try decoder.decode([Date].self, from: json.data(using: .utf8)!)
+
+        XCTAssertEqual(dates.count, 3)
+        XCTAssertEqual(dates[0], dates[1]) // .000 fraction == no fraction
+        // Date-only is midnight UTC of the same day.
+        XCTAssertEqual(dates[2], dates[0].addingTimeInterval(-12 * 3600))
+    }
+
+    func testInvalidDateThrows() {
+        let json = #"["not-a-date"]"#
+        XCTAssertThrowsError(try decoder.decode([Date].self, from: json.data(using: .utf8)!))
+    }
+
+    // MARK: - Auth / server
 
     func testLoginResponseDecoding() throws {
         let json = """
@@ -15,8 +35,7 @@ class DTODecodingTests: XCTestCase {
             "shouldChangePassword": false
         }
         """
-        let data = json.data(using: .utf8)!
-        let dto = try decoder.decode(LoginResponseDTO.self, from: data)
+        let dto = try decoder.decode(LoginResponseDTO.self, from: json.data(using: .utf8)!)
 
         XCTAssertEqual(dto.accessToken, "abc123token")
         XCTAssertEqual(dto.userId, "user-id-123")
@@ -27,10 +46,7 @@ class DTODecodingTests: XCTestCase {
     }
 
     func testServerPingDecoding() throws {
-        let json = #"{"res":"pong"}"#
-        let data = json.data(using: .utf8)!
-        let dto = try decoder.decode(ServerPingDTO.self, from: data)
-
+        let dto = try decoder.decode(ServerPingDTO.self, from: #"{"res":"pong"}"#.data(using: .utf8)!)
         XCTAssertEqual(dto.res, "pong")
     }
 
@@ -44,8 +60,7 @@ class DTODecodingTests: XCTestCase {
             "search": true
         }
         """
-        let data = json.data(using: .utf8)!
-        let dto = try decoder.decode(ServerFeaturesDTO.self, from: data)
+        let dto = try decoder.decode(ServerFeaturesDTO.self, from: json.data(using: .utf8)!)
 
         XCTAssertTrue(dto.smartSearch)
         XCTAssertTrue(dto.facialRecognition)
@@ -54,6 +69,27 @@ class DTODecodingTests: XCTestCase {
         XCTAssertTrue(dto.search)
     }
 
+    func testServerStorageDecoding() throws {
+        let json = """
+        {
+            "diskUse": "1TB",
+            "diskSize": "2TB",
+            "diskUseRaw": 123,
+            "diskSizeRaw": 456,
+            "diskUsagePercentage": 50.5
+        }
+        """
+        let dto = try decoder.decode(ServerStorageDTO.self, from: json.data(using: .utf8)!)
+
+        XCTAssertEqual(dto.diskUse, "1TB")
+        XCTAssertEqual(dto.diskSize, "2TB")
+        XCTAssertEqual(dto.diskUseRaw, 123)
+        XCTAssertEqual(dto.diskSizeRaw, 456)
+        XCTAssertEqual(dto.diskUsagePercentage, 50.5)
+    }
+
+    // MARK: - Users
+
     func testUserResponseDecoding() throws {
         let json = """
         {
@@ -61,18 +97,88 @@ class DTODecodingTests: XCTestCase {
             "email": "user@example.com",
             "name": "John Doe",
             "profileImagePath": "/path/to/image.jpg",
-            "storageLabel": "primary"
+            "storageLabel": "primary",
+            "isAdmin": true
         }
         """
-        let data = json.data(using: .utf8)!
-        let dto = try decoder.decode(UserResponseDTO.self, from: data)
+        let dto = try decoder.decode(UserResponseDTO.self, from: json.data(using: .utf8)!)
 
         XCTAssertEqual(dto.id, "user-123")
         XCTAssertEqual(dto.email, "user@example.com")
         XCTAssertEqual(dto.name, "John Doe")
         XCTAssertEqual(dto.profileImagePath, "/path/to/image.jpg")
         XCTAssertEqual(dto.storageLabel, "primary")
+        XCTAssertEqual(dto.isAdmin, true)
     }
+
+    func testUserOptionalFieldsHandling() throws {
+        let json = """
+        {
+            "id": "user-123",
+            "email": "user@example.com",
+            "name": "John",
+            "profileImagePath": null,
+            "storageLabel": null
+        }
+        """
+        let dto = try decoder.decode(UserResponseDTO.self, from: json.data(using: .utf8)!)
+
+        XCTAssertNil(dto.profileImagePath)
+        XCTAssertNil(dto.storageLabel)
+        XCTAssertNil(dto.isAdmin)
+        // Older servers don't send profileChangedAt at all.
+        XCTAssertNil(dto.profileChangedAt)
+    }
+
+    // MARK: - Profile image
+
+    /// Immich sends an EMPTY STRING, not null, for users who never uploaded one.
+    func testHasProfileImageTreatsEmptyPathAsMissing() {
+        XCTAssertFalse(makeUser(profileImagePath: "").hasProfileImage)
+        XCTAssertFalse(makeUser(profileImagePath: nil).hasProfileImage)
+        XCTAssertTrue(makeUser(profileImagePath: "upload/profile/u1/a.jpg").hasProfileImage)
+    }
+
+    /// The cache key is what makes a replaced profile picture actually download
+    /// again — the endpoint URL itself never changes.
+    func testProfileImageCacheKeyChangesWhenProfileChanges() {
+        let before = makeUser(profileImagePath: "upload/profile/u1/a.jpg",
+                              profileChangedAt: "2026-01-01T00:00:00.000Z")
+        let sameAgain = makeUser(profileImagePath: "upload/profile/u1/a.jpg",
+                                 profileChangedAt: "2026-01-01T00:00:00.000Z")
+        let after = makeUser(profileImagePath: "upload/profile/u1/b.jpg",
+                             profileChangedAt: "2026-02-02T00:00:00.000Z")
+
+        XCTAssertEqual(before.profileImageCacheKey, sameAgain.profileImageCacheKey)
+        XCTAssertNotEqual(before.profileImageCacheKey, after.profileImageCacheKey)
+    }
+
+    /// Fallback for servers that don't send profileChangedAt: the uploaded file
+    /// name is random, so it changes on its own.
+    func testProfileImageCacheKeyFallsBackToPath() {
+        let before = makeUser(profileImagePath: "upload/profile/u1/a.jpg")
+        let after = makeUser(profileImagePath: "upload/profile/u1/b.jpg")
+
+        XCTAssertNotEqual(before.profileImageCacheKey, after.profileImageCacheKey)
+    }
+
+    private func makeUser(
+        profileImagePath: String?,
+        profileChangedAt: String? = nil
+    ) -> UserResponseDTO {
+        let json: [String: Any?] = [
+            "id": "user-123",
+            "email": "user@example.com",
+            "name": "John Doe",
+            "profileImagePath": profileImagePath,
+            "profileChangedAt": profileChangedAt,
+        ]
+        let data = try! JSONSerialization.data(
+            withJSONObject: json.compactMapValues { $0 })
+        return try! decoder.decode(UserResponseDTO.self, from: data)
+    }
+
+    // MARK: - Assets
 
     func testAssetResponseDecoding() throws {
         let json = """
@@ -80,19 +186,18 @@ class DTODecodingTests: XCTestCase {
             "id": "asset-123",
             "type": "IMAGE",
             "originalFileName": "photo.jpg",
-            "fileCreatedAt": "2026-08-03T10:30:00.000Z",
+            "fileCreatedAt": "2024-01-01T12:00:00.000Z",
             "isFavorite": true,
             "isArchived": false,
             "isTrashed": false,
             "duration": null,
             "thumbhash": "abc123hash",
-            "localDateTime": "2026-08-03T10:30:00.000Z",
+            "localDateTime": "2024-01-01T12:00:00.000Z",
             "exifInfo": null,
             "people": null
         }
         """
-        let data = json.data(using: .utf8)!
-        let dto = try decoder.decode(AssetResponseDTO.self, from: data)
+        let dto = try decoder.decode(AssetResponseDTO.self, from: json.data(using: .utf8)!)
 
         XCTAssertEqual(dto.id, "asset-123")
         XCTAssertEqual(dto.type, "IMAGE")
@@ -101,7 +206,59 @@ class DTODecodingTests: XCTestCase {
         XCTAssertFalse(dto.isArchived)
         XCTAssertFalse(dto.isTrashed)
         XCTAssertFalse(dto.isVideo)
+        XCTAssertNil(dto.duration)
+        XCTAssertNil(dto.durationText)
         XCTAssertEqual(dto.thumbhash, "abc123hash")
+    }
+
+    /// Immich mengirim durasi sebagai string jam, bukan angka.
+    func testAssetVideoDurationClockString() throws {
+        let json = """
+        {
+            "id": "asset-456",
+            "type": "VIDEO",
+            "originalFileName": "clip.mov",
+            "fileCreatedAt": "2024-01-01T12:00:00.000Z",
+            "isFavorite": false,
+            "isArchived": false,
+            "isTrashed": false,
+            "duration": "0:01:35.00000",
+            "thumbhash": null,
+            "localDateTime": "2024-01-01T12:00:00.000Z",
+            "exifInfo": null,
+            "people": null
+        }
+        """
+        let dto = try decoder.decode(AssetResponseDTO.self, from: json.data(using: .utf8)!)
+
+        XCTAssertTrue(dto.isVideo)
+        XCTAssertEqual(dto.duration, 95)
+        XCTAssertEqual(dto.durationText, "1:35")
+    }
+
+    /// Server yang mengirim angka tidak boleh menjatuhkan decoding; angkanya
+    /// diperlakukan sebagai detik.
+    func testAssetVideoDurationNumberFallback() throws {
+        let json = """
+        {
+            "id": "asset-457",
+            "type": "VIDEO",
+            "originalFileName": "clip.mov",
+            "fileCreatedAt": "2024-01-01T12:00:00.000Z",
+            "isFavorite": false,
+            "isArchived": false,
+            "isTrashed": false,
+            "duration": 95,
+            "thumbhash": null,
+            "localDateTime": "2024-01-01T12:00:00.000Z",
+            "exifInfo": null,
+            "people": null
+        }
+        """
+        let dto = try decoder.decode(AssetResponseDTO.self, from: json.data(using: .utf8)!)
+
+        XCTAssertEqual(dto.duration, 95)
+        XCTAssertEqual(dto.durationText, "1:35")
     }
 
     func testExifDTODecoding() throws {
@@ -112,7 +269,7 @@ class DTODecodingTests: XCTestCase {
             "exifImageWidth": 4000,
             "exifImageHeight": 3000,
             "fileSizeInByte": 5242880,
-            "dateTimeOriginal": "2026-08-03T10:30:00.000Z",
+            "dateTimeOriginal": "2024-01-01T12:00:00.000Z",
             "latitude": 40.7128,
             "longitude": -74.0060,
             "city": "New York",
@@ -125,8 +282,7 @@ class DTODecodingTests: XCTestCase {
             "exposureTime": "1/125"
         }
         """
-        let data = json.data(using: .utf8)!
-        let dto = try decoder.decode(ExifDTO.self, from: data)
+        let dto = try decoder.decode(ExifDTO.self, from: json.data(using: .utf8)!)
 
         XCTAssertEqual(dto.make, "Canon")
         XCTAssertEqual(dto.model, "EOS 5D Mark IV")
@@ -138,17 +294,18 @@ class DTODecodingTests: XCTestCase {
         XCTAssertEqual(dto.longitude, -74.0060)
     }
 
+    // MARK: - Timeline
+
     func testTimeBucketDecoding() throws {
         let json = """
         {
-            "timeBucket": "2026-08",
+            "timeBucket": "2024-08",
             "count": 42
         }
         """
-        let data = json.data(using: .utf8)!
-        let dto = try decoder.decode(TimeBucketDTO.self, from: data)
+        let dto = try decoder.decode(TimeBucketDTO.self, from: json.data(using: .utf8)!)
 
-        XCTAssertEqual(dto.timeBucket, "2026-08")
+        XCTAssertEqual(dto.timeBucket, "2024-08")
         XCTAssertEqual(dto.count, 42)
     }
 
@@ -156,22 +313,46 @@ class DTODecodingTests: XCTestCase {
         let json = """
         {
             "id": ["asset-1", "asset-2", "asset-3"],
+            "ownerId": ["owner-1", "owner-1", "owner-1"],
             "isImage": [true, true, false],
             "isFavorite": [false, true, false],
-            "thumbhash": ["hash1", "hash2", "hash3"],
-            "fileCreatedAt": ["2026-08-03T10:00:00.000Z", "2026-08-02T15:30:00.000Z", "2026-08-01T12:00:00.000Z"],
+            "thumbhash": ["hash1", null, "hash3"],
+            "fileCreatedAt": ["2024-08-03T10:00:00.000Z", "2024-08-02T15:30:00.000Z", "2024-08-01T12:00:00.000Z"],
+            "duration": [null, null, "0:00:12.00000"],
             "ratio": [1.5, 1.0, 0.75]
         }
         """
-        let data = json.data(using: .utf8)!
-        let dto = try decoder.decode(TimelineBucketDTO.self, from: data)
+        let dto = try decoder.decode(TimelineBucketDTO.self, from: json.data(using: .utf8)!)
 
         XCTAssertEqual(dto.id.count, 3)
         XCTAssertEqual(dto.id[0], "asset-1")
         XCTAssertEqual(dto.isImage?[2], false)
         XCTAssertEqual(dto.isFavorite?[1], true)
+        XCTAssertEqual(dto.thumbhash?[1], String?.none)
+        XCTAssertNil(dto.duration?[0].seconds)
+        XCTAssertEqual(dto.duration?[2].seconds, 12)
         XCTAssertEqual(dto.ratio?[0], 1.5)
     }
+
+    /// Inilah bentuk yang dulu menjatuhkan seluruh bucket: satu video di antara
+    /// foto-foto sudah cukup, dan album yang memuatnya gagal dibuka.
+    func testTimelineBucketDurationVariants() throws {
+        let json = """
+        {
+            "id": ["a", "b", "c", "d"],
+            "duration": [null, "0:01:35.00000", 95, true]
+        }
+        """
+        let dto = try decoder.decode(TimelineBucketDTO.self, from: json.data(using: .utf8)!)
+
+        XCTAssertNil(dto.duration?[0].seconds)
+        XCTAssertEqual(dto.duration?[1].seconds, 95)
+        XCTAssertEqual(dto.duration?[2].seconds, 95)
+        // Bentuk asing kehilangan durasinya saja, bukan seluruh bucket.
+        XCTAssertNil(dto.duration?[3].seconds)
+    }
+
+    // MARK: - Albums / people
 
     func testAlbumResponseDecoding() throws {
         let json = """
@@ -182,12 +363,11 @@ class DTODecodingTests: XCTestCase {
             "assetCount": 10,
             "albumThumbnailAssetId": "asset-123",
             "shared": false,
-            "createdAt": "2026-08-03T10:30:00.000Z",
+            "createdAt": "2024-01-01T12:00:00.000Z",
             "assets": null
         }
         """
-        let data = json.data(using: .utf8)!
-        let dto = try decoder.decode(AlbumResponseDTO.self, from: data)
+        let dto = try decoder.decode(AlbumResponseDTO.self, from: json.data(using: .utf8)!)
 
         XCTAssertEqual(dto.id, "album-123")
         XCTAssertEqual(dto.albumName, "My Album")
@@ -196,39 +376,46 @@ class DTODecodingTests: XCTestCase {
     }
 
     func testPersonDTODecoding() throws {
+        // birthDate is date-only in the API.
         let json = """
         {
             "id": "person-123",
             "name": "John Doe",
-            "birthDate": "2000-01-15T00:00:00.000Z",
+            "birthDate": "2000-01-15",
             "thumbnailPath": "/path/to/thumbnail.jpg",
             "isHidden": false
         }
         """
-        let data = json.data(using: .utf8)!
-        let dto = try decoder.decode(PersonDTO.self, from: data)
+        let dto = try decoder.decode(PersonDTO.self, from: json.data(using: .utf8)!)
 
         XCTAssertEqual(dto.id, "person-123")
         XCTAssertEqual(dto.name, "John Doe")
+        XCTAssertNotNil(dto.birthDate)
         XCTAssertFalse(dto.isHidden)
     }
 
-    func testMemoryDTODecoding() throws {
-        let json = """
-        {
-            "id": "memory-123",
-            "type": "ON_THIS_DAY",
-            "memoryAt": "2026-08-03T00:00:00.000Z",
-            "assets": []
-        }
-        """
-        let data = json.data(using: .utf8)!
-        let dto = try decoder.decode(MemoryDTO.self, from: data)
+    // MARK: - Memories (GET /memories returns a bare array)
 
-        XCTAssertEqual(dto.id, "memory-123")
-        XCTAssertEqual(dto.type, "ON_THIS_DAY")
-        XCTAssertTrue(dto.assets.isEmpty)
+    func testMemoriesBareArrayDecoding() throws {
+        let json = """
+        [
+            {
+                "id": "memory-123",
+                "type": "on_this_day",
+                "memoryAt": "2024-08-03T00:00:00.000Z",
+                "assets": []
+            }
+        ]
+        """
+        let memories = try decoder.decode([MemoryDTO].self, from: json.data(using: .utf8)!)
+
+        XCTAssertEqual(memories.count, 1)
+        XCTAssertEqual(memories[0].id, "memory-123")
+        XCTAssertEqual(memories[0].type, "on_this_day")
+        XCTAssertTrue(memories[0].assets.isEmpty)
     }
+
+    // MARK: - Search
 
     func testSearchResponseDecoding() throws {
         let json = """
@@ -239,13 +426,13 @@ class DTODecodingTests: XCTestCase {
                         "id": "asset-1",
                         "type": "IMAGE",
                         "originalFileName": "photo1.jpg",
-                        "fileCreatedAt": "2026-08-03T10:30:00.000Z",
+                        "fileCreatedAt": "2024-08-03T10:30:00.000Z",
                         "isFavorite": false,
                         "isArchived": false,
                         "isTrashed": false,
                         "duration": null,
                         "thumbhash": "hash1",
-                        "localDateTime": "2026-08-03T10:30:00.000Z",
+                        "localDateTime": "2024-08-03T10:30:00.000Z",
                         "exifInfo": null,
                         "people": null
                     }
@@ -255,28 +442,98 @@ class DTODecodingTests: XCTestCase {
             }
         }
         """
-        let data = json.data(using: .utf8)!
-        let dto = try decoder.decode(SearchResponseDTO.self, from: data)
+        let dto = try decoder.decode(SearchResponseDTO.self, from: json.data(using: .utf8)!)
 
         XCTAssertEqual(dto.assets.items.count, 1)
         XCTAssertEqual(dto.assets.total, 1)
         XCTAssertNil(dto.assets.nextPage)
     }
 
-    func testOptionalFieldsHandling() throws {
-        let json = """
+    func testSearchSuggestionsBareArrayDecoding() throws {
+        // GET /search/suggestions returns a plain string array.
+        let suggestions = try decoder.decode([String].self, from: #"["a","b"]"#.data(using: .utf8)!)
+        XCTAssertEqual(suggestions, ["a", "b"])
+    }
+
+    // MARK: - Sync stream (JSON Lines: {type, data, ack})
+
+    func testSyncAssetV1LineDecoding() throws {
+        let line = """
         {
-            "id": "user-123",
-            "email": "user@example.com",
-            "name": "John",
-            "profileImagePath": null,
-            "storageLabel": null
+            "type": "AssetV1",
+            "data": {
+                "id": "9a8b7c6d-0000-0000-0000-000000000001",
+                "ownerId": "9a8b7c6d-0000-0000-0000-000000000002",
+                "originalFileName": "IMG_0001.HEIC",
+                "checksum": "sVUzS8bZ0dJIeYVPH3EqFw7VNBM=",
+                "type": "IMAGE",
+                "visibility": "timeline",
+                "isFavorite": true,
+                "thumbhash": "1QcSHQRnh493V4dIh4eXh1h4kJUI",
+                "width": 4032,
+                "height": 3024,
+                "duration": null,
+                "stackId": null,
+                "libraryId": null,
+                "livePhotoVideoId": null,
+                "fileCreatedAt": "2024-01-01T12:00:00.000Z",
+                "fileModifiedAt": "2024-01-02T12:00:00.000Z",
+                "localDateTime": "2024-01-01T19:00:00.000Z",
+                "deletedAt": null
+            },
+            "ack": "AssetV1|0189f0f0-0000-7000-8000-000000000000"
         }
         """
-        let data = json.data(using: .utf8)!
-        let dto = try decoder.decode(UserResponseDTO.self, from: data)
+        let data = line.data(using: .utf8)!
 
-        XCTAssertNil(dto.profileImagePath)
-        XCTAssertNil(dto.storageLabel)
+        let envelope = try decoder.decode(SyncLineEnvelopeDTO.self, from: data)
+        XCTAssertEqual(envelope.type, "AssetV1")
+        XCTAssertEqual(envelope.ack, "AssetV1|0189f0f0-0000-7000-8000-000000000000")
+
+        let payload = try decoder.decode(SyncLineDataDTO<SyncAssetV1DTO>.self, from: data).data
+        XCTAssertEqual(payload.id, "9a8b7c6d-0000-0000-0000-000000000001")
+        XCTAssertEqual(payload.ownerId, "9a8b7c6d-0000-0000-0000-000000000002")
+        XCTAssertEqual(payload.originalFileName, "IMG_0001.HEIC")
+        XCTAssertEqual(payload.checksum, "sVUzS8bZ0dJIeYVPH3EqFw7VNBM=")
+        XCTAssertEqual(payload.type, "IMAGE")
+        XCTAssertEqual(payload.visibility, "timeline")
+        XCTAssertTrue(payload.isFavorite)
+        XCTAssertEqual(payload.thumbhash, "1QcSHQRnh493V4dIh4eXh1h4kJUI")
+        XCTAssertEqual(payload.width, 4032)
+        XCTAssertEqual(payload.height, 3024)
+        XCTAssertNil(payload.duration)
+        XCTAssertNil(payload.stackId)
+        XCTAssertNil(payload.libraryId)
+        XCTAssertNil(payload.livePhotoVideoId)
+        XCTAssertNotNil(payload.fileCreatedAt)
+        XCTAssertNotNil(payload.fileModifiedAt)
+        XCTAssertNotNil(payload.localDateTime)
+        XCTAssertNil(payload.deletedAt)
+    }
+
+    func testSyncAssetDeleteV1LineDecoding() throws {
+        let line = """
+        {
+            "type": "AssetDeleteV1",
+            "data": { "assetId": "9a8b7c6d-0000-0000-0000-000000000001" },
+            "ack": "AssetDeleteV1|0189f0f0-0000-7000-8000-000000000001"
+        }
+        """
+        let data = line.data(using: .utf8)!
+
+        let envelope = try decoder.decode(SyncLineEnvelopeDTO.self, from: data)
+        XCTAssertEqual(envelope.type, "AssetDeleteV1")
+        XCTAssertEqual(envelope.ack, "AssetDeleteV1|0189f0f0-0000-7000-8000-000000000001")
+
+        let payload = try decoder.decode(SyncLineDataDTO<SyncAssetDeleteV1DTO>.self, from: data).data
+        XCTAssertEqual(payload.assetId, "9a8b7c6d-0000-0000-0000-000000000001")
+    }
+
+    func testSyncStreamRequestEncoding() throws {
+        let body = SyncStreamRequestDTO(types: ["AssetV1", "AssetDeleteV1"])
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder.immich.encode(body)) as? [String: Any]
+
+        XCTAssertEqual(json?["types"] as? [String], ["AssetV1", "AssetDeleteV1"])
+        XCTAssertNil(json?["reset"])
     }
 }

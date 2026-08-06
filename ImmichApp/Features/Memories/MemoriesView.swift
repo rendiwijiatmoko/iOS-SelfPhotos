@@ -1,22 +1,33 @@
 import SwiftUI
 
+/// Semua kenangan hari ini, satu kartu per tahun.
+///
+/// Baris di Library hanya memuat sebagian; layar ini yang memuat semuanya.
 struct MemoriesView: View {
     @Environment(SessionManager.self) private var session
     @State private var vm: MemoriesViewModel?
+    @State private var openedStoryID: String?
 
     var body: some View {
-        NavigationStack {
-            content
-                .navigationTitle("Memories")
-        }
-        .task {
-            if vm == nil {
-                let api = APIClient(session: session)
-                let repo = MemoriesRepository(api: api)
-                vm = MemoriesViewModel(repo: repo)
+        content
+            .navigationTitle("On This Day")
+            .navigationBarTitleDisplayMode(.inline)
+            .fullScreenCover(isPresented: openedStoryBinding) { storyCover }
+            .task {
+                if vm == nil {
+                    let api = APIClient(session: session)
+                    vm = MemoriesViewModel(
+                        repo: MemoriesRepository(api: api),
+                        assetRepo: AssetDetailRepository(api: api))
+                }
+                // Dimuat SEKALI, bukan tiap `task` berjalan.
+                //
+                // `fullScreenCover` melepas layar ini dari hierarki selama story
+                // tampil, jadi menutup story menjalankan `task` lagi. Tanpa
+                // penjaga ini, kembali dari story berarti spinner layar penuh
+                // dan satu permintaan `/memories` baru — tiap kali.
+                if vm?.phase.isIdle == true { await vm?.loadMemories() }
             }
-            await vm?.loadMemories()
-        }
     }
 
     @ViewBuilder
@@ -25,12 +36,13 @@ struct MemoriesView: View {
             switch vm.phase {
             case .idle, .loading:
                 ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             case .loaded:
-                if vm.memories.isEmpty {
+                if vm.stories.isEmpty {
                     emptyState
                 } else {
-                    memoriesList(vm)
+                    grid(vm.stories)
                 }
 
             case .failed(let error):
@@ -38,213 +50,58 @@ struct MemoriesView: View {
             }
         } else {
             ProgressView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    @ViewBuilder
-    private func memoriesList(_ vm: MemoriesViewModel) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 12) {
-                ForEach(vm.memories) { memory in
-                    MemoryCardView(memory: memory)
-                        .onTapGesture {
-                            vm.selectedMemory = memory
-                        }
+    private func grid(_ stories: [MemoryStory]) -> some View {
+        ScrollView {
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 160), spacing: 12)],
+                spacing: 12
+            ) {
+                ForEach(stories) { story in
+                    // Lebarnya diserahkan ke kolom grid; kartu selebar 180
+                    // tetap akan meluber di layar sempit.
+                    MemoryCard(story: story, width: nil) { openedStoryID = story.id }
                 }
             }
-            .padding(12)
-        }
-        .frame(height: 180)
-        .sheet(item: Binding(
-            get: { vm.selectedMemory },
-            set: { vm.selectedMemory = $0 }
-        )) { memory in
-            StoryViewer(memory: memory)
-                .presentationDetents([.large])
+            .padding(16)
         }
     }
 
     @ViewBuilder
+    private var storyCover: some View {
+        if let vm, let openedStoryID {
+            MemoryStoryView(
+                stories: vm.stories,
+                initialStoryID: openedStoryID,
+                prepareShare: { await vm.shareURL(for: $0) })
+        }
+    }
+
+    private var openedStoryBinding: Binding<Bool> {
+        Binding(
+            get: { openedStoryID != nil },
+            set: { if !$0 { openedStoryID = nil } })
+    }
+
     private var emptyState: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "calendar.circle.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
-            Text("No Memories")
-                .font(.headline)
-            Text("You'll see your photos from this day in previous years")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+        ContentUnavailableView {
+            Label("No Memories", systemImage: "sparkles")
+        } description: {
+            Text("Photos from this day in previous years will show up here.")
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    @ViewBuilder
     private func errorState(_ error: String, _ vm: MemoriesViewModel) -> some View {
-        VStack(spacing: 16) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.orange)
-            Text("Failed to Load")
-                .font(.headline)
+        ContentUnavailableView {
+            Label("Failed to Load", systemImage: "exclamationmark.triangle")
+        } description: {
             Text(error)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Button("Retry") {
-                Task { await vm.retry() }
-            }
-            .buttonStyle(.borderedProminent)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-struct MemoryCardView: View {
-    let memory: MemoryDTO
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let firstAsset = memory.assets.first {
-                AuthImage(assetId: firstAsset.id, thumbhash: firstAsset.thumbhash)
-                    .frame(height: 120)
-                    .clipped()
-                    .cornerRadius(8)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(memory.type)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("\(memory.assets.count) photo\(memory.assets.count != 1 ? "s" : "")")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 8)
-
-            Spacer()
-        }
-        .frame(width: 140)
-        .frame(maxHeight: .infinity)
-        .background(.gray.opacity(0.1))
-        .cornerRadius(8)
-    }
-}
-
-struct StoryViewer: View {
-    @Environment(\.dismiss) var dismiss
-    let memory: MemoryDTO
-    @State private var currentIndex = 0
-    @State private var autoAdvanceTimer: Timer?
-    @State private var isPaused = false
-    @State private var showControls = true
-
-    var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-
-            if !memory.assets.isEmpty {
-                TabView(selection: $currentIndex) {
-                    ForEach(Array(memory.assets.enumerated()), id: \.offset) { index, asset in
-                        VStack {
-                            AuthImage(assetId: asset.id, size: "preview", thumbhash: asset.thumbhash)
-                                .scaledToFit()
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(.black)
-                        .tag(index)
-                    }
-                }
-                .tabViewStyle(.page(indexDisplayMode: .never))
-                .ignoresSafeArea()
-
-                VStack {
-                    HStack(spacing: 4) {
-                        ForEach(0..<memory.assets.count, id: \.self) { index in
-                            Capsule()
-                                .fill(index == currentIndex ? Color.white : Color.white.opacity(0.5))
-                                .frame(height: 2)
-                        }
-                    }
-                    .padding(12)
-
-                    Spacer()
-
-                    if showControls {
-                        HStack {
-                            Button {
-                                if currentIndex > 0 {
-                                    currentIndex -= 1
-                                    resetTimer()
-                                }
-                            } label: {
-                                Image(systemName: "chevron.left")
-                                    .foregroundStyle(.white)
-                            }
-                            .frame(maxWidth: .infinity)
-
-                            Text("\(currentIndex + 1) / \(memory.assets.count)")
-                                .foregroundStyle(.white)
-                                .font(.caption)
-
-                            Button {
-                                if currentIndex < memory.assets.count - 1 {
-                                    currentIndex += 1
-                                    resetTimer()
-                                }
-                            } label: {
-                                Image(systemName: "chevron.right")
-                                    .foregroundStyle(.white)
-                            }
-                            .frame(maxWidth: .infinity)
-                        }
-                        .padding(12)
-                        .background(.black.opacity(0.6))
-                    }
-                }
-            }
-        }
-        .onTapGesture {
-            withAnimation {
-                showControls.toggle()
-            }
-        }
-        .onLongPressGesture(minimumDuration: 0.1, perform: {
-            isPaused = true
-            autoAdvanceTimer?.invalidate()
-        }) { _ in 
-            isPaused = false
-            startAutoAdvance()
-        }
-        .onAppear {
-            startAutoAdvance()
-        }
-        .onDisappear {
-            autoAdvanceTimer?.invalidate()
+        } actions: {
+            Button("Retry") { Task { await vm.retry() } }
+                .buttonStyle(.borderedProminent)
         }
     }
-
-    private func startAutoAdvance() {
-        autoAdvanceTimer?.invalidate()
-        guard !isPaused else { return }
-
-        autoAdvanceTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { _ in
-            if currentIndex < memory.assets.count - 1 {
-                withAnimation {
-                    currentIndex += 1
-                }
-            } else {
-                dismiss()
-            }
-        }
-    }
-
-    private func resetTimer() {
-        startAutoAdvance()
-    }
-}
-
-#Preview {
-    MemoriesView()
-        .environment(SessionManager())
 }

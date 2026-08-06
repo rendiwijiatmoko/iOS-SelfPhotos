@@ -1,20 +1,44 @@
 import XCTest
 @testable import ImmichApp
 
-class AlbumListViewModelTests: XCTestCase {
+@MainActor
+final class AlbumListViewModelTests: XCTestCase {
     var mockRepo: MockAlbumRepository!
     var viewModel: AlbumListViewModel!
 
-    override func setUp() {
-        super.setUp()
-        mockRepo = MockAlbumRepository()
+    override func setUp() async throws {
+        try await super.setUp()
+        // Potret lokal BERTAHAN antar-run, dan `loadAlbums` sekarang membacanya
+        // lebih dulu. Tanpa dibersihkan, test yang menguji kegagalan akan
+        // menemukan daftar yang sudah terisi dari run sebelumnya — dan lulus
+        // atau gagal tergantung urutan eksekusi.
+        LocalSnapshot.clearAll()
+        mockRepo = MockAlbumRepository(api: makeStubAPIClient())
         viewModel = AlbumListViewModel(repo: mockRepo)
+    }
+
+    override func tearDown() async throws {
+        LocalSnapshot.clearAll()
+        try await super.tearDown()
+    }
+
+    private func makeAlbum(id: String, name: String, shared: Bool = false, assetCount: Int = 0) -> AlbumResponseDTO {
+        AlbumResponseDTO(
+            id: id,
+            albumName: name,
+            description: nil,
+            assetCount: assetCount,
+            albumThumbnailAssetId: nil,
+            shared: shared,
+            createdAt: Date(),
+            assets: nil
+        )
     }
 
     func testInitialState() {
         XCTAssertTrue(viewModel.albums.isEmpty)
         XCTAssertFalse(viewModel.showCreateSheet)
-        XCTAssertTrue(viewModel.createAlbumName.isEmpty)
+        XCTAssertNil(viewModel.actionError)
         if case .idle = viewModel.phase {
             // Success
         } else {
@@ -23,21 +47,25 @@ class AlbumListViewModelTests: XCTestCase {
     }
 
     func testLoadAlbumsSuccess() async {
-        let mockAlbums = [
-            AlbumResponseDTO(id: "1", albumName: "Summer", description: nil, assetCount: 10, albumThumbnailAssetId: nil, shared: false, createdAt: Date(), assets: nil),
-            AlbumResponseDTO(id: "2", albumName: "Shared Album", description: nil, assetCount: 5, albumThumbnailAssetId: nil, shared: true, createdAt: Date(), assets: nil),
+        mockRepo.mockAlbums = [
+            makeAlbum(id: "1", name: "Summer", assetCount: 10),
+            makeAlbum(id: "2", name: "Shared Album", shared: true, assetCount: 5),
         ]
-        mockRepo.mockAlbums = mockAlbums
 
         await viewModel.loadAlbums()
 
         XCTAssertEqual(viewModel.albums.count, 2)
         XCTAssertEqual(viewModel.myAlbums.count, 1)
         XCTAssertEqual(viewModel.sharedAlbums.count, 1)
+        if case .loaded = viewModel.phase {
+            // Success
+        } else {
+            XCTFail("Expected loaded phase")
+        }
     }
 
     func testLoadAlbumsError() async {
-        mockRepo.shouldFail = true
+        mockRepo.shouldFailAll = true
 
         await viewModel.loadAlbums()
 
@@ -49,49 +77,65 @@ class AlbumListViewModelTests: XCTestCase {
     }
 
     func testCreateAlbum() async {
-        let newAlbum = AlbumResponseDTO(
-            id: "new-1",
-            albumName: "New Album",
-            description: nil,
-            assetCount: 0,
-            albumThumbnailAssetId: nil,
-            shared: false,
-            createdAt: Date(),
-            assets: nil
-        )
-        mockRepo.mockCreateResult = newAlbum
+        mockRepo.mockCreateResult = makeAlbum(id: "new-1", name: "New Album")
 
-        viewModel.createAlbumName = "New Album"
-        await viewModel.createAlbum()
+        let error = await viewModel.createAlbum(
+            name: "New Album", description: "", assetIds: [])
 
+        XCTAssertNil(error)
         XCTAssertTrue(viewModel.albums.contains { $0.id == "new-1" })
-        XCTAssertTrue(viewModel.createAlbumName.isEmpty)
-        XCTAssertFalse(viewModel.showCreateSheet)
     }
 
     func testCreateAlbumEmptyName() async {
-        viewModel.createAlbumName = ""
-        await viewModel.createAlbum()
+        let error = await viewModel.createAlbum(
+            name: "", description: "", assetIds: [])
 
+        XCTAssertNil(error)
         XCTAssertTrue(viewModel.albums.isEmpty)
     }
 
+    func testCreateAlbumFailureReturnsErrorAndKeepsListPhase() async {
+        mockRepo.mockAlbums = [makeAlbum(id: "1", name: "Existing")]
+        await viewModel.loadAlbums()
+
+        mockRepo.shouldFailCreate = true
+        let error = await viewModel.createAlbum(
+            name: "Doomed", description: "", assetIds: [])
+
+        // Kegagalan sheet DIKEMBALIKAN; `phase` milik daftar dan harus tetap
+        // loaded, daftarnya pun tidak boleh tersentuh.
+        XCTAssertNotNil(error)
+        XCTAssertEqual(viewModel.albums.count, 1)
+        if case .loaded = viewModel.phase {
+            // Success
+        } else {
+            XCTFail("Expected phase to stay loaded after create failure")
+        }
+    }
+
     func testDeleteAlbum() async {
-        let album = AlbumResponseDTO(id: "1", albumName: "To Delete", description: nil, assetCount: 0, albumThumbnailAssetId: nil, shared: false, createdAt: Date(), assets: nil)
-        viewModel.albums = [album]
+        viewModel.albums = [makeAlbum(id: "1", name: "To Delete")]
 
         await viewModel.deleteAlbum("1")
 
         XCTAssertTrue(viewModel.albums.isEmpty)
     }
 
-    func testAlbumFiltering() async {
-        let albums = [
-            AlbumResponseDTO(id: "1", albumName: "My Album 1", description: nil, assetCount: 5, albumThumbnailAssetId: nil, shared: false, createdAt: Date(), assets: nil),
-            AlbumResponseDTO(id: "2", albumName: "My Album 2", description: nil, assetCount: 3, albumThumbnailAssetId: nil, shared: false, createdAt: Date(), assets: nil),
-            AlbumResponseDTO(id: "3", albumName: "Shared Album", description: nil, assetCount: 10, albumThumbnailAssetId: nil, shared: true, createdAt: Date(), assets: nil),
+    func testDeleteAlbumFailureKeepsAlbum() async {
+        viewModel.albums = [makeAlbum(id: "1", name: "Sticky")]
+        mockRepo.shouldFailDelete = true
+
+        await viewModel.deleteAlbum("1")
+
+        XCTAssertEqual(viewModel.albums.count, 1)
+    }
+
+    func testAlbumFiltering() {
+        viewModel.albums = [
+            makeAlbum(id: "1", name: "My Album 1", assetCount: 5),
+            makeAlbum(id: "2", name: "My Album 2", assetCount: 3),
+            makeAlbum(id: "3", name: "Shared Album", shared: true, assetCount: 10),
         ]
-        viewModel.albums = albums
 
         XCTAssertEqual(viewModel.myAlbums.count, 2)
         XCTAssertEqual(viewModel.sharedAlbums.count, 1)
@@ -103,33 +147,33 @@ class AlbumListViewModelTests: XCTestCase {
 class MockAlbumRepository: AlbumRepository {
     var mockAlbums: [AlbumResponseDTO] = []
     var mockCreateResult: AlbumResponseDTO?
-    var shouldFail = false
-
-    init() {
-        let mockSession = SessionManager()
-        let mockAPI = MockAPIClient()
-        super.init(api: mockAPI)
-    }
+    var shouldFailAll = false
+    var shouldFailCreate = false
+    var shouldFailDelete = false
 
     override func all() async throws -> [AlbumResponseDTO] {
-        if shouldFail {
+        if shouldFailAll {
             throw APIError.unknown
         }
         return mockAlbums
     }
 
-    override func create(name: String, assetIds: [String] = []) async throws -> AlbumResponseDTO {
-        if shouldFail {
+    override func create(
+        name: String,
+        description: String?,
+        assetIds: [String]
+    ) async throws -> AlbumResponseDTO {
+        if shouldFailCreate {
+            throw APIError.server(status: 500, message: "create failed")
+        }
+        guard let mockCreateResult else {
             throw APIError.unknown
         }
-        guard let result = mockCreateResult else {
-            throw APIError.unknown
-        }
-        return result
+        return mockCreateResult
     }
 
     override func delete(_ id: String) async throws {
-        if shouldFail {
+        if shouldFailDelete {
             throw APIError.unknown
         }
         mockAlbums.removeAll { $0.id == id }

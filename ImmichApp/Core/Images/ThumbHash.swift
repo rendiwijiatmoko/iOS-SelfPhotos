@@ -12,7 +12,10 @@ enum ThumbHash {
     /// jumlah entri sudah cukup.
     private static let cache: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
-        cache.countLimit = 500
+        cache.countLimit = 300
+        // Batas biaya ikut dipasang: batas jumlah saja tidak menjamin apa pun
+        // kalau ternyata gambarnya lebih besar dari dugaan.
+        cache.totalCostLimit = 8 * 1024 * 1024
         return cache
     }()
 
@@ -29,7 +32,10 @@ enum ThumbHash {
               let bitmap = ThumbHashDecoder.decode([UInt8](data)),
               let image = image(from: bitmap) else { return nil }
 
-        cache.setObject(image, forKey: base64 as NSString)
+        cache.setObject(
+            image,
+            forKey: base64 as NSString,
+            cost: image.cgImage.map { $0.bytesPerRow * $0.height } ?? 1)
         return image
     }
 

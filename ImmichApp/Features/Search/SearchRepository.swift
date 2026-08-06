@@ -1,35 +1,39 @@
 import Foundation
 
-final class SearchRepository {
+class SearchRepository {
     private let api: APIClient
 
     init(api: APIClient) {
         self.api = api
     }
 
-    func smartSearch(_ query: String, page: Int = 1) async throws -> SearchResponseDTO {
-        let body = SearchRequestDTO(query: query, page: page)
-        return try await api.send(.json("/search/smart", method: .post, body: body))
+    /// Menerima permintaan UTUH, bukan sekadar kata kuncinya.
+    ///
+    /// Penyaring — orang, kota, tanggal, jenis media — dikirim di badan yang sama
+    /// dengan kata kuncinya; menyaringnya di klien setelah hasil datang berarti
+    /// halaman kedua bisa habis tersaring dan daftarnya berhenti tanpa alasan.
+    func smartSearch(_ request: SearchRequestDTO) async throws -> SearchResponseDTO {
+        try await api.send(.json("/search/smart", method: .post, body: request))
     }
 
     func metadataSearch(_ request: SearchRequestDTO) async throws -> SearchResponseDTO {
         try await api.send(.json("/search/metadata", method: .post, body: request))
     }
 
-    func suggestions() async throws -> [String] {
-        struct Response: Decodable {
-            let suggestions: [String]
-        }
-        let response: Response = try await api.send(.init(path: "/search/suggestions"))
-        return response.suggestions
-    }
-
-    func explore() async throws -> ExploreResponseDTO {
-        try await api.send(.init(path: "/search/explore"))
+    /// GET /search/suggestions wajib menyertakan `type` dan mengembalikan [String] polos.
+    func suggestions(type: String = "city") async throws -> [String] {
+        try await api.send(.init(
+            path: "/search/suggestions",
+            query: [.init(name: "type", value: type)]))
     }
 }
 
-struct ExploreResponseDTO: Decodable {
-    let cities: [String]?
-    let things: [String]?
+/// GET /search/explore mengembalikan array {fieldName, items: [{value, data}]}.
+struct SearchExploreItemDTO: Decodable {
+    struct Item: Decodable {
+        let value: String
+        let data: AssetResponseDTO
+    }
+    let fieldName: String
+    let items: [Item]
 }

@@ -1,65 +1,47 @@
 import XCTest
 @testable import ImmichApp
 
-class MockSessionManager: SessionManager {
-    private(set) var testToken: String?
-    private(set) var testBaseURL: URL?
-
-    func setTestToken(_ token: String) {
-        testToken = token
-    }
-
-    func setTestBaseURL(_ url: URL) {
-        testBaseURL = url
-        baseURL = url
-    }
-
-    override nonisolated var authHeaders: [String: String] {
-        MainActor.assumeIsolated {
-            guard let testToken else { return [:] }
-            return ["Authorization": "Bearer \(testToken)"]
-        }
-    }
-}
-
-class APIClientTests: XCTestCase {
+@MainActor
+final class APIClientTests: XCTestCase {
     var mockSession: MockSessionManager!
-    var mockURLSession: URLSession!
     var apiClient: APIClient!
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
+        MockURLProtocol.reset()
+
         mockSession = MockSessionManager()
-        mockSession.setTestBaseURL(URL(string: "https://test.example.com/api")!)
+        try mockSession.setServer("https://test.example.com")
 
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
-        mockURLSession = URLSession(configuration: config)
-        apiClient = APIClient(session: mockSession, urlSession: mockURLSession)
+        apiClient = APIClient(session: mockSession, urlSession: URLSession(configuration: config))
     }
 
-    func testPingSuccess() async throws {
-        let expectedData = #"{"res":"pong"}"#.data(using: .utf8)!
-        MockURLProtocol.mockData = expectedData
+    override func tearDown() async throws {
+        MockURLProtocol.reset()
+        try await super.tearDown()
+    }
+
+    private func stub(status: Int, data: Data) {
+        MockURLProtocol.mockData = data
         MockURLProtocol.mockResponse = HTTPURLResponse(
-            url: URL(string: "https://test.example.com/api/server/ping")!,
-            statusCode: 200,
+            url: URL(string: "https://test.example.com/api")!,
+            statusCode: status,
             httpVersion: nil,
             headerFields: nil
         )
+    }
+
+    func testPingSuccess() async throws {
+        stub(status: 200, data: #"{"res":"pong"}"#.data(using: .utf8)!)
 
         let result: ServerPingDTO = try await apiClient.send(.init(path: "/server/ping"))
         XCTAssertEqual(result.res, "pong")
     }
 
     func testUnauthorizedError() async throws {
-        MockURLProtocol.mockResponse = HTTPURLResponse(
-            url: URL(string: "https://test.example.com/api/auth/login")!,
-            statusCode: 401,
-            httpVersion: nil,
-            headerFields: nil
-        )
-        MockURLProtocol.mockData = Data()
+        stub(status: 401, data: Data())
 
         do {
             let _: LoginResponseDTO = try await apiClient.send(.init(path: "/auth/login", method: .post))
@@ -74,14 +56,7 @@ class APIClientTests: XCTestCase {
     }
 
     func testServerError() async throws {
-        let errorData = #"{"message":"Invalid credentials"}"#.data(using: .utf8)!
-        MockURLProtocol.mockData = errorData
-        MockURLProtocol.mockResponse = HTTPURLResponse(
-            url: URL(string: "https://test.example.com/api/auth/login")!,
-            statusCode: 400,
-            httpVersion: nil,
-            headerFields: nil
-        )
+        stub(status: 400, data: #"{"message":"Invalid credentials"}"#.data(using: .utf8)!)
 
         do {
             let _: LoginResponseDTO = try await apiClient.send(.init(path: "/auth/login", method: .post))
@@ -91,20 +66,13 @@ class APIClientTests: XCTestCase {
                 XCTAssertEqual(status, 400)
                 XCTAssertEqual(msg, "Invalid credentials")
             } else {
-                XCTFail("Wrong error type")
+                XCTFail("Wrong error type: \(error)")
             }
         }
     }
 
     func testDecodingError() async throws {
-        let invalidData = #"{"invalid":"json""#.data(using: .utf8)!
-        MockURLProtocol.mockData = invalidData
-        MockURLProtocol.mockResponse = HTTPURLResponse(
-            url: URL(string: "https://test.example.com/api/server/ping")!,
-            statusCode: 200,
-            httpVersion: nil,
-            headerFields: nil
-        )
+        stub(status: 200, data: #"{"invalid":"json""#.data(using: .utf8)!)
 
         do {
             let _: ServerPingDTO = try await apiClient.send(.init(path: "/server/ping"))
@@ -113,66 +81,84 @@ class APIClientTests: XCTestCase {
             if case .decoding = error {
                 // Success
             } else {
-                XCTFail("Wrong error type")
+                XCTFail("Wrong error type: \(error)")
             }
         }
     }
 
     func testRawDataSuccess() async throws {
         let expectedData = Data([1, 2, 3, 4, 5])
-        MockURLProtocol.mockData = expectedData
-        MockURLProtocol.mockResponse = HTTPURLResponse(
-            url: URL(string: "https://test.example.com/api/assets/123/thumbnail")!,
-            statusCode: 200,
-            httpVersion: nil,
-            headerFields: nil
-        )
+        stub(status: 200, data: expectedData)
 
         let result = try await apiClient.rawData(.init(path: "/assets/123/thumbnail"))
         XCTAssertEqual(result, expectedData)
     }
 
     func testAuthHeadersAttached() async throws {
-        mockSession.setTestToken("test-token")
-
-        let expectedData = #"{"res":"pong"}"#.data(using: .utf8)!
-        MockURLProtocol.mockData = expectedData
-        MockURLProtocol.mockResponse = HTTPURLResponse(
-            url: URL(string: "https://test.example.com/api/server/ping")!,
-            statusCode: 200,
-            httpVersion: nil,
-            headerFields: nil
-        )
-        MockURLProtocol.captureRequest = true
+        mockSession.testAuthHeaders = ["Authorization": "Bearer test-token"]
+        stub(status: 200, data: #"{"res":"pong"}"#.data(using: .utf8)!)
 
         let _: ServerPingDTO = try await apiClient.send(.init(path: "/server/ping"))
 
-        if let request = MockURLProtocol.lastRequest {
-            let authHeader = request.value(forHTTPHeaderField: "Authorization")
-            XCTAssertEqual(authHeader, "Bearer test-token")
+        let request = try XCTUnwrap(MockURLProtocol.lastRequest)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-token")
+    }
+
+    func testRequestURLBuiltFromBase() async throws {
+        stub(status: 200, data: #"{"res":"pong"}"#.data(using: .utf8)!)
+
+        let _: ServerPingDTO = try await apiClient.send(.init(
+            path: "/server/ping",
+            query: [URLQueryItem(name: "foo", value: "bar")]))
+
+        let request = try XCTUnwrap(MockURLProtocol.lastRequest)
+        let url = try XCTUnwrap(request.url)
+        XCTAssertTrue(url.absoluteString.hasPrefix("https://test.example.com/api/server/ping"))
+        XCTAssertTrue(url.query?.contains("foo=bar") ?? false)
+    }
+
+    func testMissingBaseURLThrowsInvalidURL() async throws {
+        let session = MockSessionManager() // no setServer -> baseURL nil
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = APIClient(session: session, urlSession: URLSession(configuration: config))
+
+        do {
+            let _: ServerPingDTO = try await client.send(.init(path: "/server/ping"))
+            XCTFail("Should throw invalidURL")
+        } catch let error as APIError {
+            if case .invalidURL = error {
+                // Success
+            } else {
+                XCTFail("Wrong error type: \(error)")
+            }
         }
     }
 }
 
-class MockURLProtocol: URLProtocol {
+final class MockURLProtocol: URLProtocol {
     static var mockData: Data?
     static var mockResponse: URLResponse?
     static var mockError: Error?
     static var lastRequest: URLRequest?
-    static var captureRequest = false
+
+    static func reset() {
+        mockData = nil
+        mockResponse = nil
+        mockError = nil
+        lastRequest = nil
+    }
 
     override class func canInit(with request: URLRequest) -> Bool {
-        return true
+        true
     }
 
     override class func canonicalRequest(for request: URLRequest) -> URLRequest {
-        return request
+        request
     }
 
     override func startLoading() {
-        if Self.captureRequest {
-            Self.lastRequest = request
-        }
+        Self.lastRequest = request
 
         if let error = Self.mockError {
             client?.urlProtocol(self, didFailWithError: error)

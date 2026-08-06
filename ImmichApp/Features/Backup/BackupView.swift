@@ -6,15 +6,13 @@ struct BackupView: View {
     @State private var vm: BackupViewModel?
 
     var body: some View {
-        NavigationStack {
-            content
-                .navigationTitle("Backup")
-        }
+        content
+            .navigationTitle("Backup")
         .task {
             if vm == nil {
                 let api = APIClient(session: session)
                 let repo = BackupRepository(api: api)
-                vm = BackupViewModel(repo: repo)
+                vm = BackupViewModel(repo: repo, dataManager: SwiftDataManager.shared)
             }
             await vm?.loadStorageInfo()
         }
@@ -46,8 +44,8 @@ struct BackupView: View {
         List {
             Section("Storage") {
                 if let storage = vm.storageInfo {
-                    LabeledContent("Used", value: formatBytes(storage.diskUse ?? 0))
-                    LabeledContent("Total", value: formatBytes(storage.diskSize ?? 0))
+                    LabeledContent("Used", value: storage.diskUse ?? formatBytes(storage.diskUseRaw ?? 0))
+                    LabeledContent("Total", value: storage.diskSize ?? formatBytes(storage.diskSizeRaw ?? 0))
                 }
             }
 
@@ -131,6 +129,15 @@ struct BackupView: View {
                             .fontWeight(.semibold)
                     }
 
+                    if vm.skippedCount > 0 {
+                        HStack {
+                            Text("Skipped (duplicates):")
+                            Spacer()
+                            Text("\(vm.skippedCount)")
+                                .fontWeight(.semibold)
+                        }
+                    }
+
                     if !vm.failedUploads.isEmpty {
                         HStack {
                             Text("Failed:")
@@ -147,8 +154,8 @@ struct BackupView: View {
 
             Spacer()
 
-            Button("Back to Timeline") {
-                // Navigate back or dismiss
+            Button("Done") {
+                vm.reset()
             }
             .buttonStyle(.borderedProminent)
             .frame(maxWidth: .infinity)
@@ -167,8 +174,8 @@ struct BackupView: View {
             Text(error)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Button("Retry") {
-                // Reset and retry
+            Button("Try Again") {
+                vm.reset()
             }
             .buttonStyle(.borderedProminent)
         }

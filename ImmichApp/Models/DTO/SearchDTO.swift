@@ -8,6 +8,34 @@ struct SearchRequestDTO: Encodable {
     var takenAfter: String? = nil
     var takenBefore: String? = nil
     var city: String? = nil
+    var personIds: [String]? = nil
+    var size: Int? = nil
+    /// "timeline" | "archive" | "locked" — dipakai layar Archived & Locked.
+    var visibility: String? = nil
+    /// Menyertakan aset yang sudah dibuang ke trash.
+    ///
+    /// TIDAK berarti "hanya yang di trash" — namanya `with`, dan itu memang
+    /// harfiah: yang di trash ikut serta DI SAMPING yang biasa. Untuk daftar
+    /// trash, ia harus dipasangkan dengan `trashedAfter`.
+    var withDeleted: Bool? = nil
+    /// Hanya aset yang dibuang setelah tanggal ini.
+    ///
+    /// Inilah yang menyaringnya jadi "trash saja": aset yang tidak pernah
+    /// dibuang tidak punya tanggal buang, jadi tidak ada satu pun dari mereka
+    /// yang lolos. Diisi tanggal yang jauh di masa lalu untuk mendapat seluruh
+    /// isi trash.
+    var trashedAfter: String? = nil
+    /// Exif ikut dikirim server.
+    ///
+    /// Bawaannya di server adalah TIDAK, dan tanpa exif `AssetLite.ratio` jatuh
+    /// ke nilai cadangan 1.0 untuk setiap aset dari layar berbasis pencarian —
+    /// Favorites, People, Search, Archived, Trash. Rasio itulah yang dipakai
+    /// sebagai tebakan awal tata letak foto, dan tebakan "semua persegi" membuat
+    /// foto tegak tergambar lebih sempit dari lebar layar.
+    ///
+    /// Exif juga yang mengisi panel info (kamera, lensa, lokasi), jadi ini bukan
+    /// tambahan demi satu angka saja.
+    var withExif: Bool? = true
 }
 
 struct SearchResponseDTO: Decodable {

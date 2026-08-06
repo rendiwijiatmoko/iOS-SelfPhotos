@@ -1,95 +1,105 @@
 import XCTest
 @testable import ImmichApp
 
-class OnboardingViewModelTests: XCTestCase {
+@MainActor
+final class OnboardingViewModelTests: XCTestCase {
     var mockSession: MockSessionManager!
     var viewModel: OnboardingViewModel!
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
+        // Alamat terakhir disimpan di UserDefaults dan diisikan ulang di init;
+        // dibersihkan supaya urutan test tidak saling memengaruhi.
+        UserDefaults.standard.removeObject(forKey: "onboarding.lastServer")
         mockSession = MockSessionManager()
         viewModel = OnboardingViewModel(session: mockSession)
     }
 
-    override func tearDown() {
-        super.tearDown()
+    override func tearDown() async throws {
+        UserDefaults.standard.removeObject(forKey: "onboarding.lastServer")
         mockSession = nil
         viewModel = nil
+        try await super.tearDown()
     }
 
     func testInitialState() {
-        XCTAssertEqual(viewModel.step, .server)
         XCTAssertTrue(viewModel.serverText.isEmpty)
         XCTAssertTrue(viewModel.email.isEmpty)
         XCTAssertTrue(viewModel.password.isEmpty)
         XCTAssertTrue(viewModel.apiKey.isEmpty)
         XCTAssertNil(viewModel.features)
-        XCTAssertFalse(viewModel.showApiKeyTab)
-        if case .idle = viewModel.phase {
-            // Success
-        } else {
+        XCTAssertEqual(viewModel.method, .password)
+        XCTAssertFalse(viewModel.canSubmit)
+        if case .idle = viewModel.phase {} else {
             XCTFail("Expected idle phase")
         }
     }
 
-    func testConnectToServer() async throws {
+    func testCannotSubmitWithoutServer() {
+        viewModel.email = "user@example.com"
+        viewModel.password = "password123"
+        XCTAssertFalse(viewModel.canSubmit)
+    }
+
+    func testCannotSubmitWithoutCredentials() {
+        viewModel.serverText = "https://immich.example.com"
+        XCTAssertFalse(viewModel.canSubmit)
+    }
+
+    func testApiKeyMethodIgnoresEmailFields() {
+        viewModel.serverText = "https://immich.example.com"
+        viewModel.method = .apiKey
+        XCTAssertFalse(viewModel.canSubmit)
+
+        viewModel.apiKey = "key-123"
+        XCTAssertTrue(viewModel.canSubmit)
+    }
+
+    func testSubmitConnectsAndSignsIn() async {
         mockSession.shouldSucceedPing = true
+        mockSession.shouldSucceedLogin = true
         mockSession.mockFeatures = ServerFeaturesDTO(
             smartSearch: true,
             facialRecognition: true,
             oauth: false,
             passwordLogin: true,
-            search: true
-        )
-
-        viewModel.serverText = "https://immich.example.com"
-        await viewModel.connect()
-
-        XCTAssertEqual(viewModel.step, .login)
-        XCTAssertNotNil(viewModel.features)
-        XCTAssertTrue(viewModel.features?.passwordLogin ?? false)
-    }
-
-    func testConnectWithInvalidURL() async {
-        viewModel.serverText = "not-a-url"
-        await viewModel.connect()
-
-        if case .failed = viewModel.phase {
-            XCTAssertEqual(viewModel.step, .server)
-        } else {
-            XCTFail("Expected failed phase")
-        }
-    }
-
-    func testLoginWithPassword() async throws {
-        mockSession.shouldSucceedLogin = true
-        mockSession.mockUser = UserResponseDTO(
-            id: "user-123",
-            email: "user@example.com",
-            name: "Test User",
-            profileImagePath: nil,
-            storageLabel: nil
-        )
+            search: true)
 
         viewModel.serverText = "https://immich.example.com"
         viewModel.email = "user@example.com"
         viewModel.password = "password123"
-        viewModel.step = .login
 
-        await viewModel.loginPassword()
+        await viewModel.submit()
 
         XCTAssertTrue(mockSession.isLoggedIn)
+        XCTAssertEqual(mockSession.pingCallCount, 1)
+        XCTAssertEqual(mockSession.loginPasswordCallCount, 1)
     }
 
-    func testLoginWithInvalidCredentials() async {
-        mockSession.shouldSucceedLogin = false
-
+    /// Alamat server hanya disimpan kalau seluruh alurnya berhasil — menyimpan
+    /// alamat yang baru saja gagal dihubungi hanya akan mengisikannya lagi lain
+    /// kali.
+    func testServerRememberedOnlyAfterSuccess() async {
+        mockSession.shouldSucceedPing = false
+        viewModel.serverText = "https://unreachable.example.com"
         viewModel.email = "user@example.com"
-        viewModel.password = "wrongpassword"
-        viewModel.step = .login
+        viewModel.password = "password123"
 
-        await viewModel.loginPassword()
+        await viewModel.submit()
 
+        XCTAssertNil(UserDefaults.standard.string(forKey: "onboarding.lastServer"))
+    }
+
+    func testUnreachableServerReportsFailure() async {
+        mockSession.shouldSucceedPing = false
+
+        viewModel.serverText = "https://unreachable.example.com"
+        viewModel.email = "user@example.com"
+        viewModel.password = "password123"
+
+        await viewModel.submit()
+
+        XCTAssertFalse(mockSession.isLoggedIn)
         if case .failed(let msg) = viewModel.phase {
             XCTAssertFalse(msg.isEmpty)
         } else {
@@ -97,83 +107,53 @@ class OnboardingViewModelTests: XCTestCase {
         }
     }
 
-    func testLoginWithApiKey() async throws {
+    func testInvalidCredentialsReportFailure() async {
+        mockSession.shouldSucceedPing = true
+        mockSession.shouldSucceedLogin = false
+
+        viewModel.serverText = "https://immich.example.com"
+        viewModel.email = "user@example.com"
+        viewModel.password = "wrongpassword"
+
+        await viewModel.submit()
+
+        XCTAssertFalse(mockSession.isLoggedIn)
+        if case .failed(let msg) = viewModel.phase {
+            XCTAssertFalse(msg.isEmpty)
+        } else {
+            XCTFail("Expected failed phase")
+        }
+    }
+
+    func testSubmitWithApiKey() async {
+        mockSession.shouldSucceedPing = true
         mockSession.shouldSucceedApiKey = true
-        mockSession.mockUser = UserResponseDTO(
-            id: "user-123",
-            email: "user@example.com",
-            name: "Test User",
-            profileImagePath: nil,
-            storageLabel: nil
-        )
 
+        viewModel.serverText = "https://immich.example.com"
+        viewModel.method = .apiKey
         viewModel.apiKey = "valid-api-key-123"
-        viewModel.step = .login
 
-        await viewModel.loginApiKey()
+        await viewModel.submit()
 
         XCTAssertTrue(mockSession.isLoggedIn)
+        XCTAssertEqual(mockSession.loginApiKeyCallCount, 1)
     }
 
-    func testReset() {
-        viewModel.serverText = "https://example.com"
-        viewModel.email = "user@example.com"
-        viewModel.password = "pass"
-        viewModel.apiKey = "key"
-        viewModel.step = .login
+    func testInvalidApiKeyReportsFailure() async {
+        mockSession.shouldSucceedPing = true
+        mockSession.shouldSucceedApiKey = false
 
-        viewModel.reset()
+        viewModel.serverText = "https://immich.example.com"
+        viewModel.method = .apiKey
+        viewModel.apiKey = "bad-key"
 
-        XCTAssertEqual(viewModel.step, .server)
-        XCTAssertTrue(viewModel.serverText.isEmpty)
-        XCTAssertTrue(viewModel.email.isEmpty)
-        XCTAssertTrue(viewModel.password.isEmpty)
-        XCTAssertTrue(viewModel.apiKey.isEmpty)
-        XCTAssertNil(viewModel.features)
-    }
-}
+        await viewModel.submit()
 
-class MockSessionManager: SessionManager {
-    var shouldSucceedPing = false
-    var shouldSucceedLogin = false
-    var shouldSucceedApiKey = false
-    var mockUser: UserResponseDTO?
-    var mockFeatures: ServerFeaturesDTO?
-
-    override func setServer(_ raw: String) throws {
-        try super.setServer(raw)
-    }
-
-    override func ping() async throws {
-        if !shouldSucceedPing {
-            throw APIError.invalidURL
-        }
-    }
-
-    override func features() async throws -> ServerFeaturesDTO {
-        if let features = mockFeatures {
-            return features
-        }
-        throw APIError.unknown
-    }
-
-    override func loginPassword(email: String, password: String) async throws {
-        if !shouldSucceedLogin {
-            throw APIError.unauthorized
-        }
-        if let user = mockUser {
-            currentUser = user
-            isLoggedIn = true
-        }
-    }
-
-    override func loginApiKey(_ key: String) async throws {
-        if !shouldSucceedApiKey {
-            throw APIError.unauthorized
-        }
-        if let user = mockUser {
-            currentUser = user
-            isLoggedIn = true
+        XCTAssertFalse(mockSession.isLoggedIn)
+        if case .failed(let msg) = viewModel.phase {
+            XCTAssertFalse(msg.isEmpty)
+        } else {
+            XCTFail("Expected failed phase")
         }
     }
 }
