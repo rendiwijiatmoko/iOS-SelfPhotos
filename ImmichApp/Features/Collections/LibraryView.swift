@@ -10,6 +10,7 @@ struct LibraryView: View {
     /// di Photos; sesudah itu mengikuti pilihan terakhir pengguna.
     @State private var expanded: Set<Row>
     @State private var showSettings = false
+    @State private var showBackup = false
     @State private var editTarget: AlbumResponseDTO?
     @State private var addUserTarget: AlbumResponseDTO?
     @State private var deleteTarget: AlbumResponseDTO?
@@ -28,6 +29,7 @@ struct LibraryView: View {
     @Namespace private var albumNamespace
     @Namespace private var assetNamespace
     @Namespace private var personNamespace
+    @Namespace private var namespace
 
     enum Row: String, CaseIterable, Hashable {
         // `utilities` sudah dihapus. Nilai lama yang masih tersimpan di
@@ -73,6 +75,11 @@ struct LibraryView: View {
                 .toolbarBackground(.hidden, for: .navigationBar)
                 .toolbar { libraryToolbar }
                 .sheet(isPresented: $showSettings) { settingsSheet }
+                .navigationDestination(isPresented: $showBackup) { BackupView() }
+                // Separuh kedua dari pengantaran itu — lihat `MainTabView`.
+                .onChange(of: BackupNotifier.shared.openBackupRequests) { _, _ in
+                    showBackup = true
+                }
                 .fullScreenCover(isPresented: openedStoryBinding) { memoryStoryCover }
                 .task { await start() }
         }
@@ -305,7 +312,6 @@ struct LibraryView: View {
         ToolbarItem(placement: .topBarLeading) { titleLabel }
             // Judul tidak boleh dapat latar kapsul seperti tombol.
             .sharedBackgroundVisibility(.hidden)
-
         profileButton
     }
 
@@ -324,8 +330,10 @@ struct LibraryView: View {
             Button {
                 showSettings = true
             } label: {
-                ProfileAvatar(style: .toolbar)
+                ProfileAvatar(style: .toolbar, showsBackupState: true)
             }
+            .buttonStyle(.plain)
+            .matchedTransitionSource(id: "profile", in: namespace)
         }
         // Avatarnya sudah bulat penuh; kapsul kaca bawaan toolbar hanya
         // menambah lingkaran kedua yang lebih besar di belakangnya.
@@ -336,6 +344,7 @@ struct LibraryView: View {
         NavigationStack {
             SettingsView(session: session)
         }
+        .navigationTransition(.zoom(sourceID: "profile", in: namespace))
     }
 
     // MARK: - Baris yang bisa dilipat
@@ -527,6 +536,9 @@ struct LibraryView: View {
         VStack(spacing: 0) {
             Divider().padding(.leading, 20)
 
+            plainRow("On This Device", systemImage: "iphone") {
+                DeviceAlbumsListView()
+            }
             plainRow("Places", systemImage: "map") {
                 PhotoMapView()
             }

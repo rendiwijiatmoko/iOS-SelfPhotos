@@ -11,7 +11,10 @@ final class SwiftDataManager {
     let modelContext: ModelContext
 
     private init() {
-        let schema = Schema([CachedAsset.self, BackupRecord.self, SyncState.self])
+        let schema = Schema([
+            CachedAsset.self, BackupRecord.self, SyncState.self,
+            LocalAssetChecksum.self,
+        ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         self.modelContainer = try! ModelContainer(for: schema, configurations: [modelConfiguration])
         self.modelContext = ModelContext(modelContainer)
@@ -140,6 +143,13 @@ final class SwiftDataManager {
     func purgeAssets(_ ids: [String]) throws {
         guard !ids.isEmpty else { return }
         try applySyncBatch(upserts: [], deletedIds: ids)
+        // Satu titik cegat untuk SEMUA jalur yang membuang aset.
+        //
+        // Cache linimasa bukan satu-satunya tempat foto itu berdiri: album,
+        // Favorites, dan foto per orang punya potretnya masing-masing. Mencatat
+        // pembuangannya di sini berarti setiap layar bisa menyaring miliknya
+        // sendiri tanpa ada yang perlu diberi tahu satu per satu.
+        RemovedAssets.shared.remove(ids)
     }
 
     /// Dipecah per potongan: SQLite membatasi jumlah pengikat dalam satu klausa
@@ -256,6 +266,108 @@ final class SwiftDataManager {
         var descriptor = FetchDescriptor<BackupRecord>(predicate: #Predicate { $0.deviceAssetId == deviceAssetId })
         descriptor.fetchLimit = 1
         return try? modelContext.fetch(descriptor).first
+    }
+
+    /// Semua `localIdentifier` yang pernah diunggah lewat aplikasi ini.
+    ///
+    /// Inilah satu-satunya cara murah menjawab "foto di perangkat ini sudah ada
+    /// di server atau belum". Yang TIDAK terjawab olehnya: foto yang diunggah
+    /// dari web atau perangkat lain — ia akan terbaca "hanya di perangkat"
+    /// sampai diunggah dari sini. Alternatifnya mencocokkan checksum, dan itu
+    /// berarti membaca byte penuh setiap foto di pustaka.
+    func uploadedLocalIdentifiers() -> Set<String> {
+        let descriptor = FetchDescriptor<BackupRecord>(
+            predicate: #Predicate { $0.localIdentifier != "" })
+        let records = (try? modelContext.fetch(descriptor)) ?? []
+        return Set(records.map(\.localIdentifier))
+    }
+
+    /// Id ASET SERVER yang salinan perangkatnya diketahui.
+    ///
+    /// Pasangan dari `uploadedLocalIdentifiers`, dibaca dari arah sebaliknya:
+    /// yang satu menjawab "petak lokal ini perlu ditampilkan?", yang ini
+    /// menjawab "petak server ini juga ada di perangkat?".
+    func uploadedServerAssetIDs() -> Set<String> {
+        let descriptor = FetchDescriptor<BackupRecord>(
+            predicate: #Predicate { $0.localIdentifier != "" })
+        let records = (try? modelContext.fetch(descriptor)) ?? []
+        return Set(records.map(\.assetId))
+    }
+
+    /// Pasangan lengkapnya: `localIdentifier` → id aset server.
+    ///
+    /// Dua kerabatnya di atas masing-masing hanya mengembalikan satu sisi, dan
+    /// itu cukup untuk menjawab "sudah ada?". Yang ini diperlukan saat sisi
+    /// SEBERANGNYA yang dibutuhkan — menyusun aset server ke dalam album
+    /// berdasarkan album perangkat asalnya.
+    func serverAssetIDsByLocalIdentifier() -> [String: String] {
+        let descriptor = FetchDescriptor<BackupRecord>(
+            predicate: #Predicate { $0.localIdentifier != "" })
+        let records = (try? modelContext.fetch(descriptor)) ?? []
+        return Dictionary(records.map { ($0.localIdentifier, $0.assetId) },
+                          uniquingKeysWith: { first, _ in first })
+    }
+
+    /// `PHAsset.localIdentifier` milik sebuah aset server, kalau salinan
+    /// perangkatnya diketahui.
+    func localIdentifier(forServerAsset id: String) -> String? {
+        var descriptor = FetchDescriptor<BackupRecord>(
+            predicate: #Predicate { $0.assetId == id && $0.localIdentifier != "" })
+        descriptor.fetchLimit = 1
+        return try? modelContext.fetch(descriptor).first?.localIdentifier
+    }
+
+    /// Melupakan salinan perangkat, TANPA melupakan unggahannya.
+    ///
+    /// Dipakai setelah foto dihapus dari pustaka perangkat: asetnya tetap ada di
+    /// server, jadi catatannya harus bertahan supaya tidak terunggah dua kali.
+    /// Yang tidak berlaku lagi hanya kaitannya ke berkas yang sudah tidak ada.
+    func unlinkDeviceAsset(localIdentifier: String) throws {
+        let descriptor = FetchDescriptor<BackupRecord>(
+            predicate: #Predicate { $0.localIdentifier == localIdentifier })
+        for record in (try? modelContext.fetch(descriptor)) ?? [] {
+            record.localIdentifier = ""
+        }
+        try modelContext.save()
+    }
+
+    // MARK: - Checksum foto perangkat
+
+    /// Checksum yang sudah pernah dihitung, dipetakan dari `localIdentifier`.
+    func storedChecksums() -> [String: String] {
+        let records = (try? modelContext.fetch(FetchDescriptor<LocalAssetChecksum>())) ?? []
+        return Dictionary(records.map { ($0.localIdentifier, $0.checksum) },
+                          uniquingKeysWith: { first, _ in first })
+    }
+
+    func storeChecksums(_ entries: [(localIdentifier: String, checksum: String)]) throws {
+        guard !entries.isEmpty else { return }
+        for entry in entries {
+            modelContext.insert(LocalAssetChecksum(
+                localIdentifier: entry.localIdentifier, checksum: entry.checksum))
+        }
+        try modelContext.save()
+    }
+
+    /// Menandai satu foto perangkat sebagai "sudah ada di server".
+    ///
+    /// Memakai `BackupRecord` yang sama dengan jalur unggah, bukan tabel baru:
+    /// yang dicatat memang hal yang sama — foto perangkat ini berpasangan dengan
+    /// aset server itu — dan yang membedakan cuma siapa yang mengunggahnya.
+    func linkDeviceAsset(localIdentifier: String, to serverAssetID: String) throws {
+        let descriptor = FetchDescriptor<BackupRecord>(
+            predicate: #Predicate { $0.localIdentifier == localIdentifier })
+        // Fetch yang GAGAL menghasilkan nil, dan nil tidak boleh dibaca sebagai
+        // "belum ada" — itu menyisipkan catatan kembar setiap kali.
+        guard let existing = try? modelContext.fetch(descriptor), existing.isEmpty
+        else { return }
+
+        modelContext.insert(BackupRecord(
+            id: UUID().uuidString,
+            assetId: serverAssetID,
+            deviceAssetId: "",
+            localIdentifier: localIdentifier))
+        try modelContext.save()
     }
 
     func insertBackupRecord(_ record: BackupRecord) throws {

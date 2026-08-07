@@ -1,195 +1,254 @@
 import SwiftUI
-import PhotosUI
 
+/// Layar pencadangan.
+///
+/// Susunannya mengikuti aplikasi Immich resmi karena susunan itu menjawab satu
+/// pertanyaan dengan benar: **apa yang belum aman?** Tiga angka berurutan —
+/// seluruhnya, yang sudah naik, sisanya — dan sisa itulah satu-satunya yang
+/// perlu diperhatikan. Gayanya milik kita.
 struct BackupView: View {
     @Environment(SessionManager.self) private var session
-    @State private var vm: BackupViewModel?
+    @State private var backup = BackupService.shared
+    @State private var library = LocalPhotoLibrary.shared
+    @State private var albums: [LocalAlbum] = []
+    @State private var isExpanded = false
+    @State private var showOptions = false
+    @State private var showPicker = false
+    @State private var showRemainder = false
+
+    /// Berapa album yang terlihat sebelum daftarnya harus dibentangkan sendiri.
+    ///
+    /// Pustaka orang bisa berisi puluhan album, dan daftar sepanjang itu
+    /// mendorong ketiga angka — bagian yang paling penting di layar ini — jauh
+    /// ke bawah lipatan.
+    private static let collapsedLimit = 10
 
     var body: some View {
-        content
-            .navigationTitle("Backup")
-        .task {
-            if vm == nil {
-                let api = APIClient(session: session)
-                let repo = BackupRepository(api: api)
-                vm = BackupViewModel(repo: repo, dataManager: SwiftDataManager.shared)
-            }
-            await vm?.loadStorageInfo()
-        }
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        if let vm {
-            switch vm.phase {
-            case .idle:
-                backupOptions(vm)
-
-            case .loading:
-                uploadProgress(vm)
-
-            case .loaded:
-                uploadSummary(vm)
-
-            case .failed(let error):
-                errorState(error, vm)
-            }
-        } else {
-            ProgressView()
-        }
-    }
-
-    @ViewBuilder
-    private func backupOptions(_ vm: BackupViewModel) -> some View {
         List {
-            Section("Storage") {
-                if let storage = vm.storageInfo {
-                    LabeledContent("Used", value: storage.diskUse ?? formatBytes(storage.diskUseRaw ?? 0))
-                    LabeledContent("Total", value: storage.diskSize ?? formatBytes(storage.diskSizeRaw ?? 0))
+            albumsSection
+            countsSection
+            settingsSection
+        }
+        .navigationTitle("Backup")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showOptions = true
+                } label: {
+                    Image(systemName: "gearshape")
                 }
+                .accessibilityLabel("Backup Options")
             }
+        }
+        .navigationDestination(isPresented: $showOptions) { BackupOptionsView() }
+        .navigationDestination(isPresented: $showPicker) { DeviceAlbumsView() }
+        .navigationDestination(isPresented: $showRemainder) { BackupRemainderView() }
+        .task {
+            backup.configure(session: session)
+            albums = await library.albums()
+            await backup.prepare()
+        }
+        // Mencentang album mengubah kumpulan fotonya, bukan cuma hitungannya —
+        // jadi yang dipanggil `prepare()`, yang membaca ulang pustakanya, bukan
+        // `refreshCounts()` yang hanya menghitung isi lama.
+        .onChange(of: library.selectedAlbumIDs) {
+            Task {
+                await backup.prepare()
+                // `start()` IKUT dipanggil, tidak cuma menghitung ulang.
+                //
+                // Memilih album adalah satu-satunya cara menambah pekerjaan ke
+                // antrean pencadangan. Tanpa baris ini angka "Remainder" naik
+                // seketika lalu diam — dan satu-satunya cara menjalankannya
+                // adalah menutup dan membuka aplikasinya lagi, yang tidak
+                // pernah terbaca sebagai sesuatu yang disengaja.
+                backup.start()
+            }
+        }
+    }
 
-            Section("Upload") {
-                PhotosPicker(
-                    selection: Binding(
-                        get: { vm.selectedPhotos },
-                        set: { vm.selectedPhotos = $0 }
-                    ),
-                    matching: .images
-                ) {
-                    Text("Select Photos to Upload")
-                }
+    // MARK: - Album
 
-                if !vm.selectedPhotos.isEmpty {
-                    Text("\(vm.selectedPhotos.count) photo(s) selected")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    Button("Upload") {
-                        Task {
-                            await vm.uploadSelectedPhotos()
-                        }
+    private var albumsSection: some View {
+        Section {
+            if selectedAlbums.isEmpty {
+                Text("None selected")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(visibleAlbums) { album in
+                    LabeledContent(album.title) {
+                        Text("\(album.count)")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
                     }
-                    .buttonStyle(.borderedProminent)
-                    .frame(maxWidth: .infinity)
+                }
+                if selectedAlbums.count > Self.collapsedLimit {
+                    expandButton
                 }
             }
 
-            Section("Info") {
-                Text("Selected photos will be uploaded to your server. Duplicates will be skipped.")
+            Button("Select") { showPicker = true }
+        } header: {
+            Text("Backup Albums")
+        } footer: {
+            Text("Albums to be backed up.")
+        }
+    }
+
+    private var expandButton: some View {
+        Button {
+            withAnimation { isExpanded.toggle() }
+        } label: {
+            HStack {
+                Text(isExpanded
+                     ? "Show Less"
+                     : "and \(selectedAlbums.count - Self.collapsedLimit) more")
+                Spacer()
+                Image(systemName: "chevron.down")
+                    .font(.footnote.weight(.semibold))
+                    .rotationEffect(.degrees(isExpanded ? 180 : 0))
+            }
+            .contentShape(Rectangle())
+        }
+    }
+
+    // MARK: - Turunan daftar album
+
+    /// Album TERPILIH saja, terbanyak isinya lebih dulu.
+    ///
+    /// Kartu ini ringkasan, bukan pemilih — pemilihnya di layar `Select`. Dan
+    /// dengan daftar yang terpotong sepuluh, urutan menentukan apa yang
+    /// benar-benar terlihat, jadi bukan urutan sembarang dari PhotoKit.
+    private var selectedAlbums: [LocalAlbum] {
+        albums
+            .filter { library.selectedAlbumIDs.contains($0.id) }
+            .sorted { $0.count > $1.count }
+    }
+
+    private var visibleAlbums: [LocalAlbum] {
+        isExpanded ? selectedAlbums : Array(selectedAlbums.prefix(Self.collapsedLimit))
+    }
+
+
+    // MARK: - Hitungan
+
+    private var countsSection: some View {
+        Section {
+            countRow(
+                title: "Total",
+                caption: "All unique photos and videos from selected albums",
+                value: backup.total,
+                tint: .primary)
+
+            countRow(
+                title: "Backup",
+                caption: "Backed up photos and videos",
+                value: backup.backedUp,
+                tint: .green)
+
+            countRow(
+                title: "Remainder",
+                caption: "Remaining photos and videos to back up from selection",
+                value: backup.remainder,
+                tint: backup.remainder == 0 ? .secondary : .orange)
+
+            // Baris rincian HANYA saat ada yang bisa dirinci. Layar kosong yang
+            // bisa dibuka adalah janji yang tidak ditepati.
+            if backup.remainder > 0 {
+                Button {
+                    showRemainder = true
+                } label: {
+                    LabeledContent("View Details") {
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        } footer: {
+            if backup.isUploading {
+                uploadProgress
+            } else if let error = backup.lastError {
+                // Alasan kegagalan ditulis apa adanya, bukan diringkas jadi
+                // "terjadi kesalahan". Yang bisa diperbaiki pengguna hanya yang
+                // bisa dibacanya.
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private func countRow(
+        title: String, caption: String, value: Int, tint: Color
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(caption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Spacer(minLength: 12)
+            Text("\(value)")
+                .font(.title3.weight(.semibold))
+                // Angka yang berubah tiap unggahan tidak boleh menggeser
+                // barisnya; lebar digit tetap menahannya diam.
+                .monospacedDigit()
+                .foregroundStyle(tint)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var uploadProgress: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ProgressView(
+                value: Double(backup.uploadedThisRun),
+                total: Double(max(1, backup.pendingThisRun)))
+            Text("Backing up \(backup.uploadedThisRun + 1) of \(backup.pendingThisRun)…")
+        }
+        .padding(.top, 6)
+    }
+
+    // MARK: - Setelan
+
+    private var settingsSection: some View {
+        Section {
+            Toggle("Enable Backup", isOn: Bindable(backup).isEnabled)
+        } footer: {
+            Text(statusText)
         }
     }
 
-    @ViewBuilder
-    private func uploadProgress(_ vm: BackupViewModel) -> some View {
-        VStack(spacing: 24) {
-            Spacer()
-
-            VStack(spacing: 12) {
-                Text("Uploading Photos")
-                    .font(.headline)
-
-                ProgressView(value: vm.uploadProgress)
-                    .frame(height: 8)
-
-                Text("\(vm.currentUploadIndex) / \(vm.totalUploads)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .padding()
-            .background(.gray.opacity(0.1))
-            .cornerRadius(8)
-
-            Spacer()
+    /// Satu kalimat yang menjelaskan kenapa keadaannya begini.
+    ///
+    /// Bilah kemajuan yang diam tanpa keterangan membuat orang menyimpulkan
+    /// aplikasinya rusak, padahal seringkali jaringannya yang sedang tidak
+    /// memenuhi syarat sendiri.
+    private var statusText: String {
+        if !backup.isEnabled {
+            return """
+                New photos and videos from the selected albums are uploaded when \
+                you open the app, and occasionally in the background. iOS decides \
+                when background uploads run — opening the app more often makes \
+                them run more often.
+                """
         }
-        .padding()
-    }
-
-    @ViewBuilder
-    private func uploadSummary(_ vm: BackupViewModel) -> some View {
-        VStack(spacing: 24) {
-            Spacer()
-
-            VStack(spacing: 16) {
-                Image(systemName: vm.failedUploads.isEmpty ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                    .font(.system(size: 48))
-                    .foregroundStyle(vm.failedUploads.isEmpty ? .green : .orange)
-
-                Text("Upload Complete")
-                    .font(.headline)
-
-                VStack(spacing: 8) {
-                    HStack {
-                        Text("Successful:")
-                        Spacer()
-                        Text("\(vm.successCount)")
-                            .fontWeight(.semibold)
-                    }
-
-                    if vm.skippedCount > 0 {
-                        HStack {
-                            Text("Skipped (duplicates):")
-                            Spacer()
-                            Text("\(vm.skippedCount)")
-                                .fontWeight(.semibold)
-                        }
-                    }
-
-                    if !vm.failedUploads.isEmpty {
-                        HStack {
-                            Text("Failed:")
-                            Spacer()
-                            Text("\(vm.failedUploads.count)")
-                                .fontWeight(.semibold)
-                                .foregroundStyle(.red)
-                        }
-                    }
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            Button("Done") {
-                vm.reset()
-            }
-            .buttonStyle(.borderedProminent)
-            .frame(maxWidth: .infinity)
+        if !NetworkMonitor.shared.isOnline {
+            return "Waiting for a network connection."
         }
-        .padding()
-    }
-
-    @ViewBuilder
-    private func errorState(_ error: String, _ vm: BackupViewModel) -> some View {
-        VStack(spacing: 16) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.orange)
-            Text("Upload Failed")
-                .font(.headline)
-            Text(error)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Button("Try Again") {
-                vm.reset()
-            }
-            .buttonStyle(.borderedProminent)
+        if NetworkMonitor.shared.isExpensive && !backup.canUploadNow {
+            return "Waiting for Wi-Fi. Allow cellular data in Backup Options to continue now."
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func formatBytes(_ bytes: Int) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: Int64(bytes))
+        if backup.remainder == 0 {
+            return "Everything in the selected albums is backed up."
+        }
+        return backup.isUploading ? "Backing up now." : "Ready to back up."
     }
 }
 
 #Preview {
-    BackupView()
-        .environment(SessionManager())
+    NavigationStack {
+        BackupView().environment(SessionManager())
+    }
 }

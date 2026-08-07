@@ -156,6 +156,12 @@ struct SettingsView: View {
             } label: {
                 Label("Back Up Photos", systemImage: "arrow.up.circle")
             }
+
+            NavigationLink {
+                DeviceAlbumsView()
+            } label: {
+                Label("Device Albums", systemImage: "iphone")
+            }
         }
     }
 

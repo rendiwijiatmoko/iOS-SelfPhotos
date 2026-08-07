@@ -21,7 +21,9 @@ struct TimelineView: View {
     @State private var shareFileURL: URL?
     @State private var isSharePresented = false
     @State private var assetToDelete: AssetLite?
+    @State private var deviceDeleteID: String?
     /// Aset yang sedang dipilihkan album lewat sheet.
+    @State private var showSettings = false
     @State private var albumPickerAsset: AssetLite?
     @State private var isSelecting = false
     @State private var selectedIDs: Set<String> = []
@@ -49,6 +51,7 @@ struct TimelineView: View {
     /// Pegangan ke controller grid, untuk perintah yang datang dari luar —
     /// ketukan kedua tab Photos, misalnya.
     @State private var gridController: PhotoGridController?
+    @Namespace private var namespace
 
     var body: some View {
         NavigationStack {
@@ -65,6 +68,7 @@ struct TimelineView: View {
                 .toolbar(isSelecting ? .hidden : .automatic, for: .tabBar)
                 .toolbar(isSelecting ? .visible : .hidden, for: .bottomBar)
         }
+        .sheet(isPresented: $showSettings) { settingsSheet }
         .sheet(isPresented: $isSharePresented) {
             if let url = shareFileURL {
                 ShareSheet(url: url)
@@ -122,6 +126,24 @@ struct TimelineView: View {
             Text("Are you sure you want to delete this photo?")
         }
         // Ketukan tegas hanya setelah server mengonfirmasi penghapusan.
+        // Pencocokan foto perangkat menunda diri di jaringan berbayar; begitu
+        // Wi‑Fi menyambung, ia dicoba lagi tanpa menunggu aplikasi dibuka ulang.
+        .onChange(of: NetworkMonitor.shared.isExpensive) { _, expensive in
+            if !expensive { vm?.matchDevicePhotos() }
+        }
+        // Tiap unggahan yang berhasil mengubah arti satu petak dari "belum aman"
+        // jadi "sudah ada di keduanya". Tanpa ini lencananya baru berganti pada
+        // sync berikutnya — sementara layar Backup sudah menghitungnya naik.
+        .onChange(of: BackupService.shared.backedUp) { _, _ in
+            Task { await vm?.refreshOrigins() }
+        }
+        // "Delete from Device" mengubah arti petak dari arah sebaliknya: yang
+        // tadinya ada di keduanya sekarang hanya ada di server. Yang berubah
+        // sama — lencananya — jadi jalur penggambaran ulangnya juga sama.
+        .onChange(of: LocalPhotoLibrary.shared.photos.count) { _, _ in
+            Task { await vm?.refreshOrigins() }
+        }
+        .deleteFromDeviceAlert($deviceDeleteID) { deleteFeedback += 1 }
         .sensoryFeedback(.impact(weight: .heavy), trigger: deleteFeedback)
         // Favorit BUKAN ketukan berat: hasilnya bukan sesuatu yang hilang,
         // melainkan sesuatu yang bertambah — `.success` yang menyampaikannya.
@@ -132,10 +154,20 @@ struct TimelineView: View {
                 vm = TimelineViewModel(
                     dataManager: SwiftDataManager.shared,
                     assetRepo: AssetDetailRepository(api: api),
-                    albumRepo: AlbumRepository(api: api)
+                    albumRepo: AlbumRepository(api: api),
+                    matcher: DeviceAssetMatcher(
+                        repo: BackupRepository(api: api),
+                        dataManager: SwiftDataManager.shared)
                 )
             }
             await vm?.loadTimelineIfNeeded()
+
+            // Foto perangkat menyusul SETELAH linimasa tergambar.
+            //
+            // Kunjungan pertama memunculkan dialog izin sistem, dan itu tidak
+            // boleh menghalangi foto yang sudah ada di cache untuk tampil lebih
+            // dulu.
+            await vm?.loadDevicePhotos()
             await vm?.loadAlbumsIfNeeded()
         }
         // Sync pertama biasanya selesai SETELAH layar ini muncul; tanpa ini
@@ -233,7 +265,7 @@ struct TimelineView: View {
         _ vm: TimelineViewModel
     ) -> [PhotoGridMenuAction] {
         guard let asset = vm.asset(for: id) else { return [] }
-        return [
+        var actions: [PhotoGridMenuAction] = [
             // Tiga teratas jadi BARIS IKON di puncak menu — lihat
             // `PhotoGridMenuGroup`.
             PhotoGridMenuAction(
@@ -279,22 +311,35 @@ struct TimelineView: View {
             PhotoGridMenuAction(title: String(localized: "Share Link"), systemImage: "link") {
                 createSharedLink(for: [asset.id])
             },
-            PhotoGridMenuAction(
-                title: String(localized: "Delete"),
-                systemImage: "trash",
-                isDestructive: true
-            ) {
-                assetToDelete = asset
-            },
         ]
+
+        // Disisipkan SEBELUM "Delete", supaya yang paling berat tetap paling
+        // bawah — urutan itu yang membuat menu bisa dibaca dari atas ke bawah
+        // sebagai "makin permanen".
+        if let deviceAction = DeviceCopyDeletion.menuAction(
+            for: asset, request: { deviceDeleteID = $0 }) {
+            actions.append(deviceAction)
+        }
+
+        actions.append(PhotoGridMenuAction(
+            title: String(localized: "Delete"),
+            systemImage: "trash",
+            isDestructive: true
+        ) {
+            assetToDelete = asset
+        })
+
+        return actions
     }
 
     private var selectButton: some View {
         Button {
-            if isSelecting {
-                exitSelection()
-            } else {
-                isSelecting = true
+            withAnimation {
+                if isSelecting {
+                    exitSelection()
+                } else {
+                    isSelecting = true
+                }
             }
         } label: {
             if isSelecting {
@@ -322,6 +367,13 @@ struct TimelineView: View {
         // WAJIB: tanpa ini toolbar menyempitkan item sampai selebar ikon dan
         // judulnya tersisa jadi "…".
         .fixedSize()
+    }
+    
+    private var settingsSheet: some View {
+        NavigationStack {
+            SettingsView(session: session)
+        }
+        .navigationTransition(.zoom(sourceID: "profile", in: namespace))
     }
 
     // MARK: - Sel grid
@@ -378,7 +430,20 @@ struct TimelineView: View {
         }
 
         ToolbarItem(placement: .topBarTrailing) { selectButton }
-
+        if !isSelecting {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showSettings = true
+                } label: {
+                    ProfileAvatar(style: .toolbar, showsBackupState: true)
+                }
+                .buttonStyle(.plain)
+                .matchedTransitionSource(id: "profile", in: namespace)
+            }
+            // Avatarnya sudah bulat penuh; kapsul kaca bawaan toolbar hanya
+            // menambah lingkaran kedua yang lebih besar di belakangnya.
+            .sharedBackgroundVisibility(.hidden)
+        }
         if isSelecting {
             // Jumlahnya pindah ke bar ATAS: bar bawah sekarang penuh aksi, dan
             // menyelipkan teks di antaranya hanya membuat tombolnya berdesakan.

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Pengenal tugas latar HARUS terdaftar di sini.
+
+	     Ini satu-satunya alasan berkas ini ada: nilainya sebuah array, dan
+	     tidak ada build setting `INFOPLIST_KEY_*` untuk array. `GENERATE_
+	     INFOPLIST_FILE` tetap YES — Xcode menggabungkan berkas ini dengan
+	     kunci-kunci yang dihasilkannya, jadi yang lain tidak perlu disalin
+	     ke sini.
+
+	     DUA pengenal, sama seperti aplikasi Immich resmi. Masing-masing punya
+	     antrean penjadwalan sendiri di iOS: yang refresh sering tapi pendek,
+	     yang processing jarang tapi panjang — dan yang kedua itulah yang
+	     biasanya berjalan tengah malam saat perangkat mengisi daya.
+
+	     Kalau daftar ini tidak cocok dengan pengenal di `BackupScheduler`,
+	     `BGTaskScheduler.register` menjatuhkan aplikasinya saat diluncurkan. -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>app.immich.backup.refresh</string>
+		<string>app.immich.backup.processing</string>
+	</array>
+</dict>
+</plist>

@@ -23,15 +23,29 @@ final class NetworkMonitor {
     /// server di jaringan rumah tetap tidak terjawab saat kita di luar, padahal
     /// jalurnya "siap". Untuk itulah `APIError.notConnected` diperlebar.
     private(set) var isOnline = true
+    /// Jalurnya BERBAYAR — seluler, atau hotspot.
+    ///
+    /// Immich resmi hanya mengunggah lewat Wi‑Fi secara bawaan, dan alasannya
+    /// berlaku sama untuk pencocokan checksum: foto yang aslinya di iCloud harus
+    /// diunduh dulu untuk dihitung, dan itu bisa berarti gigabyte.
+    private(set) var isExpensive = false
 
     private let monitor = NWPathMonitor()
 
     private init() {
-        monitor.pathUpdateHandler = { [weak self] path in
+        // `[weak self]` ada di Task DALAM, bukan di handler luar.
+        //
+        // Handler-nya dipanggil di antrean milik `NWPathMonitor`, jadi `self`
+        // yang tertangkap di sana adalah rujukan yang dipakai lintas isolasi —
+        // peringatan di Swift 5, kesalahan di Swift 6. Yang menyeberang sekarang
+        // hanya sebuah `Bool`.
+        monitor.pathUpdateHandler = { path in
             let online = path.status == .satisfied
-            Task { @MainActor in
-                guard let self, self.isOnline != online else { return }
-                self.isOnline = online
+            let expensive = path.isExpensive || path.isConstrained
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if self.isOnline != online { self.isOnline = online }
+                if self.isExpensive != expensive { self.isExpensive = expensive }
             }
         }
         monitor.start(queue: DispatchQueue(label: "network-monitor"))

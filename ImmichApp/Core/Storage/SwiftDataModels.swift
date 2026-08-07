@@ -97,12 +97,26 @@ final class BackupRecord {
     @Attribute(.unique) var id: String
     var assetId: String
     var deviceAssetId: String
+    /// `PHAsset.localIdentifier` foto asalnya di perangkat.
+    ///
+    /// Nilai bawaan kosong, dan itu disengaja: catatan lama hanya menyimpan
+    /// checksum, dan migrasi ringan SwiftData menuntut setiap field baru punya
+    /// bawaan. Kosong berarti "diunggah sebelum aplikasi ini melacak asalnya" —
+    /// fotonya tetap di server, cuma tidak bisa dipasangkan ke petak lokal.
+    var localIdentifier: String = ""
     var createdAt: Date
 
-    init(id: String, assetId: String, deviceAssetId: String, createdAt: Date = Date()) {
+    init(
+        id: String,
+        assetId: String,
+        deviceAssetId: String,
+        localIdentifier: String = "",
+        createdAt: Date = Date()
+    ) {
         self.id = id
         self.assetId = assetId
         self.deviceAssetId = deviceAssetId
+        self.localIdentifier = localIdentifier
         self.createdAt = createdAt
     }
 }
@@ -116,4 +130,22 @@ final class SyncState {
     var totalAssets: Int = 0
 
     init() {}
+}
+
+/// Checksum sebuah foto perangkat, disimpan supaya tidak dihitung dua kali.
+///
+/// Menghitung SHA1 berarti membaca SELURUH byte foto — puluhan megabyte untuk
+/// satu video. Itu masih wajar sekali seumur foto, tapi tidak wajar setiap kali
+/// aplikasi dibuka. Yang disimpan hanya hasilnya; byte-nya sendiri tidak.
+@Model
+final class LocalAssetChecksum {
+    @Attribute(.unique) var localIdentifier: String
+    var checksum: String
+    var computedAt: Date
+
+    init(localIdentifier: String, checksum: String, computedAt: Date = Date()) {
+        self.localIdentifier = localIdentifier
+        self.checksum = checksum
+        self.computedAt = computedAt
+    }
 }

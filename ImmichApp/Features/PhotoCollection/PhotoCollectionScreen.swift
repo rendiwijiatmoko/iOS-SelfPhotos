@@ -47,6 +47,8 @@ struct PhotoCollectionScreen<Options: View>: View {
     /// Keterangan di bawah judul, mis. deskripsi album. Kosong berarti tidak
     /// ada barisnya sama sekali.
     var subtitle: String? = nil
+    /// Daftar MENTAH dari pemanggil. Yang dipakai layar ini `visibleAssets`,
+    /// yang sudah dibersihkan dari aset yang dibuang di layar lain.
     let assets: [AssetLite]
     let phase: LoadingPhase<Void>
 
@@ -75,6 +77,9 @@ struct PhotoCollectionScreen<Options: View>: View {
     var onMoveToLocked: (([String]) async -> Void)? = nil
     /// Membuat tautan publik untuk aset tertentu.
     var onShareLink: (([String]) -> Void)? = nil
+    /// Mengunggah foto perangkat yang belum ada di server; nil di layar yang
+    /// isinya memang sudah di server semua.
+    var onUpload: (([String]) async -> Void)? = nil
     /// false untuk layar yang berbagi fotonya tidak masuk akal — tong sampah.
     var allowsSelectionShare = true
     /// "Delete" di layar ini menghapus SELAMANYA, bukan memindahkan ke tong
@@ -102,6 +107,7 @@ struct PhotoCollectionScreen<Options: View>: View {
     /// yang ditanyakan menyangkut satu foto yang barusan ditekan lama, bukan
     /// sekumpulan pilihan atas seleksi.
     @State private var menuDeleteID: String?
+    @State private var deviceDeleteID: String?
     /// Naik satu setiap penghapusan dan setiap favorit yang selesai dikerjakan.
     @State private var deleteFeedback = 0
     @State private var favoriteFeedback = 0
@@ -127,6 +133,18 @@ struct PhotoCollectionScreen<Options: View>: View {
     /// ketukan saat memilih. Pada album berisi ribuan foto itu ribuan pemformatan
     /// tanggal per ketukan.
     @State private var gridSections: [TimelineSection] = []
+    @State private var removed = RemovedAssets.shared
+
+    /// Isi layar SETELAH aset yang dibuang di tempat lain dibersihkan.
+    ///
+    /// Album, Favorites, dan foto per orang masing-masing punya potretnya
+    /// sendiri, diambil dari endpoint yang berbeda dari linimasa. Menghapus foto
+    /// di tab Photos tidak menyentuh satu pun dari potret itu — jadi foto yang
+    /// sudah tidak ada tetap berdiri di sini sampai layarnya memuat ulang dari
+    /// server, dan menekannya berujung pada aset yang tidak ada.
+    private var visibleAssets: [AssetLite] {
+        removed.filter(assets)
+    }
 
     var body: some View {
         screenContent
@@ -178,6 +196,7 @@ struct PhotoCollectionScreen<Options: View>: View {
             } message: { _ in
                 Text("This cannot be undone.")
             }
+            .deleteFromDeviceAlert($deviceDeleteID) { deleteFeedback += 1 }
             .sensoryFeedback(deleteHaptic, trigger: deleteFeedback)
             // Favorit BUKAN ketukan berat: hasilnya bukan sesuatu yang hilang,
             // melainkan sesuatu yang bertambah — `.success` yang menyampaikannya.
@@ -204,7 +223,7 @@ struct PhotoCollectionScreen<Options: View>: View {
     /// menggambar sampulnya.
     @ViewBuilder
     private var screenContent: some View {
-        if case .failed(let error) = phase, assets.isEmpty {
+        if case .failed(let error) = phase, visibleAssets.isEmpty {
             errorState(error)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 // Seleksi yang sempat dinyalakan sebelum muatannya gagal
@@ -250,7 +269,7 @@ struct PhotoCollectionScreen<Options: View>: View {
             NavigationStack {
                 AssetDetailView(
                     currentAsset: asset,
-                    assets: assets,
+                    assets: visibleAssets,
                     isModal: true,
                     // Menutupnya harus mengecil ke foto yang SEDANG dilihat,
                     // bukan yang pertama dibuka.
@@ -288,7 +307,7 @@ struct PhotoCollectionScreen<Options: View>: View {
     /// Tidak ada yang bisa ditampilkan, dan server yang bilang begitu.
     private var isShowingErrorScreen: Bool {
         guard case .failed = phase else { return false }
-        return assets.isEmpty
+        return visibleAssets.isEmpty
     }
 
     /// Sampul hanya ada di mode `.hero`; mode bulanan langsung mulai dari grid.
@@ -313,7 +332,7 @@ struct PhotoCollectionScreen<Options: View>: View {
     private var statusOverlay: some View {
         switch phase {
         case .idle, .loading:
-            if assets.isEmpty { ProgressView() }
+            if visibleAssets.isEmpty { ProgressView() }
 
         // Gagal TIDAK ditangani di sini lagi — ia mengganti seluruh layar,
         // bukan menumpanginya. Lihat `screenContent`.
@@ -326,7 +345,7 @@ struct PhotoCollectionScreen<Options: View>: View {
     }
 
     private func asset(for id: String) -> AssetLite? {
-        assets.first { $0.id == id }
+        visibleAssets.first { $0.id == id }
     }
 
     /// Sidik jari isi koleksi: jumlah plus kedua ujungnya.
@@ -334,11 +353,11 @@ struct PhotoCollectionScreen<Options: View>: View {
     /// Perubahan status favorit sengaja TIDAK ikut terhitung — itu tidak
     /// memindahkan foto mana pun, jadi tidak ada yang perlu dikelompokkan ulang.
     private var assetsSignature: String {
-        "\(assets.count)|\(assets.first?.id ?? "")|\(assets.last?.id ?? "")|\(layout == .monthly)"
+        "\(visibleAssets.count)|\(visibleAssets.first?.id ?? "")|\(visibleAssets.last?.id ?? "")|\(layout == .monthly)"
     }
 
     private func rebuildSections() async {
-        gridSections = await groupAssets(assets, monthly: layout == .monthly)
+        gridSections = await groupAssets(visibleAssets, monthly: layout == .monthly)
     }
 
     // MARK: - Sampul
@@ -364,7 +383,7 @@ struct PhotoCollectionScreen<Options: View>: View {
     /// Beberapa foto pertama saja yang digilir — cukup untuk terasa hidup tanpa
     /// perlu memuat seluruh koleksi beresolusi preview.
     private var heroAssets: [AssetLite] {
-        Array(assets.prefix(8))
+        Array(visibleAssets.prefix(8))
     }
 
     @ViewBuilder
@@ -458,7 +477,7 @@ struct PhotoCollectionScreen<Options: View>: View {
     /// Dirakit manual, bukan `^[...](inflect:)`: markup itu hanya diproses kalau
     /// string-nya literal yang menjadi `LocalizedStringKey`.
     private var itemCountText: String {
-        assets.count == 1 ? "1 Item" : "\(assets.count) Items"
+        visibleAssets.count == 1 ? "1 Item" : "\(visibleAssets.count) Items"
     }
 
     private func errorState(_ error: String) -> some View {
@@ -605,6 +624,22 @@ struct PhotoCollectionScreen<Options: View>: View {
             })
         }
 
+        // "Upload" hanya untuk yang BELUM ada di server, dan itu justru
+        // satu-satunya foto yang membutuhkannya.
+        if let onUpload, asset.needsUpload {
+            actions.append(PhotoGridMenuAction(
+                title: String(localized: "Upload"),
+                systemImage: "arrow.up.circle"
+            ) {
+                Task { await onUpload([asset.id]) }
+            })
+        }
+
+        if let deviceAction = DeviceCopyDeletion.menuAction(
+            for: asset, request: { deviceDeleteID = $0 }) {
+            actions.append(deviceAction)
+        }
+
         actions.append(PhotoGridMenuAction(
             title: String(localized: "Delete"),
             systemImage: "trash",
@@ -692,13 +727,13 @@ struct PhotoCollectionScreen<Options: View>: View {
             if isAllSelected {
                 selectedIDs.removeAll()
             } else {
-                selectedIDs = Set(assets.map(\.id))
+                selectedIDs = Set(visibleAssets.map(\.id))
             }
         }
     }
 
     private var isAllSelected: Bool {
-        !assets.isEmpty && selectedIDs.count == assets.count
+        !visibleAssets.isEmpty && selectedIDs.count == visibleAssets.count
     }
 
     private var cancelSelectionButton: some View {
@@ -937,6 +972,7 @@ extension PhotoCollectionScreen where Options == EmptyView {
         onUnlockSelection: (([String]) async -> Void)? = nil,
         onMoveToLocked: (([String]) async -> Void)? = nil,
         onShareLink: (([String]) -> Void)? = nil,
+        onUpload: (([String]) async -> Void)? = nil,
         allowsSelectionShare: Bool = true,
         deletesPermanently: Bool = false,
         selectionMenu: ((Set<String>) -> [SelectionMenuAction])? = nil
@@ -960,6 +996,7 @@ extension PhotoCollectionScreen where Options == EmptyView {
             onUnlockSelection: onUnlockSelection,
             onMoveToLocked: onMoveToLocked,
             onShareLink: onShareLink,
+            onUpload: onUpload,
             allowsSelectionShare: allowsSelectionShare,
             deletesPermanently: deletesPermanently,
             selectionMenu: selectionMenu,

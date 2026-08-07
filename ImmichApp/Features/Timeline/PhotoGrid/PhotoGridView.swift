@@ -247,6 +247,12 @@ final class PhotoGridController: UIViewController {
 
     private var collectionView: UICollectionView!
     private var dataSource: UICollectionViewDiffableDataSource<SectionID, String>!
+    /// Aset seperti yang TERAKHIR digambar, diindeks id.
+    ///
+    /// Pembanding untuk `reconfigureChangedItems`: snapshot hanya menyimpan id,
+    /// jadi tanpa salinan ini tidak ada cara mengetahui isi sel mana yang
+    /// berubah tanpa mengubah identitasnya.
+    private var renderedAssets: [String: AssetLite] = [:]
 
     private var sections: [TimelineSection] = []
     private var assetsByID: [String: AssetLite] = [:]
@@ -712,10 +718,49 @@ final class PhotoGridController: UIViewController {
         // terasa menyentak.
         refreshJustifiedLayoutIfNeeded()
 
-        dataSource.apply(pending.snapshot, animatingDifferences: animates) { [weak self] in
+        var snapshot = pending.snapshot
+        reconfigureChangedItems(in: &snapshot)
+
+        dataSource.apply(snapshot, animatingDifferences: animates) { [weak self] in
             guard let anchor else { return }
             self?.restorePosition(anchor)
         }
+    }
+
+    /// Menandai petak yang ID-nya SAMA tapi isinya berubah.
+    ///
+    /// Item snapshot di sini berupa `String` id, dan diffable data source hanya
+    /// menggambar ulang sel kalau identifier-nya berbeda. Foto yang baru selesai
+    /// diunggah tetap foto yang sama dengan id yang sama — yang berubah cuma
+    /// lencananya, dari "belum aman" jadi "ada di keduanya". Tanpa penandaan ini
+    /// perubahan itu tidak pernah sampai ke layar: selnya tidak dianggap perlu
+    /// digambar ulang, dan lencana lama bertahan sampai grid-nya dibangun ulang
+    /// dari nol.
+    ///
+    /// Berlaku sama untuk favorit, durasi, dan apa pun yang hidup di dalam sel
+    /// tanpa mengubah identitas fotonya.
+    private func reconfigureChangedItems(
+        in snapshot: inout NSDiffableDataSourceSnapshot<SectionID, String>
+    ) {
+        let current = sections.flatMap(\.assets)
+        defer { renderedAssets = Dictionary(current.map { ($0.id, $0) },
+                                            uniquingKeysWith: { first, _ in first }) }
+
+        // Pemasangan pertama tidak punya pembanding, dan seluruh selnya memang
+        // baru digambar — tidak ada yang perlu ditandai.
+        guard !renderedAssets.isEmpty else { return }
+
+        let existing = Set(snapshot.itemIdentifiers)
+        let changed = current.compactMap { asset -> String? in
+            guard existing.contains(asset.id),
+                  let previous = renderedAssets[asset.id],
+                  previous.origin != asset.origin
+                      || previous.isFavorite != asset.isFavorite
+            else { return nil }
+            return asset.id
+        }
+        guard !changed.isEmpty else { return }
+        snapshot.reconfigureItems(changed)
     }
 
     /// Meminta halaman berikutnya kalau yang tersentuh sudah dekat ujung.
@@ -842,13 +887,43 @@ final class PhotoGridController: UIViewController {
     }
 
     /// Pembanding murah: jumlah section, plus jumlah dan ujung tiap section.
+    /// Isi yang SAMA — termasuk hal-hal yang hidup di dalam sel.
+    ///
+    /// Dulu pembandingnya hanya id section, jumlah aset, dan id aset terakhir.
+    /// Cepat, tapi buta terhadap perubahan yang tidak menggeser satu pun dari
+    /// ketiganya: foto selesai diunggah, atau salinan perangkatnya dihapus. Yang
+    /// berubah cuma `origin` — daftarnya sama persis, urutannya sama persis —
+    /// jadi `apply` pulang lebih awal dan lencananya tidak pernah digambar ulang.
+    ///
+    /// Gejalanya khas dan sempat menyesatkan: context menu-nya BENAR sementara
+    /// lencananya salah. Menu dibaca langsung dari view model tiap kali dibuka;
+    /// lencana hidup di sel, dan sel hanya digambar ulang lewat jalur ini.
+    ///
+    /// Sekarang setiap aset dibandingkan isinya. Lintasan penuh atas puluhan
+    /// ribu perbandingan bilangan hitungannya mikrodetik — jauh lebih murah
+    /// daripada yang dijaganya, yaitu membangun ulang snapshot beserta diff-nya.
+    /// Dan begitu ada satu yang berbeda, ia langsung berhenti.
     private func isSameContent(as other: [TimelineSection]) -> Bool {
         guard sections.count == other.count else { return false }
         for (lhs, rhs) in zip(sections, other) {
             if lhs.id != rhs.id || lhs.assets.count != rhs.assets.count { return false }
-            if lhs.assets.last?.id != rhs.assets.last?.id { return false }
+            for (a, b) in zip(lhs.assets, rhs.assets) where !Self.rendersSame(a, b) {
+                return false
+            }
         }
         return true
+    }
+
+    /// Dua aset yang menghasilkan sel yang sama persis.
+    ///
+    /// Hanya yang benar-benar TERGAMBAR yang dibandingkan — id, lencana asal,
+    /// favorit, dan durasi. Sisanya boleh berbeda tanpa mengubah apa pun di
+    /// layar, dan memasukkannya hanya membuat pembaruan yang tidak perlu.
+    private static func rendersSame(_ lhs: AssetLite, _ rhs: AssetLite) -> Bool {
+        lhs.id == rhs.id
+            && lhs.origin == rhs.origin
+            && lhs.isFavorite == rhs.isFavorite
+            && lhs.duration == rhs.duration
     }
 
     // MARK: - Posisi

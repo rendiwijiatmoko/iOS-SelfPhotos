@@ -18,6 +18,13 @@ final class PhotoGridCell: UICollectionViewCell {
     /// Durasinya sendiri sudah menjadi penanda "ini video" — Photos pun tidak
     /// menambahkan ikon lagi di sampingnya.
     private let durationLabel = UILabel()
+    /// Lencana asal foto, di pojok KIRI bawah.
+    ///
+    /// Kiri, karena kanan sudah ditempati durasi video dan tanda centang
+    /// seleksi. Hanya tampil untuk foto yang ada di perangkat — mayoritas isi
+    /// linimasa ada di server saja, dan lencana di setiap petak berhenti
+    /// berarti apa-apa.
+    private let originBadge = UIImageView()
 
     /// Pemuatan yang sedang berjalan untuk sel INI.
     ///
@@ -66,6 +73,36 @@ final class PhotoGridCell: UICollectionViewCell {
         durationLabel.isHidden = true
         durationLabel.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(durationLabel)
+        originBadge.tintColor = .white
+        // Ukuran ditentukan KONFIGURASI SIMBOL, bukan tinggi yang dipaksakan.
+        //
+        // `icloud.slash` dan `checkmark.icloud` punya proporsi bawaan yang
+        // berbeda: yang kedua mengecilkan awannya untuk memberi tempat pada
+        // centang. Memaksakan tinggi yang sama pada keduanya lalu menskalakannya
+        // membuat awan yang satu tampak lebih besar daripada yang lain, padahal
+        // kotaknya sama tinggi.
+        //
+        // Pada point size yang sama, SF Symbols menjajarkan keduanya secara
+        // optis — itu memang gunanya sistem itu. Jadi biarkan simbolnya yang
+        // menentukan ukuran, dan ikutkan `.medium` scale supaya keduanya memakai
+        // varian gambar yang sama.
+        originBadge.preferredSymbolConfiguration = UIImage.SymbolConfiguration(
+            pointSize: 11, weight: .semibold, scale: .medium)
+        originBadge.contentMode = .center
+        // Bayangan yang sama dengan durasi, dan alasannya sama.
+        originBadge.layer.shadowColor = UIColor.black.cgColor
+        originBadge.layer.shadowOpacity = 0.6
+        originBadge.layer.shadowRadius = 2
+        originBadge.layer.shadowOffset = .zero
+        originBadge.isHidden = true
+        originBadge.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(originBadge)
+        NSLayoutConstraint.activate([
+            originBadge.leadingAnchor.constraint(
+                equalTo: contentView.leadingAnchor, constant: 5),
+            originBadge.bottomAnchor.constraint(
+                equalTo: contentView.bottomAnchor, constant: -4),
+        ])
         NSLayoutConstraint.activate([
             durationLabel.trailingAnchor.constraint(
                 equalTo: contentView.trailingAnchor, constant: -5),
@@ -87,6 +124,9 @@ final class PhotoGridCell: UICollectionViewCell {
         imageView.image = nil
         durationLabel.isHidden = true
         durationLabel.text = nil
+        // WAJIB direset: tanpa ini sel daur-ulang membawa lencana foto lain.
+        originBadge.isHidden = true
+        originBadge.image = nil
         setSelectionState(showsSelection: false, isPicked: false)
     }
 
@@ -103,6 +143,9 @@ final class PhotoGridCell: UICollectionViewCell {
 
         durationLabel.text = asset.durationText
         durationLabel.isHidden = asset.durationText == nil
+
+        originBadge.image = Self.originIcon(asset.origin)
+        originBadge.isHidden = originBadge.image == nil
 
         // Sudah ada di memori: dipasang seketika, tanpa `Task` sama sekali.
         if let cached = loader.cachedImage(for: asset.id) {
@@ -125,6 +168,23 @@ final class PhotoGridCell: UICollectionViewCell {
             guard let self, !Task.isCancelled, self.currentKey == key, let image
             else { return }
             self.imageView.image = image
+        }
+    }
+
+    /// Ikon asal foto; nil untuk yang hanya ada di server.
+    ///
+    /// Sepasang ikon AWAN, bukan awan lawan telepon.
+    ///
+    /// Yang perlu dijawab lencana ini cuma satu hal: **sudah aman di server atau
+    /// belum.** `iphone` menjawab pertanyaan yang berbeda — di mana fotonya
+    /// berada — dan membuat mata harus menerjemahkan dulu. Awan bercoret dan
+    /// awan bercentang adalah dua sisi dari pertanyaan yang sama, jadi bedanya
+    /// terbaca tanpa dipikir.
+    private static func originIcon(_ origin: AssetOrigin) -> UIImage? {
+        switch origin {
+        case .server: nil
+        case .device: UIImage(systemName: "icloud.slash")
+        case .both:   UIImage(systemName: "checkmark.icloud")
         }
     }
 

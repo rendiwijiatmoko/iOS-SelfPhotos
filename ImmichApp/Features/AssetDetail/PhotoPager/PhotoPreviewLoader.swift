@@ -47,6 +47,18 @@ final class PhotoPreviewLoader {
     }
 
     func image(for assetId: String) async -> UIImage? {
+        // Aset PERANGKAT tidak punya alamat di server.
+        //
+        // Memintanya ke sana berakhir 400/404, dan itu dibaca `UnreadableAssets`
+        // sebagai "aset ini sudah tidak bisa dibaca" — lalu petaknya DIBUANG
+        // dari linimasa. Foto yang masih ada di perangkat hilang dari grid
+        // hanya karena dibuka.
+        if LocalPhotoLibrary.isLocal(assetId) {
+            return await LocalPhotoLibrary.shared.preview(
+                for: assetId,
+                size: CGSize(width: Self.maxPixelSize, height: Self.maxPixelSize))
+        }
+
         let api = session.imageAPI
         let endpoint = Endpoint(
             path: "/assets/\(assetId)/thumbnail",
@@ -80,9 +92,14 @@ final class PhotoPreviewLoader {
 
     /// Menghangatkan halaman tetangga sebelum diusap ke sana.
     func prefetch(_ assetIds: [String]) {
+        // Id perangkat tidak punya alamat di server; menembakkannya ke sana
+        // hanya menghasilkan 404 untuk setiap tetangga halaman.
+        let serverIDs = assetIds.filter { !LocalPhotoLibrary.isLocal($0) }
+        guard !serverIDs.isEmpty else { return }
+
         let api = session.imageAPI
         ImageCache.shared.prefetch(
-            keys: assetIds.map(cacheKey(for:)),
+            keys: serverIDs.map(cacheKey(for:)),
             maxPixelSize: Self.maxPixelSize,
             fetch: { key in
                 let assetId = String(key.dropLast("-preview".count))

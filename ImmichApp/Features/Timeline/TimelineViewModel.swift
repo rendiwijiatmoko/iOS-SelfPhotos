@@ -33,19 +33,31 @@ final class TimelineViewModel {
     /// Sidik jari isi linimasa terakhir yang berhasil disusun.
     private var signature: Signature?
     private var hasLoaded = false
+    /// Pilihan album yang isinya sudah dimuat.
+    ///
+    /// Bukan bendera "sudah pernah", melainkan APA yang sudah dimuat. Dengan
+    /// bendera, memilih album baru di Settings tidak berefek sampai aplikasi
+    /// dibuka ulang — `task` layar berjalan lagi, tapi penjaganya sudah menyala
+    /// dan tidak ada yang membacanya kembali.
+    private var loadedAlbums: Set<String>?
 
     private let dataManager: SwiftDataManager?
     private let assetRepo: AssetDetailRepository?
     private let albumRepo: AlbumRepository?
+    /// Pencocok foto perangkat dengan aset server; nil kalau layar ini dibangun
+    /// tanpa jaringan (pratinjau, tes).
+    private let matcher: DeviceAssetMatcher?
 
     init(
         dataManager: SwiftDataManager? = nil,
         assetRepo: AssetDetailRepository? = nil,
-        albumRepo: AlbumRepository? = nil
+        albumRepo: AlbumRepository? = nil,
+        matcher: DeviceAssetMatcher? = nil
     ) {
         self.dataManager = dataManager
         self.assetRepo = assetRepo
         self.albumRepo = albumRepo
+        self.matcher = matcher
         self.hasLocalData = (dataManager?.timelineAssetCount() ?? 0) > 0
 
         // Linimasa yang memasang telinganya, bukan pemuat gambar yang memanggil
@@ -87,6 +99,41 @@ final class TimelineViewModel {
     /// `/sync/stream` satu kali, menyimpan hasilnya secara lokal, lalu merender
     /// dari sana. Itulah yang membuatnya terasa seketika — dan stream yang sama
     /// sudah kita jalankan, hanya belum dipakai sebagai sumber utama.
+    /// Memuat daftar foto perangkat, lalu menyusun ulang linimasa.
+    ///
+    /// Terpisah dari `loadTimeline` karena harganya berbeda: membaca cache
+    /// linimasa murni pekerjaan lokal, sedangkan yang ini meminta izin sistem
+    /// pada kunjungan pertama. Menyatukannya berarti dialog izin muncul di
+    /// tengah pembacaan cache yang seharusnya tak terlihat.
+    func loadDevicePhotos() async {
+        // Sekali per sesi layar. `task` berjalan ulang setiap tab Photos dibuka,
+        // dan mengenumerasi seluruh pustaka setiap kali adalah pekerjaan besar
+        // untuk daftar yang jarang berubah.
+        let selection = LocalPhotoLibrary.shared.selectedAlbumIDs
+        guard loadedAlbums != selection else { return }
+        loadedAlbums = selection
+
+        await LocalPhotoLibrary.shared.load()
+        await rebuild()
+        matchDevicePhotos()
+    }
+
+    /// Pencocokan menyusul, di latar.
+    ///
+    /// Ia membaca byte setiap foto yang belum pernah dihitung — pekerjaan yang
+    /// tidak boleh ditunggu sebelum linimasa tergambar. Yang berpasangan hilang
+    /// dari daftar sambil jalan; itu sebabnya `rebuild` dipanggil per kelompok,
+    /// bukan sekali di akhir.
+    ///
+    /// Terpisah supaya bisa dipanggil lagi saat jaringan berpindah dari seluler
+    /// ke Wi‑Fi — `match` menunda seluruhnya di jaringan berbayar, dan tanpa
+    /// panggilan kedua penundaan itu berlaku sampai aplikasi dibuka ulang.
+    func matchDevicePhotos() {
+        matcher?.match(LocalPhotoLibrary.shared.photos) { [weak self] in
+            Task { await self?.rebuild() }
+        }
+    }
+
     func loadTimeline() async {
         // Spinner HANYA kalau memang tidak ada apa-apa di perangkat.
         //
@@ -110,7 +157,7 @@ final class TimelineViewModel {
     }
 
     private func rebuild() async {
-        let rows = dataManager?.timelineAssets() ?? []
+        let rows = mergedRows()
         hasLocalData = !rows.isEmpty
 
         guard !rows.isEmpty else {
@@ -158,6 +205,105 @@ final class TimelineViewModel {
         AppLaunchState.shared.markReady()
     }
 
+    /// Foto server dan foto perangkat, digabung dalam satu deret terurut.
+    ///
+    /// Keduanya sudah menaik menurut tanggal — cache linimasa karena kueri-nya
+    /// begitu, pustaka perangkat karena `sortDescriptors`-nya begitu. Jadi yang
+    /// dikerjakan di sini cuma merge dua deret terurut, bukan pengurutan ulang
+    /// puluhan ribu item.
+    ///
+    /// Yang PENTING: urutannya harus benar sebelum `build`. Pengelompokan per
+    /// bulan di sana satu lintasan tanpa sorting — satu foto yang tersisip di
+    /// tempat salah akan memecah bulannya jadi dua bagian terpisah.
+    private func mergedRows() -> [TimelineRow] {
+        let serverRows = markDeviceCopies(dataManager?.timelineAssets() ?? [])
+        let deviceRows = localRows(existingServerIDs: Set(serverRows.map(\.asset.id)))
+        guard !deviceRows.isEmpty else { return serverRows }
+        guard !serverRows.isEmpty else { return deviceRows }
+
+        var merged: [TimelineRow] = []
+        merged.reserveCapacity(serverRows.count + deviceRows.count)
+        var i = 0, j = 0
+        while i < serverRows.count && j < deviceRows.count {
+            if serverRows[i].asset.createdAt <= deviceRows[j].asset.createdAt {
+                merged.append(serverRows[i]); i += 1
+            } else {
+                merged.append(deviceRows[j]); j += 1
+            }
+        }
+        merged.append(contentsOf: serverRows[i...])
+        merged.append(contentsOf: deviceRows[j...])
+        return merged
+    }
+
+    /// Menandai petak server yang salinannya masih ada di perangkat.
+    ///
+    /// Dikerjakan di sini, bukan disimpan di cache: hubungan ini milik
+    /// perangkat, bukan milik server, dan menuliskannya ke `CachedAsset` berarti
+    /// sync berikutnya harus menjaganya tetap benar tanpa punya cara tahu.
+    private func markDeviceCopies(_ rows: [TimelineRow]) -> [TimelineRow] {
+        let onDevice = dataManager?.uploadedServerAssetIDs() ?? []
+        guard !onDevice.isEmpty else { return rows }
+        return rows.map { row in
+            guard onDevice.contains(row.asset.id) else { return row }
+            var asset = row.asset
+            asset.origin = .both
+            return TimelineRow(asset: asset, monthKey: row.monthKey)
+        }
+    }
+
+    /// Foto perangkat, dengan lencana yang sesuai keadaannya.
+    ///
+    /// **Petak lokal dibuang hanya kalau petak SERVER-nya benar-benar sudah ada
+    /// di cache** — bukan sekadar karena unggahannya tercatat berhasil.
+    ///
+    /// Dulu penyaringnya cuma "ada catatan unggahan?", dan itu meninggalkan
+    /// lubang di antara dua kejadian: unggahan selesai lebih dulu, aset servernya
+    /// baru turun pada sync berikutnya. Di sela itu fotonya hilang dari linimasa
+    /// — bukan berganti lencana, melainkan lenyap. Yang paling membingungkan
+    /// justru karena terjadi tepat setelah sesuatu berhasil.
+    ///
+    /// Sekarang petak lokalnya bertahan dan lencananya berganti jadi "ada di
+    /// keduanya" seketika. Begitu sync membawa aset servernya, petak lokal itu
+    /// menghilang dan petak server menggantikannya dengan lencana yang sama —
+    /// pergantian yang tidak terlihat sama sekali.
+    ///
+    /// - Parameter existingServerIDs: id aset yang SUDAH ada di cache linimasa.
+    private func localRows(existingServerIDs: Set<String>) -> [TimelineRow] {
+        let links = dataManager?.serverAssetIDsByLocalIdentifier() ?? [:]
+
+        return LocalPhotoLibrary.shared.photos.compactMap { photo -> TimelineRow? in
+            var origin = AssetOrigin.device
+            if let serverID = links[photo.id] {
+                // Petak servernya sudah berdiri sendiri; dua petak untuk satu
+                // foto yang sama adalah persis yang ingin dihindari.
+                guard !existingServerIDs.contains(serverID) else { return nil }
+                origin = .both
+            }
+
+            return TimelineRow(
+                asset: AssetLite(
+                    id: LocalPhotoLibrary.assetID(for: photo.id),
+                    isVideo: photo.isVideo,
+                    ratio: photo.ratio,
+                    thumbhash: nil,
+                    createdAt: photo.createdAt,
+                    duration: photo.duration,
+                    origin: origin),
+                monthKey: MonthKey.of(photo.createdAt))
+        }
+    }
+
+    /// Menggambar ulang lencana asal tanpa menyentuh jaringan.
+    ///
+    /// Dipanggil sementara pencadangan berjalan: tiap unggahan yang berhasil
+    /// mengubah arti satu petak, dan menunggu sync berikutnya untuk
+    /// memperlihatkannya berarti angka di layar Backup naik sementara linimasa
+    /// bersikeras tidak ada yang berubah.
+    func refreshOrigins() async {
+        await rebuild()
+    }
+
     /// Sidik jari murah untuk isi linimasa.
     ///
     /// Cukup jumlah plus aset di kedua ujungnya: penambahan, penghapusan, dan
@@ -168,10 +314,44 @@ final class TimelineViewModel {
         let firstID: String?
         let lastID: String?
 
+        /// Jumlah aset perangkat ikut dihitung TERPISAH.
+        ///
+        /// Menyisipkan foto lokal di tengah tidak mengubah jumlah total maupun
+        /// kedua ujungnya kalau ada foto server yang hilang di saat yang sama —
+        /// dan penjaga ini akan melewatkannya diam-diam.
+        let deviceCount: Int
+
+        /// Yang ada di KEDUA tempat, dihitung terpisah lagi.
+        ///
+        /// Tanpa ini "Delete from Device" tidak pernah terlihat hasilnya.
+        /// Menghapus salinan perangkat mengubah asalnya dari `.both` jadi
+        /// `.server` — jumlah baris tetap, kedua ujungnya tetap, dan `.both`
+        /// maupun `.server` sama-sama BUKAN `.device`, jadi ketiga angka lama
+        /// tidak bergeming. Sidik jarinya identik, penjaga di `rebuild` pulang
+        /// lebih awal, dan lencananya bertahan menunjuk berkas yang sudah tidak
+        /// ada.
+        ///
+        /// Arah sebaliknya kebetulan selamat: unggahan mengubah `.device` jadi
+        /// `.both`, dan itu menggeser `deviceCount`. Kebetulan yang menyamarkan
+        /// setengah dari lubangnya.
+        let linkedCount: Int
+
         init(_ rows: [TimelineRow]) {
             count = rows.count
             firstID = rows.first?.asset.id
             lastID = rows.last?.asset.id
+
+            var device = 0
+            var linked = 0
+            for row in rows {
+                switch row.asset.origin {
+                case .device: device += 1
+                case .both:   linked += 1
+                case .server: break
+                }
+            }
+            deviceCount = device
+            linkedCount = linked
         }
     }
 

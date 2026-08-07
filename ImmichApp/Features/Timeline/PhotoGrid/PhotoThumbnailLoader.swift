@@ -40,8 +40,34 @@ final class PhotoThumbnailLoader {
             for: ImageCache.memoryKey(cacheKey(for: assetId), Self.maxPixelSize))
     }
 
+    /// Ukuran permintaan ke PhotoKit, dalam piksel.
+    private static var deviceTargetSize: CGSize {
+        CGSize(width: maxPixelSize, height: maxPixelSize)
+    }
+
     func image(for assetId: String) async -> UIImage? {
         guard !isSuspended else { return nil }
+
+        // FOTO PERANGKAT punya jalurnya sendiri, dan tidak boleh melewati
+        // `UnreadableAssets`.
+        //
+        // Pelaporan itu berujung pada pembuangan aset dari cache linimasa — dan
+        // foto yang gagal dimuat dari PhotoKit (mis. masih di iCloud dan belum
+        // diunduh) bukan aset rusak. Membuangnya berarti menghapus petak untuk
+        // foto yang masih ada di perangkat.
+        if LocalPhotoLibrary.isLocal(assetId) {
+            let image = await LocalPhotoLibrary.shared.thumbnail(
+                for: assetId, size: Self.deviceTargetSize)
+            if let image {
+                // Dititipkan ke cache MEMORI saja, bukan ke disk: byte-nya sudah
+                // ada di perangkat, dan menyalinnya ke cache aplikasi hanya
+                // menggandakan penyimpanan untuk sesuatu yang tak perlu diunduh.
+                ImageMemoryCache.shared.insert(
+                    image,
+                    for: ImageCache.memoryKey(cacheKey(for: assetId), Self.maxPixelSize))
+            }
+            return image
+        }
 
         let key = cacheKey(for: assetId)
         let api = session.imageAPI
@@ -75,9 +101,18 @@ final class PhotoThumbnailLoader {
     func prefetch(_ assetIds: [String]) {
         guard !isSuspended else { return }
 
+        // PhotoKit punya mekanisme prefetch-nya sendiri; yang lokal diserahkan
+        // ke sana dan tidak ikut ke `ImageCache`.
+        let deviceIDs = assetIds.filter(LocalPhotoLibrary.isLocal)
+        if !deviceIDs.isEmpty {
+            LocalPhotoLibrary.shared.startCaching(deviceIDs, size: Self.deviceTargetSize)
+        }
+        let serverIDs = assetIds.filter { !LocalPhotoLibrary.isLocal($0) }
+        guard !serverIDs.isEmpty else { return }
+
         let api = session.imageAPI
         ImageCache.shared.prefetch(
-            keys: assetIds.map(cacheKey(for:)),
+            keys: serverIDs.map(cacheKey(for:)),
             maxPixelSize: Self.maxPixelSize,
             fetch: { key in
                 let assetId = String(key.dropLast("-thumbnail".count))

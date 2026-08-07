@@ -69,6 +69,16 @@ final class AssetDetailViewModel {
     /// dilakukan pengguna. Yang bersuara hanya kegagalan yang MEREKA picu
     /// sendiri: favorit, bagikan, arsip, hapus.
     func load(_ id: String) async {
+        // Foto perangkat tidak punya detail di server, dan menanyakannya bukan
+        // sekadar sia-sia: jawabannya 404, dan itu membuat petaknya dibuang dari
+        // linimasa. Panel info-nya memang kosong — yang diketahui tentang foto
+        // ini semuanya sudah ada di `AssetLite`.
+        guard !LocalPhotoLibrary.isLocal(id) else {
+            detail = nil
+            phase = .loaded(())
+            return
+        }
+
         let key = LocalSnapshot.Key.assetDetail(id)
 
         // Foto lain, jadi detail foto SEBELUMNYA harus lepas dulu.

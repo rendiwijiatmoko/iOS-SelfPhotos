@@ -48,6 +48,7 @@ struct SearchResultsGrid: View {
     @Environment(SessionManager.self) private var session
     @AppStorage(SettingsViewModel.gridColumnsKey) private var gridColumns = 3
     @State private var gridController: PhotoGridController?
+    @State private var deviceDeleteID: String?
 
     var body: some View {
         PhotoGridView(
@@ -60,6 +61,7 @@ struct SearchResultsGrid: View {
             onReachEnd: onReachEnd,
             onControllerReady: { gridController = $0 },
             session: session)
+        .deleteFromDeviceAlert($deviceDeleteID)
         // SENGAJA tanpa `ignoresSafeArea`, tidak seperti linimasa dan koleksi.
         // Grid ini duduk di dalam `VStack` bersama baris penyaring, jadi
         // membiarkannya melebar ke seluruh layar akan menaruhnya di belakang
@@ -126,7 +128,7 @@ struct SearchResultsGrid: View {
     /// pada saat ditekan selalu memberi yang terbaru.
     private func menuActions(for id: String) -> [PhotoGridMenuAction] {
         guard let asset = asset(for: id) else { return [] }
-        return [
+        var items: [PhotoGridMenuAction] = [
             PhotoGridMenuAction(title: "Share", systemImage: "square.and.arrow.up") {
                 actions.share(asset)
             },
@@ -144,9 +146,18 @@ struct SearchResultsGrid: View {
             ) {
                 actions.addToAlbum(asset)
             },
+        ]
+
+        if let deviceAction = DeviceCopyDeletion.menuAction(
+            for: asset, request: { deviceDeleteID = $0 }) {
+            items.append(deviceAction)
+        }
+
+        items.append(
             PhotoGridMenuAction(title: "Delete", systemImage: "trash", isDestructive: true) {
                 actions.delete(asset)
-            },
-        ]
+            })
+
+        return items
     }
 }

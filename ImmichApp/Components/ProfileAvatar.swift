@@ -21,13 +21,41 @@ struct ProfileAvatar: View {
 
     var style: Style = .toolbar
 
+    /// Ikut menunjukkan keadaan pencadangan.
+    ///
+    /// **Kenapa menumpang di sini, bukan tombol tersendiri.** Toolbar Photos dan
+    /// Library hanya punya beberapa titik singgah, dan pencadangan bukan sesuatu
+    /// yang ditekan tiap hari — ia sesuatu yang ingin dilihat sekilas. Ikon
+    /// kedua di sebelah avatar mengambil ruang permanen untuk kabar yang
+    /// biasanya berbunyi "semuanya beres".
+    ///
+    /// Aksinya TIDAK berubah: menekannya tetap membuka pengaturan. Yang berubah
+    /// hanya rupanya.
+    var showsBackupState = false
+
     @Environment(SessionManager.self) private var session
+    @State private var backup = BackupService.shared
     /// Alasannya sama seperti di `AuthImage`: bitmap-nya milik cache, view ini
     /// hanya perlu digambar ulang saat pemuatannya selesai. Nilainya HARUS ikut
     /// dibaca di `body` supaya ketergantungannya benar-benar terbentuk.
     @State private var revision = 0
 
     var body: some View {
+        Group {
+            if isUploading {
+                uploadingCircle
+            } else {
+                avatarCircle
+            }
+        }
+        // Pergantiannya dihaluskan, bukan berkedip. Unggahan bisa mulai dan
+        // berhenti berkali-kali dalam satu sesi, dan avatar yang berkelip tiap
+        // kali lebih mengganggu daripada memberi kabar.
+        .animation(.smooth(duration: 0.3), value: isUploading)
+        .task(id: cacheKey) { await load() }
+    }
+
+    private var avatarCircle: some View {
         let shown = cachedImage(revision: revision)
 
         return initialsCircle
@@ -39,8 +67,53 @@ struct ProfileAvatar: View {
                 }
             }
             .clipShape(.circle)
-//            .padding(.trailing, style == .toolbar ? Self.toolbarTrailingCompensation : 0)
-            .task(id: cacheKey) { await load() }
+            .overlay(alignment: .bottomTrailing) { backupIndicator }
+    }
+
+    /// Selagi mengunggah, avatarnya DIGANTI — bukan diberi lencana.
+    ///
+    /// Lencana kecil di sudut cukup untuk keadaan yang diam ("sudah aman",
+    /// "masih ada sisa"), tapi tidak untuk sesuatu yang sedang berlangsung.
+    /// Mengganti seluruh lingkarannya membuat perubahan itu tertangkap sudut
+    /// mata, yang memang tujuannya.
+    private var uploadingCircle: some View {
+        Circle()
+            .fill(Self.gradient)
+            .frame(width: side, height: side)
+            .overlay {
+                Image(systemName: "icloud.and.arrow.up")
+                    .font(.system(size: side * 0.45, weight: .semibold))
+                    .foregroundStyle(.white)
+                    // `.breathe`, bukan `.pulse`: yang pertama membesar-mengecil
+                    // perlahan seperti napas, yang kedua berkedip. Untuk sesuatu
+                    // yang berlangsung menit-menitan, kedipan melelahkan.
+                    .symbolEffect(.breathe, options: .repeating)
+            }
+    }
+
+    /// Titik kecil di sudut avatar; nil kalau tidak ada yang perlu dikabarkan.
+    ///
+    /// Sengaja hanya TITIK, bukan ikon. Ia duduk di atas foto wajah seseorang —
+    /// apa pun yang lebih besar dari ini akan menutupi bagian yang justru jadi
+    /// alasan avatarnya ada.
+    @ViewBuilder
+    private var backupIndicator: some View {
+        if showsBackupState, backup.isEnabled, backup.remainder > 0 {
+            Circle()
+                .fill(.orange)
+                .frame(width: side * 0.28, height: side * 0.28)
+                // Cincin sewarna latar memisahkannya dari foto di belakangnya;
+                // tanpa itu titik oranye di atas foto oranye lenyap.
+                .overlay(Circle().strokeBorder(Color(.systemBackground), lineWidth: 1.5))
+        }
+    }
+
+    private var isUploading: Bool {
+        showsBackupState && backup.isUploading
+    }
+
+    private var side: CGFloat {
+        style == .toolbar ? Self.toolbarSide : 116
     }
 
     // MARK: - Inisial

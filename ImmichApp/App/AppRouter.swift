@@ -131,6 +131,12 @@ struct MainTabView: View {
                     SearchView()
                 }
             }
+            // Pemberitahuan pencadangan mengantar ke layar Backup, dan layar itu
+            // ada DI DALAM tab Library. Yang dikerjakan di sini cuma separuh
+            // pertamanya: pindah tab. `LibraryView` yang mendorong layarnya.
+            .onChange(of: BackupNotifier.shared.openBackupRequests) { _, _ in
+                selectedTab = .library
+            }
         }
         // Sync disuntikkan ke environment karena linimasa merender DARI hasil
         // sync itu, bukan dari endpoint linimasa. Tanpa akses ke sini, layar
