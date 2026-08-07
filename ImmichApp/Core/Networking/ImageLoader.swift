@@ -91,6 +91,9 @@ actor ImageCache {
     /// Sepuluh sel yang meminta gambar yang sama hanya menghasilkan satu
     /// unduhan; sisanya menunggu hasil yang sama.
     private var inFlight: [String: Task<UIImage, Error>] = [:]
+    /// Dinaikkan saat cache dibersihkan. Prefetch akun lama membawa nomor lama
+    /// dan berhenti sebelum dapat memulai permintaan berikutnya.
+    private var generation = 0
 
     /// Pembatas pekerjaan berat yang berjalan serentak — baca disk, decode, DAN
     /// unduhan.
@@ -149,8 +152,11 @@ actor ImageCache {
         key: String,
         maxPixelSize: Int?,
         isPrefetch: Bool = false,
+        expectedGeneration: Int? = nil,
         fetch: @escaping @Sendable () async throws -> Data
     ) async throws -> UIImage {
+        let requestGeneration = expectedGeneration ?? generation
+        guard requestGeneration == generation else { throw CancellationError() }
         let memoryKey = Self.memoryKey(key, maxPixelSize)
 
         if let cached = ImageMemoryCache.shared.image(for: memoryKey) {
@@ -165,7 +171,8 @@ actor ImageCache {
             guard let self else { throw CancellationError() }
             return try await self.produce(
                 key: key, memoryKey: memoryKey,
-                maxPixelSize: maxPixelSize, isPrefetch: isPrefetch, fetch: fetch)
+                maxPixelSize: maxPixelSize, isPrefetch: isPrefetch,
+                expectedGeneration: requestGeneration, fetch: fetch)
         }
         inFlight[memoryKey] = task
 
@@ -192,7 +199,9 @@ actor ImageCache {
         onFailure: (@Sendable (String, Error) -> Void)? = nil
     ) {
         Task(priority: .background) {
+            let expectedGeneration = await self.generation
             for key in keys {
+                guard await self.isCurrentGeneration(expectedGeneration) else { return }
                 // Sudah ada di memori — tidak ada yang perlu dikerjakan.
                 let memoryKey = Self.memoryKey(key, maxPixelSize)
                 if ImageMemoryCache.shared.image(for: memoryKey) != nil { continue }
@@ -202,6 +211,7 @@ actor ImageCache {
                         key: key,
                         maxPixelSize: maxPixelSize,
                         isPrefetch: true,
+                        expectedGeneration: expectedGeneration,
                         fetch: { try await fetch(key) })
                 } catch {
                     onFailure?(key, error)
@@ -210,11 +220,16 @@ actor ImageCache {
         }
     }
 
+    private func isCurrentGeneration(_ expected: Int) -> Bool {
+        expected == generation
+    }
+
     private func produce(
         key: String,
         memoryKey: String,
         maxPixelSize: Int?,
         isPrefetch: Bool,
+        expectedGeneration: Int,
         fetch: @Sendable () async throws -> Data
     ) async throws -> UIImage {
         let diskPath = diskCacheURL.appendingPathComponent(hashKey(key))
@@ -241,6 +256,8 @@ actor ImageCache {
         // Actor tetap memegang pembukuannya: cache memori, tabel permintaan yang
         // sedang berjalan, dan jatah unduhan.
         if let image = await Self.loadFromDisk(diskPath, maxPixelSize: maxPixelSize) {
+            try Task.checkCancellation()
+            guard expectedGeneration == generation else { throw CancellationError() }
             touch(diskPath)
             remember(image, for: memoryKey)
             return image
@@ -248,12 +265,15 @@ actor ImageCache {
 
         let data = try await fetch()
         try Task.checkCancellation()
+        guard expectedGeneration == generation else { throw CancellationError() }
 
         store(data, at: diskPath)
 
         guard let image = await Self.decode(data, maxPixelSize: maxPixelSize) else {
             throw APIError.unknown
         }
+        try Task.checkCancellation()
+        guard expectedGeneration == generation else { throw CancellationError() }
         remember(image, for: memoryKey)
         return image
     }
@@ -434,6 +454,11 @@ actor ImageCache {
     // MARK: - Pemeliharaan
 
     func clear() {
+        generation &+= 1
+        // Permintaan akun lama tidak boleh mengisi cache kembali beberapa saat
+        // setelah direktori logout dibersihkan.
+        inFlight.values.forEach { $0.cancel() }
+        inFlight.removeAll()
         ImageMemoryCache.shared.removeAll()
         try? FileManager.default.removeItem(at: diskCacheURL)
         try? FileManager.default.createDirectory(

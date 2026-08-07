@@ -262,6 +262,19 @@ final class SwiftDataManager {
         try modelContext.save()
     }
 
+    /// Menghapus seluruh data yang terikat akun dari penyimpanan lokal.
+    ///
+    /// Berbeda dari `clearAllCache()`, yang sengaja hanya membuang linimasa saat
+    /// full sync. Logout juga harus menghapus checkpoint sync, pasangan backup,
+    /// dan checksum lokal agar akun berikutnya tidak mewarisi keadaan akun lama.
+    func clearAllAccountData() throws {
+        try modelContext.delete(model: CachedAsset.self)
+        try modelContext.delete(model: BackupRecord.self)
+        try modelContext.delete(model: SyncState.self)
+        try modelContext.delete(model: LocalAssetChecksum.self)
+        try modelContext.save()
+    }
+
     func getBackupRecord(deviceAssetId: String) -> BackupRecord? {
         var descriptor = FetchDescriptor<BackupRecord>(predicate: #Predicate { $0.deviceAssetId == deviceAssetId })
         descriptor.fetchLimit = 1

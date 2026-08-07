@@ -92,6 +92,17 @@ final class BackupUploader: NSObject {
     func reconnect() {
         _ = session
     }
+
+    /// Membatalkan transfer yang sudah diserahkan ke `nsurlsessiond`.
+    ///
+    /// `BackupService.stop()` hanya menghentikan loop pengantrean di proses ini;
+    /// task background tetap membawa header akun lama sampai dibatalkan di sini.
+    func cancelAll() async {
+        let tasks = await session.allTasks
+        tasks.forEach { $0.cancel() }
+
+        lock.withLock { responses.removeAll() }
+    }
 }
 
 // MARK: - Delegate

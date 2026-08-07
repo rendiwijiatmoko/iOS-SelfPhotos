@@ -46,10 +46,18 @@ final class PhotoPagerCell: UICollectionViewCell {
     /// ditonton.
     private var player: AVPlayer?
     private var playerLayer: AVPlayerLayer?
+    private var videoLoadTask: Task<Void, Never>?
     private var endObserver: NSObjectProtocol?
+    /// Mengikuti status buffering dari AVPlayer. Pengamat ini wajib dilepas
+    /// bersama pemutar supaya callback video lama tidak mengubah sel daur ulang.
+    private var playbackStatusObserver: NSKeyValueObservation?
+    /// AVPlayer kadang tetap berstatus menunggu meski item sudah siap meneruskan.
+    /// Perubahan ini dipakai untuk menendangnya kembali ke `play()`.
+    private var playbackKeepUpObserver: NSKeyValueObservation?
     /// Pengamat waktu berkala, untuk menggerakkan slider di bar kontrol.
     private var timeObserver: Any?
     private let playButton = UIButton(type: .system)
+    private let loadingIndicator = UIActivityIndicatorView(style: .large)
 
     /// Id video pasangan Live Photo; nil untuk foto biasa.
     private var livePhotoVideoID: String?
@@ -161,6 +169,17 @@ final class PhotoPagerCell: UICollectionViewCell {
         NSLayoutConstraint.activate([
             playButton.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
             playButton.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+        ])
+
+        loadingIndicator.color = .white
+        loadingIndicator.hidesWhenStopped = true
+        loadingIndicator.isUserInteractionEnabled = false
+        loadingIndicator.accessibilityLabel = String(localized: "Loading video")
+        loadingIndicator.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(loadingIndicator)
+        NSLayoutConstraint.activate([
+            loadingIndicator.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            loadingIndicator.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
         ])
 
         buildLiveBadge()
@@ -528,19 +547,41 @@ final class PhotoPagerCell: UICollectionViewCell {
             return
         }
 
-        guard let id = currentAssetID,
-              let source = loader?.videoSource(for: id)
+        guard videoLoadTask == nil,
+              let id = currentAssetID,
+              let loader
         else { return }
 
+        playButton.isHidden = true
+        loadingIndicator.startAnimating()
+        videoLoadTask = Task { [weak self] in
+            let asset = await loader.playbackAsset(for: id)
+            guard let self else { return }
+            self.videoLoadTask = nil
+            guard !Task.isCancelled,
+                  self.currentAssetID == id,
+                  let asset
+            else {
+                self.loadingIndicator.stopAnimating()
+                self.playButton.isHidden = !self.isVideo
+                return
+            }
+            self.startPlayback(with: asset)
+        }
+    }
+
+    private func startPlayback(with asset: AVAsset) {
         // Suara tetap terdengar walau sakelar senyap aktif — sama seperti Photos
         // saat video diputar dengan sengaja.
         try? AVAudioSession.sharedInstance().setCategory(.playback)
         try? AVAudioSession.sharedInstance().setActive(true)
 
-        let asset = AVURLAsset(
-            url: source.url,
-            options: ["AVURLAssetHTTPHeaderFieldsKey": source.headers])
-        let player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        let item = AVPlayerItem(asset: asset)
+        // Mulai dari byte yang sudah cukup untuk playback. Menunggu buffer besar
+        // membuat koneksi lambat terlihat seperti loading tanpa akhir.
+        item.preferredForwardBufferDuration = 1
+        let player = AVPlayer(playerItem: item)
+        player.automaticallyWaitsToMinimizeStalling = false
         player.isMuted = Self.prefersMuted
         let layer = AVPlayerLayer(player: player)
         layer.videoGravity = .resizeAspect
@@ -572,9 +613,48 @@ final class PhotoPagerCell: UICollectionViewCell {
 
         self.player = player
         self.playerLayer = layer
+        playbackStatusObserver = player.observe(
+            \.timeControlStatus,
+            options: [.initial, .new]
+        ) { [weak self] observedPlayer, _ in
+            DispatchQueue.main.async { [weak self, weak observedPlayer] in
+                guard let self, let observedPlayer,
+                      self.player === observedPlayer
+                else { return }
+                self.updateLoadingIndicator(for: observedPlayer)
+                self.reportPlayback()
+            }
+        }
+        playbackKeepUpObserver = item.observe(
+            \.isPlaybackLikelyToKeepUp,
+            options: [.initial, .new]
+        ) { [weak self, weak item] observedItem, _ in
+            DispatchQueue.main.async { [weak self, weak item] in
+                guard let self, let item,
+                      observedItem === item,
+                      self.player?.currentItem === item,
+                      item.isPlaybackLikelyToKeepUp,
+                      self.player?.timeControlStatus == .waitingToPlayAtSpecifiedRate
+                else { return }
+                // Workaround untuk AVPlayer yang kadang tidak keluar sendiri
+                // dari status waiting walaupun buffer sudah mencukupi.
+                self.player?.play()
+            }
+        }
         playButton.isHidden = true
         player.play()
         reportPlayback()
+    }
+
+    /// `waitingToPlayAtSpecifiedRate` mencakup pemuatan awal dan rebuffering.
+    /// Status ini lebih akurat daripada menebak dari durasi atau frame pertama.
+    private func updateLoadingIndicator(for player: AVPlayer) {
+        if player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
+            playButton.isHidden = true
+            loadingIndicator.startAnimating()
+        } else {
+            loadingIndicator.stopAnimating()
+        }
     }
 
     /// Menghentikan dan membongkar pemutarnya.
@@ -583,11 +663,21 @@ final class PhotoPagerCell: UICollectionViewCell {
     /// terus berjalan di halaman yang sudah lewat tetap memakan jaringan dan
     /// menahan sesi audio.
     func stopPlayback() {
+        videoLoadTask?.cancel()
+        videoLoadTask = nil
+        playbackKeepUpObserver?.invalidate()
+        playbackKeepUpObserver = nil
+        playbackStatusObserver?.invalidate()
+        playbackStatusObserver = nil
+        loadingIndicator.stopAnimating()
         if let timeObserver, let player {
             player.removeTimeObserver(timeObserver)
         }
         timeObserver = nil
         player?.pause()
+        // Melepas item juga membatalkan pembacaan/range request yang masih aktif,
+        // dan menjamin kunjungan berikutnya dimulai lagi dari detik nol.
+        player?.replaceCurrentItem(with: nil)
         playerLayer?.removeFromSuperlayer()
         playerLayer = nil
         player = nil

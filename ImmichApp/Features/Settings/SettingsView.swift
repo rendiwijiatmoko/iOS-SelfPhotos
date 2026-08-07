@@ -42,13 +42,17 @@ struct SettingsView: View {
             .task { await vm.refreshCacheSize() }
             .task { await session.refreshUser() }
             .alert("Sign Out", isPresented: $showLogoutAlert) {
-                Button("Sign Out", role: .destructive) { session.logout() }
+                Button("Sign Out", role: .destructive) {
+                    Task { await session.logout() }
+                }
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("Are you sure you want to sign out?")
             }
             .alert("Change Server", isPresented: $showChangeServerAlert) {
-                Button("Change", role: .destructive) { session.logout() }
+                Button("Change", role: .destructive) {
+                    Task { await session.logout() }
+                }
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("You will be logged out and need to enter a new server URL.")

@@ -94,6 +94,7 @@ class SessionManager {
         try await fetchMe()
         persist()
         isLoggedIn = true
+        BackupService.shared.configure(session: self)
     }
 
     func loginApiKey(_ key: String) async throws {
@@ -101,6 +102,7 @@ class SessionManager {
         try await fetchMe()
         persist()
         isLoggedIn = true
+        BackupService.shared.configure(session: self)
     }
 
     private func fetchMe() async throws {
@@ -144,7 +146,7 @@ class SessionManager {
             try await validate()
             try await fetchMe()
         } catch APIError.unauthorized {
-            logout()
+            await logout()
         } catch {
             // Offline: sesi tersimpan tetap dipakai.
         }
@@ -173,11 +175,41 @@ class SessionManager {
     /// `/users/me` dua kali. Sengaja tidak diamati: ini pembukuan internal.
     @ObservationIgnored private var isRefreshingUser = false
 
-    func logout() {
-        // Snapshot header sebelum token dihapus supaya request logout tetap terautentikasi.
-        let headers = authHeaders
-        Task { try? await api.sendVoid(.init(path: "/auth/logout", method: .post, extraHeaders: headers)) }
-        token = nil; currentUser = nil; isLoggedIn = false
+    func logout() async {
+        // Bentuk request lengkap SEBELUM sesi dikosongkan. Dengan begitu logout
+        // server tetap bisa berjalan tanpa mempertahankan token/base URL di
+        // `SessionManager` selama cleanup lokal berlangsung.
+        var remoteLogoutRequest: URLRequest?
+        if let baseURL {
+            var request = URLRequest(url: baseURL.appendingPathComponent("/auth/logout"))
+            request.httpMethod = "POST"
+            authHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+            remoteLogoutRequest = request
+        }
+        if let remoteLogoutRequest {
+            Task.detached {
+                _ = try? await URLSession.shared.data(for: remoteLogoutRequest)
+            }
+        }
+
+        // Dibersihkan sebelum router menampilkan onboarding; kalau ditunda
+        // sampai setelah `await`, view model baru sempat membaca URL akun lama.
+        OnboardingViewModel.clearStoredServer()
+        UserDefaults.standard.removeObject(forKey: Self.userKey)
+        ["serverURL", "token", "mode"].forEach(KeychainStore.delete)
+        AppLaunchState.shared.reset()
+
+        token = nil
+        currentUser = nil
+        isLoggedIn = false
+        serverInput = nil
+        baseURL = nil
+        refreshSnapshot()
+
+        // Berhenti mengantre dan menerima hasil upload SEBELUM database dibuang.
+        BackupService.shared.resetForLogout()
+        await BackupUploader.shared.cancelAll()
+
         // Sampul album yang sudah diselesaikan menyimpan id aset milik akun
         // lama; membawanya ke akun berikutnya berarti permintaan gambar yang
         // pasti ditolak.
@@ -187,9 +219,14 @@ class SessionManager {
         // perpustakaan orang lain yang akan tergambar di layar akun berikutnya
         // sebelum server sempat membantahnya.
         LocalSnapshot.clearAll()
-        refreshSnapshot()
-        UserDefaults.standard.removeObject(forKey: Self.userKey)
-        ["serverURL", "token", "mode"].forEach(KeychainStore.delete)
+        try? SwiftDataManager.shared.clearAllAccountData()
+        LocalPhotoLibrary.shared.resetForLogout()
+        RemovedAssets.shared.clear()
+        UnreadableAssets.shared.clear()
+        ThumbHash.clearCache()
+        await ImageCache.shared.clear()
+        URLCache.shared.removeAllCachedResponses()
+        HTTPCookieStorage.shared.removeCookies(since: .distantPast)
     }
 
     private func applyAuth(token: String, mode: AuthMode) {

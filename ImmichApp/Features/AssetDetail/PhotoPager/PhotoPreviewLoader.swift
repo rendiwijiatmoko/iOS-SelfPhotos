@@ -1,3 +1,4 @@
+import AVFoundation
 import UIKit
 
 /// Satu pintu untuk gambar layar detail.
@@ -88,6 +89,38 @@ final class PhotoPreviewLoader {
         let (baseURL, headers) = session.snapshot
         guard let baseURL else { return nil }
         return (baseURL.appendingPathComponent("/assets/\(assetId)/video/playback"), headers)
+    }
+
+    /// Sumber playback tercepat yang tersedia.
+    ///
+    /// Aset server yang berasal dari perangkat ini tetap punya pasangan
+    /// `PHAsset.localIdentifier`. Memutar pasangan lokal lebih dahulu menghindari
+    /// round-trip dan transcoding server. Bila berkas lokal sudah dihapus atau
+    /// hanya ada di iCloud, endpoint playback server menjadi fallback.
+    func playbackAsset(for assetId: String) async -> AVAsset? {
+        let localAssetID: String?
+        if LocalPhotoLibrary.isLocal(assetId) {
+            localAssetID = assetId
+        } else if let identifier = SwiftDataManager.shared.localIdentifier(
+            forServerAsset: assetId) {
+            localAssetID = LocalPhotoLibrary.assetID(for: identifier)
+        } else {
+            localAssetID = nil
+        }
+
+        if let localAssetID,
+           let localAsset = await LocalPhotoLibrary.shared.videoAsset(for: localAssetID) {
+            return localAsset
+        }
+
+        // Aset yang hanya ada di perangkat tidak punya fallback server.
+        guard !LocalPhotoLibrary.isLocal(assetId),
+              let source = videoSource(for: assetId)
+        else { return nil }
+
+        return AVURLAsset(
+            url: source.url,
+            options: ["AVURLAssetHTTPHeaderFieldsKey": source.headers])
     }
 
     /// Menghangatkan halaman tetangga sebelum diusap ke sana.

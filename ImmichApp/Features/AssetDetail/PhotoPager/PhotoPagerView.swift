@@ -56,6 +56,16 @@ struct PhotoPagerView: UIViewControllerRepresentable {
         controller.apply(layout: layout, isPagingEnabled: isPagingEnabled)
     }
 
+    static func dismantleUIViewController(
+        _ controller: PhotoPagerController,
+        coordinator: ()
+    ) {
+        // SwiftUI dapat tetap menahan controller selama animasi dismiss selesai.
+        // Pemutar tidak boleh menunggu sel dilepas dari memori karena audionya
+        // akan terus terdengar di layar sebelumnya selama jeda itu.
+        controller.stopAllPlayback()
+    }
+
     private func bind(_ controller: PhotoPagerController) {
         controller.onPageChanged = onPageChanged
         controller.onZoomChanged = onZoomChanged
@@ -125,6 +135,14 @@ final class PhotoPagerController: UIViewController {
         view.addSubview(collectionView)
     }
 
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        // `dismantleUIViewController` adalah pagar terakhir saat representable
+        // dibuang. Ini menghentikan audio lebih awal, tepat ketika layar detail
+        // mulai meninggalkan layar selama transisi dismiss.
+        stopAllPlayback()
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
 
@@ -164,6 +182,11 @@ final class PhotoPagerController: UIViewController {
 
         guard let index = assetIndex[currentAssetID] else { return }
         let movedElsewhere = index != currentIndex
+        if movedElsewhere, hasPositioned, isViewLoaded {
+            // Pilihan dari filmstrip dapat mengganti halaman tanpa gesture pager.
+            // Pemutar lama harus dibongkar sebelum indeks aktif berubah.
+            stopAllPlayback()
+        }
         currentIndex = index
         guard isViewLoaded else { return }
 
@@ -249,6 +272,19 @@ final class PhotoPagerController: UIViewController {
             else { continue }
             cell.stopPlayback()
         }
+    }
+
+    /// Menghentikan seluruh pemutar milik pager saat layar detail ditutup.
+    ///
+    /// Sel-selnya masih dapat hidup selama animasi transisi atau karena controller
+    /// disimpan sementara oleh SwiftUI, jadi cleanup tidak boleh bergantung pada
+    /// `prepareForReuse()`.
+    func stopAllPlayback() {
+        guard isViewLoaded else { return }
+        for case let cell as PhotoPagerCell in collectionView.visibleCells {
+            cell.stopPlayback()
+        }
+        reportPlaybackState()
     }
 
     // MARK: - Kendali video
@@ -345,6 +381,12 @@ extension PhotoPagerController: UICollectionViewDelegate {
               collectionView.bounds.width > 0
         else { return }
         onScrollProgress?(Double(collectionView.contentOffset.x / collectionView.bounds.width))
+    }
+
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        // Hentikan sejak jari mulai menggeser, bukan setelah deselerasi selesai.
+        // Dengan membongkar item, kembali ke video ini selalu mulai dari awal.
+        stopAllPlayback()
     }
 
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {

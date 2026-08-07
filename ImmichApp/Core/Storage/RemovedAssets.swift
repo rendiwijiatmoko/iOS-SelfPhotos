@@ -45,6 +45,10 @@ final class RemovedAssets {
         ids.subtract(restored)
     }
 
+    func clear() {
+        ids.removeAll()
+    }
+
     /// Menyaring daftar apa pun. Pulang apa adanya kalau tidak ada yang dibuang —
     /// keadaan yang paling sering terjadi, dan tidak perlu membayar satu lintasan
     /// untuknya.

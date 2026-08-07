@@ -22,4 +22,8 @@ final class AppLaunchState {
         guard !isReady else { return }
         isReady = true
     }
+
+    func reset() {
+        isReady = false
+    }
 }

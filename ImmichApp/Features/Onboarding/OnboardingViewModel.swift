@@ -31,10 +31,13 @@ final class OnboardingViewModel {
 
     /// Alamat server terakhir yang BERHASIL dipakai.
     ///
-    /// Diisikan lagi saat layar dibuka: setelah keluar akun, mengetik ulang URL
-    /// server yang sama adalah pekerjaan yang tidak perlu — dan URL itu bukan
-    /// rahasia, tidak seperti kredensialnya.
+    /// Diisikan lagi saat percobaan login biasa dibuka ulang, tetapi ikut
+    /// dibuang saat logout penuh bersama data akun lainnya.
     private static let lastServerKey = "onboarding.lastServer"
+
+    static func clearStoredServer() {
+        UserDefaults.standard.removeObject(forKey: lastServerKey)
+    }
 
     var canSubmit: Bool {
         guard !serverText.trimmingCharacters(in: .whitespaces).isEmpty else { return false }

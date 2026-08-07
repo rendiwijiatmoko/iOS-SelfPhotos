@@ -111,6 +111,9 @@ final class BackupService {
     /// milik A akan mematikannya di tengah pengantrean B — membuka kembali
     /// persis lubang yang penanda ini dipasang untuk menutupnya.
     private var enqueueDepth = 0
+    /// Hasil transfer lama dapat tiba sesudah logout. Jangan tulis hasil itu ke
+    /// database yang sudah menjadi milik sesi berikutnya.
+    private var acceptsUploadResults = true
 
     private init() {
         isEnabled = UserDefaults.standard.bool(forKey: Self.enabledKey)
@@ -149,6 +152,7 @@ final class BackupService {
         let api = APIClient(session: session)
         repo = BackupRepository(api: api)
         albumRepo = AlbumRepository(api: api)
+        acceptsUploadResults = true
     }
 
     /// Mencari pekerjaan baru, lalu menyerahkannya.
@@ -299,6 +303,29 @@ final class BackupService {
         BackupNotifier.shared.clearProgress()
     }
 
+    /// Menghentikan backup dan membuang semua state yang terikat akun.
+    func resetForLogout() {
+        acceptsUploadResults = false
+        stop()
+        repo = nil
+        albumRepo = nil
+        albumIDsByName.removeAll()
+        total = 0
+        backedUp = 0
+        uploadedThisRun = 0
+        pendingThisRun = 0
+        failures = []
+        lastError = nil
+        lastRunAt = nil
+
+        // Setelan backup termasuk state akun: akun baru tidak boleh langsung
+        // mengunggah album yang dipilih oleh akun sebelumnya.
+        isEnabled = false
+        cellularPhotos = false
+        cellularVideos = false
+        syncAlbums = false
+    }
+
     /// Menunggu putaran yang sedang berjalan sampai habis.
     ///
     /// Dipakai tugas latar, yang WAJIB memanggil `setTaskCompleted` — dan tidak
@@ -421,6 +448,10 @@ final class BackupService {
     func finishUpload(
         localIdentifier: String, checksum: String, outcome: Result<String, Error>
     ) {
+        guard acceptsUploadResults else {
+            pendingPhotos[localIdentifier] = nil
+            return
+        }
         switch outcome {
         case .success(let assetID):
             try? dataManager.insertBackupRecord(BackupRecord(

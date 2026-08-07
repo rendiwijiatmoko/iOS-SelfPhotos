@@ -73,6 +73,16 @@ final class UnreadableAssets {
         lastSuccessAt = Date()
     }
 
+    /// Mengosongkan kotak surat dan melepas callback milik linimasa akun lama.
+    func clear() {
+        flushTask?.cancel()
+        flushTask = nil
+        pending.removeAll()
+        purged.removeAll()
+        lastSuccessAt = nil
+        onPurge = nil
+    }
+
     private func flush() {
         guard !pending.isEmpty else { return }
 

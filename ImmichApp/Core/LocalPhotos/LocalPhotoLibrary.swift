@@ -1,3 +1,4 @@
+import AVFoundation
 import Observation
 import Photos
 import UIKit
@@ -348,6 +349,32 @@ final class LocalPhotoLibrary {
         }
     }
 
+    /// Aset video yang masih tersedia di perangkat, tanpa membaca seluruh
+    /// berkas ke memori dan tanpa menunggu unduhan dari iCloud.
+    ///
+    /// `AVPlayer` dapat membaca `AVAsset` dari PhotoKit secara langsung. Jalur
+    /// lokal ini membuat video yang baru saja diunggah mulai seketika; kalau
+    /// salinan penuhnya tidak ada di perangkat, pemanggil segera beralih ke
+    /// streaming server alih-alih menggantung menunggu iCloud.
+    func videoAsset(for id: String) async -> AVAsset? {
+        guard let asset = Self.fetchAsset(id), asset.mediaType == .video else {
+            return nil
+        }
+
+        let options = PHVideoRequestOptions()
+        options.deliveryMode = .automatic
+        options.isNetworkAccessAllowed = false
+
+        return await withCheckedContinuation { continuation in
+            imageManager.requestAVAsset(
+                forVideo: asset,
+                options: options
+            ) { videoAsset, _, _ in
+                continuation.resume(returning: videoAsset)
+            }
+        }
+    }
+
     func startCaching(_ ids: [String], size: CGSize) {
         let assets = ids.compactMap(Self.fetchAsset)
         guard !assets.isEmpty else { return }
@@ -356,6 +383,14 @@ final class LocalPhotoLibrary {
             targetSize: size,
             contentMode: .aspectFill,
             options: thumbnailOptions)
+    }
+
+    /// Melupakan seluruh state PhotoKit milik sesi tanpa menghapus foto asli.
+    func resetForLogout() {
+        imageManager.stopCachingImagesForAllAssets()
+        photos = []
+        albumTitles = [:]
+        selectedAlbumIDs = []
     }
 
     // MARK: - Berkas asli
