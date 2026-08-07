@@ -17,6 +17,11 @@ struct PhotoPagerView: UIViewControllerRepresentable {
     /// Foto yang sedang tampil. Dua arah: pager melapor saat diusap, dan ikut
     /// berpindah kalau dipilih dari strip thumbnail.
     let currentAssetID: String
+    /// Nilai dari detail lengkap bila sudah tersedia. Daftar timeline lama bisa
+    /// belum membawa pasangan Live Photo, jadi halaman aktif ditambal langsung.
+    var livePhotoVideoID: String? = nil
+    /// Fallback untuk aset server lama yang belum menyimpan relasi Live Photo.
+    var localLivePhotoHint: LocalLivePhotoMatchHint? = nil
     var layout = PhotoPagerLayout()
     /// false saat panel info terbuka atau sedang menyunting deskripsi.
     var isPagingEnabled = true
@@ -41,6 +46,10 @@ struct PhotoPagerView: UIViewControllerRepresentable {
         let controller = PhotoPagerController(loader: PhotoPreviewLoader(session: session))
         bind(controller)
         controller.apply(assets: assets, currentAssetID: currentAssetID)
+        controller.applyLivePhotoContext(
+            videoID: livePhotoVideoID,
+            localHint: localLivePhotoHint,
+            for: currentAssetID)
         controller.apply(layout: layout, isPagingEnabled: isPagingEnabled)
         if let onControllerReady {
             // Di luar siklus pembaruan: menulis `@State` selagi SwiftUI sedang
@@ -53,6 +62,10 @@ struct PhotoPagerView: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: PhotoPagerController, context: Context) {
         bind(controller)
         controller.apply(assets: assets, currentAssetID: currentAssetID)
+        controller.applyLivePhotoContext(
+            videoID: livePhotoVideoID,
+            localHint: localLivePhotoHint,
+            for: currentAssetID)
         controller.apply(layout: layout, isPagingEnabled: isPagingEnabled)
     }
 
@@ -83,6 +96,11 @@ final class PhotoPagerController: UIViewController {
     private var assetIndex: [String: Int] = [:]
     private var currentIndex = 0
     private var layoutRules = PhotoPagerLayout()
+    /// Izin dari layar induk (panel info/edit/keadaan SwiftUI). Status zoom
+    /// digabungkan terpisah supaya pager dapat dikunci langsung di UIKit tanpa
+    /// menunggu satu siklus render SwiftUI.
+    private var requestedPagingEnabled = true
+    private var isCurrentPageZoomed = false
 
     /// Penjaga supaya lompatan ke halaman awal hanya sekali, dan hanya setelah
     /// ukurannya nyata.
@@ -115,8 +133,14 @@ final class PhotoPagerController: UIViewController {
         flow.minimumInteritemSpacing = 0
         flow.sectionInset = .zero
 
-        collectionView = HorizontalPagingCollectionView(
+        let pagingView = HorizontalPagingCollectionView(
             frame: view.bounds, collectionViewLayout: flow)
+        pagingView.shouldAllowPagingGesture = { [weak self] in
+            // Pager hanya kalah bila foto benar-benar punya ruang pan mendatar.
+            // Portrait yang masih lebih sempit dari layar tetap dapat di-swipe.
+            self?.currentCell?.blocksPagingForZoom != true
+        }
+        collectionView = pagingView
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         collectionView.backgroundColor = .clear
         collectionView.isPagingEnabled = true
@@ -133,6 +157,7 @@ final class PhotoPagerController: UIViewController {
         collectionView.delegate = self
         collectionView.prefetchDataSource = self
         view.addSubview(collectionView)
+        updatePagingAvailability()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -207,12 +232,54 @@ final class PhotoPagerController: UIViewController {
 
     func apply(layout newLayout: PhotoPagerLayout, isPagingEnabled: Bool) {
         layoutRules = newLayout
+        requestedPagingEnabled = isPagingEnabled
         guard isViewLoaded else { return }
 
-        collectionView.isScrollEnabled = isPagingEnabled
+        updatePagingAvailability()
         for case let cell as PhotoPagerCell in collectionView.visibleCells {
             cell.apply(newLayout)
         }
+    }
+
+    private func updatePagingAvailability() {
+        guard isViewLoaded else { return }
+        collectionView.isScrollEnabled = requestedPagingEnabled && !isCurrentPageZoomed
+    }
+
+    private func handleZoomChanged(
+        _ zoomed: Bool,
+        blocksPaging: Bool,
+        from index: Int
+    ) {
+        // Sel tetangga ikut hidup dan bisa menyelesaikan animasi zoom lama;
+        // hanya halaman aktif yang boleh mengunci atau membuka pager.
+        guard index == currentIndex else { return }
+        isCurrentPageZoomed = blocksPaging
+        // Kunci UIKit lebih dulu, baru teruskan ke SwiftUI untuk toolbar/status.
+        updatePagingAvailability()
+        onZoomChanged?(zoomed)
+    }
+
+    /// Memperbarui hanya metadata Live Photo halaman terkait. Ini sengaja tidak
+    /// memakai `reloadData()`: detail server tiba sesudah layar tampil dan
+    /// reload seluruh pager akan memutus gesture atau menggeser offset.
+    func applyLivePhotoContext(
+        videoID: String?,
+        localHint: LocalLivePhotoMatchHint?,
+        for assetID: String
+    ) {
+        guard let index = assetIndex[assetID], assets.indices.contains(index)
+        else { return }
+
+        if assets[index].livePhotoVideoID != videoID {
+            assets[index].livePhotoVideoID = videoID
+        }
+        let path = IndexPath(item: index, section: 0)
+        (collectionView?.cellForItem(at: path) as? PhotoPagerCell)?
+            .updateLivePhotoContext(
+                videoID: videoID,
+                localHint: localHint,
+                loader: loader)
     }
 
     /// Pembanding murah: jumlah plus kedua ujungnya.
@@ -254,7 +321,14 @@ final class PhotoPagerController: UIViewController {
         let page = Int(round(collectionView.contentOffset.x / collectionView.bounds.width))
         guard assets.indices.contains(page), page != currentIndex else { return }
 
+        let previousCell = currentCell
         currentIndex = page
+        // Kasus portrait sempit boleh berpindah walau scale > 1. Halaman lama
+        // harus kembali ke 1x dan state chrome halaman baru harus normal.
+        previousCell?.resetZoom()
+        isCurrentPageZoomed = false
+        updatePagingAvailability()
+        onZoomChanged?(false)
         stopPlaybackOnOtherPages()
         reportPlaybackState()
         onPageChanged?(assets[page])
@@ -298,6 +372,16 @@ final class PhotoPagerController: UIViewController {
     func togglePlayback() { currentCell?.togglePlayPause() }
     func toggleMute() { currentCell?.toggleMute() }
     func seek(toFraction fraction: Double) { currentCell?.seek(toFraction: fraction) }
+
+    /// Meminta ulang preview halaman aktif setelah server menyelesaikan edit.
+    func reloadCurrentImage() async {
+        guard assets.indices.contains(currentIndex) else { return }
+        let asset = assets[currentIndex]
+        await loader.invalidate(asset.id)
+        guard assets.indices.contains(currentIndex), assets[currentIndex].id == asset.id else { return }
+        currentCell?.configure(with: asset, loader: loader)
+        currentCell?.apply(layoutRules)
+    }
 
     /// Mengabarkan keadaan sekarang — dipakai bar kontrol saat baru menyambung
     /// atau setelah halaman berpindah.
@@ -352,7 +436,12 @@ extension PhotoPagerController: UICollectionViewDataSource {
 
         pageCell.configure(with: assets[indexPath.item], loader: loader)
         pageCell.apply(layoutRules)
-        pageCell.onZoomChanged = { [weak self] in self?.onZoomChanged?($0) }
+        pageCell.onZoomChanged = { [weak self] zoomed, blocksPaging in
+            self?.handleZoomChanged(
+                zoomed,
+                blocksPaging: blocksPaging,
+                from: indexPath.item)
+        }
         pageCell.onTap = { [weak self] in self?.onTap?() }
         // Hanya halaman yang sedang dilihat yang boleh melapor; sel tetangga
         // ikut hidup dan laporannya akan menimpa keadaan yang benar.
@@ -431,8 +520,11 @@ extension PhotoPagerController: UICollectionViewDataSourcePrefetching {
 /// berpindah foto di tengah gerakan. Menolak gestur yang lebih tegak daripada
 /// mendatar sejak awal membuat ketiganya tidak pernah berebut.
 private final class HorizontalPagingCollectionView: UICollectionView {
+    var shouldAllowPagingGesture: (() -> Bool)?
+
     override func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
         if recognizer === panGestureRecognizer {
+            guard shouldAllowPagingGesture?() ?? true else { return false }
             let velocity = panGestureRecognizer.velocity(in: self)
             if abs(velocity.y) > abs(velocity.x) { return false }
         }

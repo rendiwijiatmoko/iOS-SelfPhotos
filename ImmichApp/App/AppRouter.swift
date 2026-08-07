@@ -52,6 +52,7 @@ struct MainTabView: View {
     @Environment(SessionManager.self) private var session
     @State private var syncVM: SyncViewModel?
     @State private var selectedTab: TabID
+    @State private var backupNotifier = BackupNotifier.shared
     /// Naik satu setiap tab Photos ditekan ulang saat sudah aktif.
     @State private var photosResetRequest = 0
     /// Layar detail meminta pita offline menyingkir selama ia tampil.
@@ -128,14 +129,15 @@ struct MainTabView: View {
                 // TabView menyebar ke setiap tab dan memunculkan kolom cari di
                 // bar atas Photos dan Library juga.
                 Tab(value: TabID.search, role: .search) {
-                    SearchView()
+                    SearchView(isActive: selectedTab == .search)
                 }
             }
             // Pemberitahuan pencadangan mengantar ke layar Backup, dan layar itu
             // ada DI DALAM tab Library. Yang dikerjakan di sini cuma separuh
             // pertamanya: pindah tab. `LibraryView` yang mendorong layarnya.
-            .onChange(of: BackupNotifier.shared.openBackupRequests) { _, _ in
-                selectedTab = .library
+            .onChange(of: backupNotifier.shouldSelectLibrary) { _, requested in
+                guard requested else { return }
+                openBackupTab()
             }
         }
         // Sync disuntikkan ke environment karena linimasa merender DARI hasil
@@ -143,6 +145,7 @@ struct MainTabView: View {
         // Photos tidak punya cara tahu kapan datanya sudah ada.
         .environment(syncVM)
         .task {
+            if backupNotifier.shouldSelectLibrary { openBackupTab() }
             // Splash hanya menutupi pembacaan linimasa. Kalau yang terbuka bukan
             // tab Photos, layar itu tidak pernah dibangun dan tidak ada yang
             // perlu ditunggu — tanpa baris ini splash-nya menggantung sampai
@@ -157,5 +160,10 @@ struct MainTabView: View {
             }
             await syncVM?.performBackgroundSync()
         }
+    }
+
+    private func openBackupTab() {
+        selectedTab = .library
+        backupNotifier.didSelectLibrary()
     }
 }

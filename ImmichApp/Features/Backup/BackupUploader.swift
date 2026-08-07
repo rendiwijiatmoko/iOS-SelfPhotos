@@ -47,10 +47,9 @@ final class BackupUploader: NSObject {
         // hasilnya. Tanpa ini transfernya tetap jalan, tapi catatannya baru
         // tertulis saat pengguna kebetulan membuka aplikasinya lagi.
         config.sessionSendsLaunchEvents = true
-        // `false`: pengguna sudah menyalakan pencadangan, dan menunda sampai
-        // sistem menganggap waktunya "ideal" bisa berarti berjam-jam tanpa
-        // penjelasan. Syarat jaringan ditegakkan sendiri per foto — lihat
-        // `BackupService.allowsNetwork(for:)`.
+        // Saat task dibuat oleh BGTask, iOS memperlakukannya sebagai
+        // discretionary dan dapat menunggu Wi‑Fi/daya. Saat dibuat di foreground
+        // nilainya false menjaga tombol backup tetap responsif.
         config.isDiscretionary = false
         config.allowsCellularAccess = true
         // Percobaan ulang diserahkan ke sistem: ia tahu kapan jaringannya
@@ -77,6 +76,10 @@ final class BackupUploader: NSObject {
         // Ditegakkan PER PERMINTAAN, bukan per sesi: satu sesi latar melayani
         // foto dan video sekaligus, sedangkan aturannya berbeda untuk keduanya.
         request.allowsCellularAccess = allowsCellular
+        request.allowsExpensiveNetworkAccess = allowsCellular
+        // Low Data Mode selalu dihormati; pengguna hanya memilih seluler biasa,
+        // bukan memberi izin mengabaikan pembatasan data sistem.
+        request.allowsConstrainedNetworkAccess = false
 
         let task = session.uploadTask(with: request, fromFile: prepared.bodyFile)
         task.taskDescription = [localIdentifier, checksum, prepared.bodyFile.path]
@@ -91,6 +94,20 @@ final class BackupUploader: NSObject {
     /// ini, lengkap dengan `taskDescription`-nya.
     func reconnect() {
         _ = session
+    }
+
+    /// ID PhotoKit yang sudah berada di tangan `nsurlsessiond`.
+    ///
+    /// Daftar ini bertahan saat proses aplikasi mati. Tanpanya cold launch
+    /// background mengantre file yang sama lagi karena `pendingPhotos` hanya RAM.
+    func activeLocalIdentifiers() async -> Set<String> {
+        let tasks = await session.allTasks
+        return Set(tasks.compactMap(Self.localIdentifier(from:)))
+    }
+
+    private static func localIdentifier(from task: URLSessionTask) -> String? {
+        let parts = (task.taskDescription ?? "").components(separatedBy: "\u{1}")
+        return parts.count >= 3 ? parts[0] : nil
     }
 
     /// Membatalkan transfer yang sudah diserahkan ke `nsurlsessiond`.
@@ -137,9 +154,15 @@ extension BackupUploader: URLSessionDataDelegate {
             outcome = Result { try BackupRepository.assetID(from: body, response: task.response) }
         }
 
+        let completedTaskID = task.taskIdentifier
         Task { @MainActor in
+            let activeTasks = await self.session.allTasks
+            let remaining = activeTasks.filter { $0.taskIdentifier != completedTaskID }.count
             BackupService.shared.finishUpload(
-                localIdentifier: localID, checksum: checksum, outcome: outcome)
+                localIdentifier: localID,
+                checksum: checksum,
+                outcome: outcome,
+                remainingBackgroundTasks: remaining)
         }
     }
 

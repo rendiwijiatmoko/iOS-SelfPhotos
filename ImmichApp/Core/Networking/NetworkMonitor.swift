@@ -31,6 +31,8 @@ final class NetworkMonitor {
     private(set) var isExpensive = false
 
     private let monitor = NWPathMonitor()
+    private var hasReceivedPath = false
+    private var readinessWaiters: [CheckedContinuation<Void, Never>] = []
 
     private init() {
         // `[weak self]` ada di Task DALAM, bukan di handler luar.
@@ -46,8 +48,22 @@ final class NetworkMonitor {
                 guard let self else { return }
                 if self.isOnline != online { self.isOnline = online }
                 if self.isExpensive != expensive { self.isExpensive = expensive }
+                if !self.hasReceivedPath {
+                    self.hasReceivedPath = true
+                    let waiters = self.readinessWaiters
+                    self.readinessWaiters.removeAll()
+                    waiters.forEach { $0.resume() }
+                }
             }
         }
         monitor.start(queue: DispatchQueue(label: "network-monitor"))
+    }
+
+    /// Menunggu snapshot jaringan pertama. Pada cold launch background, nilai
+    /// bawaan belum tahu apakah koneksinya Wi‑Fi atau seluler; memakai tebakan
+    /// itu dapat menarik video iCloud lewat seluler sebelum monitor menjawab.
+    func waitUntilReady() async {
+        guard !hasReceivedPath else { return }
+        await withCheckedContinuation { readinessWaiters.append($0) }
     }
 }

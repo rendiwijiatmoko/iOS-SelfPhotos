@@ -9,6 +9,8 @@ struct PhotoPlaybackState: Equatable {
     /// Detik yang sudah berjalan.
     var time: Double = 0
     var duration: Double = 0
+    /// Bagian file yang sudah tersedia untuk diputar, 0…1.
+    var bufferedFraction: Float = 0
 
     var fraction: Float {
         guard duration > 0 else { return 0 }
@@ -51,6 +53,7 @@ final class PhotoVideoControlsBar: UIView {
     private let playButton = UIButton(type: .system)
     private let muteButton = UIButton(type: .system)
     private let slider = UISlider()
+    private let bufferProgress = UIProgressView(progressViewStyle: .default)
 
     private weak var pager: PhotoPagerController?
     private var state = PhotoPlaybackState()
@@ -73,13 +76,33 @@ final class PhotoVideoControlsBar: UIView {
 
         slider.minimumValue = 0
         slider.maximumValue = 1
+        // Track kosong transparan supaya progres unduhan di belakang slider
+        // tetap terlihat. Bagian yang sudah ditonton digambar oleh minimumTrack.
+        slider.maximumTrackTintColor = .clear
         slider.addTarget(self, action: #selector(scrubbingBegan), for: .touchDown)
         slider.addTarget(self, action: #selector(scrubbed), for: .valueChanged)
         slider.addTarget(
             self, action: #selector(scrubbingEnded),
             for: [.touchUpInside, .touchUpOutside, .touchCancel])
 
-        let stack = UIStackView(arrangedSubviews: [playButton, slider, muteButton])
+        bufferProgress.trackTintColor = UIColor.secondaryLabel.withAlphaComponent(0.22)
+        bufferProgress.translatesAutoresizingMaskIntoConstraints = false
+
+        let timeline = UIView()
+        timeline.addSubview(bufferProgress)
+        slider.translatesAutoresizingMaskIntoConstraints = false
+        timeline.addSubview(slider)
+        NSLayoutConstraint.activate([
+            bufferProgress.leadingAnchor.constraint(equalTo: timeline.leadingAnchor),
+            bufferProgress.trailingAnchor.constraint(equalTo: timeline.trailingAnchor),
+            bufferProgress.centerYAnchor.constraint(equalTo: timeline.centerYAnchor),
+            slider.leadingAnchor.constraint(equalTo: timeline.leadingAnchor),
+            slider.trailingAnchor.constraint(equalTo: timeline.trailingAnchor),
+            slider.topAnchor.constraint(equalTo: timeline.topAnchor),
+            slider.bottomAnchor.constraint(equalTo: timeline.bottomAnchor),
+        ])
+
+        let stack = UIStackView(arrangedSubviews: [playButton, timeline, muteButton])
         stack.axis = .horizontal
         stack.alignment = .center
         stack.spacing = 14
@@ -110,6 +133,7 @@ final class PhotoVideoControlsBar: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         background.layer.cornerRadius = bounds.height / 2
+        bufferProgress.progressTintColor = tintColor
     }
 
     func attach(to pager: PhotoPagerController) {
@@ -156,6 +180,7 @@ extension PhotoVideoControlsBar: PhotoPlaybackObserver {
         muteButton.setImage(UIImage(systemName: muteSymbol), for: .normal)
 
         slider.isEnabled = state.duration > 0
+        bufferProgress.setProgress(state.bufferedFraction, animated: false)
         guard !isScrubbing else { return }
         slider.setValue(state.fraction, animated: false)
     }

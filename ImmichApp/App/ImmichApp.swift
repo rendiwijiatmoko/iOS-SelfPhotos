@@ -11,6 +11,18 @@ import UIKit
 final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(
         _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        // Delegate notifikasi harus terpasang sebelum launch selesai agar tap
+        // notifikasi cold-start tidak hilang sebelum SwiftUI sempat dibangun.
+        let notifier = BackupNotifier.shared
+        BackupUploader.shared.reconnect()
+        Task { await notifier.ensureAuthorization(prompt: false) }
+        return true
+    }
+
+    func application(
+        _ application: UIApplication,
         handleEventsForBackgroundURLSession identifier: String,
         completionHandler: @escaping () -> Void
     ) {
@@ -60,6 +72,7 @@ struct ImmichApp: App {
                         // dan tanpa ini hasilnya tidak pernah terbaca.
                         BackupUploader.shared.reconnect()
                         guard BackupService.shared.isEnabled else { return }
+                        BackupScheduler.schedule()
                         Task {
                             await BackupService.shared.prepare()
                             BackupService.shared.start()

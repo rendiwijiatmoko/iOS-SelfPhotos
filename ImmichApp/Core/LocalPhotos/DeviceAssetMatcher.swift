@@ -2,6 +2,20 @@ import CryptoKit
 import Foundation
 import Observation
 
+enum DeviceAssetSyncError: LocalizedError {
+    case offline
+    case meteredNetwork
+
+    var errorDescription: String? {
+        switch self {
+        case .offline:
+            "Connect to the server before running this job."
+        case .meteredNetwork:
+            "Connect to Wi-Fi before reading and hashing your photo library."
+        }
+    }
+}
+
 /// Mencocokkan foto perangkat dengan aset yang sudah ada di server.
 ///
 /// **Kenapa checksum, bukan catatan unggahan.** Catatan hanya tahu apa yang
@@ -124,6 +138,82 @@ final class DeviceAssetMatcher {
         task?.cancel()
         task = nil
         isMatching = false
+    }
+
+    /// Menjalankan pencocokan sebagai job yang bisa DITUNGGU halaman status.
+    ///
+    /// Jalur otomatis di atas tetap fire-and-forget agar linimasa tidak perlu
+    /// menunggu. Ketika pengguna menekan sebuah job, hasil akhirnya harus dapat
+    /// ditampilkan sebagai berhasil atau gagal, jadi versi ini baru kembali
+    /// setelah semua batch selesai.
+    func matchNow(_ photos: [LocalPhoto]) async throws -> Int {
+        await NetworkMonitor.shared.waitUntilReady()
+        guard NetworkMonitor.shared.isOnline else { throw DeviceAssetSyncError.offline }
+        guard !NetworkMonitor.shared.isExpensive else {
+            throw DeviceAssetSyncError.meteredNetwork
+        }
+
+        let known = dataManager.uploadedLocalIdentifiers()
+        let pending = photos.filter { !known.contains($0.id) }
+        guard !pending.isEmpty else { return 0 }
+
+        var cached = dataManager.storedChecksums()
+        var linked = 0
+
+        for group in stride(from: 0, to: pending.count, by: Self.batchSize) {
+            try Task.checkCancellation()
+            let slice = Array(pending[group..<min(group + Self.batchSize, pending.count)])
+            let missing = slice.filter { cached[$0.id] == nil }.map(\.id)
+
+            if !missing.isEmpty {
+                let computed = await Self.computeChecksums(missing)
+                try dataManager.storeChecksums(computed)
+                for entry in computed { cached[entry.localIdentifier] = entry.checksum }
+            }
+
+            let candidates = slice.compactMap { photo -> (id: String, checksum: String)? in
+                guard let checksum = cached[photo.id] else { return nil }
+                return (photo.id, checksum)
+            }
+            guard !candidates.isEmpty else { continue }
+
+            let matches = try await repo.duplicateMatches(candidates)
+            for match in matches {
+                try dataManager.linkDeviceAsset(
+                    localIdentifier: match.localID,
+                    to: match.serverAssetID)
+            }
+            linked += matches.count
+            await Task.yield()
+        }
+
+        return linked
+    }
+
+    /// Menghitung checksum yang belum ada tanpa melakukan permintaan pencocokan
+    /// ke server. Dipisahkan dari `matchNow` karena Immich menampilkannya sebagai
+    /// job diagnostik tersendiri.
+    func hashNow(_ photos: [LocalPhoto]) async throws -> Int {
+        await NetworkMonitor.shared.waitUntilReady()
+        guard !NetworkMonitor.shared.isExpensive else {
+            throw DeviceAssetSyncError.meteredNetwork
+        }
+
+        var cached = dataManager.storedChecksums()
+        let pending = photos.filter { cached[$0.id] == nil }
+        guard !pending.isEmpty else { return 0 }
+
+        var hashed = 0
+        for group in stride(from: 0, to: pending.count, by: Self.batchSize) {
+            try Task.checkCancellation()
+            let slice = pending[group..<min(group + Self.batchSize, pending.count)]
+            let computed = await Self.computeChecksums(slice.map(\.id))
+            try dataManager.storeChecksums(computed)
+            for entry in computed { cached[entry.localIdentifier] = entry.checksum }
+            hashed += computed.count
+            await Task.yield()
+        }
+        return hashed
     }
 
     /// Membaca byte lalu menghitung SHA1, satu per satu.

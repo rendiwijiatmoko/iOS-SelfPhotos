@@ -23,8 +23,16 @@ final class SyncViewModel {
         self.dataManager = dataManager
     }
 
-    func performFullSync() async {
-        guard isOnline else { return }
+    @discardableResult
+    func performFullSync() async -> Bool {
+        guard !isSyncing else {
+            syncProgress = "A sync job is already running"
+            return false
+        }
+        guard isOnline else {
+            syncProgress = "No network connection"
+            return false
+        }
         isSyncing = true
         syncProgress = "Syncing..."
         defer { isSyncing = false }
@@ -33,13 +41,23 @@ final class SyncViewModel {
             try await repo.fullSync()
             lastSyncTime = Date()
             syncProgress = "Sync complete"
+            return true
         } catch {
             syncProgress = "Sync failed: \(error.localizedDescription)"
+            return false
         }
     }
 
-    func performDeltaSync() async {
-        guard isOnline else { return }
+    @discardableResult
+    func performDeltaSync() async -> Bool {
+        guard !isSyncing else {
+            syncProgress = "A sync job is already running"
+            return false
+        }
+        guard isOnline else {
+            syncProgress = "No network connection"
+            return false
+        }
         isSyncing = true
         syncProgress = "Syncing changes..."
         defer { isSyncing = false }
@@ -48,8 +66,10 @@ final class SyncViewModel {
             try await repo.deltaSync()
             lastSyncTime = Date()
             syncProgress = "Sync complete"
+            return true
         } catch {
             syncProgress = "Sync failed: \(error.localizedDescription)"
+            return false
         }
     }
 

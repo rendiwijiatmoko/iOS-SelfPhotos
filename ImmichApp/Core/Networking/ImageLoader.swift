@@ -59,6 +59,10 @@ final class ImageMemoryCache: @unchecked Sendable {
         cache.setObject(image, forKey: key as NSString, cost: Self.cost(of: image))
     }
 
+    func remove(for key: String) {
+        cache.removeObject(forKey: key as NSString)
+    }
+
     func removeAll() {
         cache.removeAllObjects()
     }
@@ -136,6 +140,21 @@ actor ImageCache {
     }
 
     // MARK: - Jalur utama
+
+    /// Membuang satu varian cache setelah server menghasilkan edit baru.
+    func remove(key: String, maxPixelSize: Int?) {
+        let memoryKey = Self.memoryKey(key, maxPixelSize)
+        inFlight[memoryKey]?.cancel()
+        inFlight[memoryKey] = nil
+        ImageMemoryCache.shared.remove(for: memoryKey)
+
+        let diskPath = diskCacheURL.appendingPathComponent(hashKey(key))
+        let size = (try? diskPath.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        try? FileManager.default.removeItem(at: diskPath)
+        if let usage = runningDiskUsage {
+            runningDiskUsage = max(0, usage - size)
+        }
+    }
 
     /// Mengembalikan gambar siap gambar untuk `key`, mengunduh hanya bila perlu.
     ///

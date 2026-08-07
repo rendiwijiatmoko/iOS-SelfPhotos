@@ -33,6 +33,11 @@ enum BackupScheduler {
     static let refreshIdentifier = "app.immich.backup.refresh"
     static let processingIdentifier = "app.immich.backup.processing"
 
+    /// Refresh dan processing dapat diberikan iOS pada waktu yang berdekatan.
+    /// Satu scan saja yang boleh hidup; duanya membaca pustaka dan antrean yang
+    /// sama, sehingga menjalankan keduanya tidak menambah pekerjaan berguna.
+    @MainActor private static var isRunning = false
+
     /// HARUS dipanggil sebelum aplikasi selesai diluncurkan.
     ///
     /// `BGTaskScheduler` menuntut setiap pengenal terdaftar sejak awal; mendaftar
@@ -70,7 +75,9 @@ enum BackupScheduler {
         processing.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
 
         let refresh = BGAppRefreshTaskRequest(identifier: refreshIdentifier)
-        refresh.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+        // Sama dengan Immich iOS: refresh diberi kesempatan lebih awal, tetapi
+        // tanggal ini hanya batas TERAWAL—iOS tetap memilih waktu sebenarnya.
+        refresh.earliestBeginDate = Date(timeIntervalSinceNow: 5 * 60)
 
         // Gagal menjadwalkan bukan kondisi luar biasa: simulator tidak
         // mendukungnya sama sekali, dan sistem menolak kalau Background App
@@ -80,8 +87,21 @@ enum BackupScheduler {
         try? BGTaskScheduler.shared.submit(refresh)
     }
 
+    @MainActor
+    static func cancel() {
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: refreshIdentifier)
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: processingIdentifier)
+    }
+
     private static func handle(_ task: BGTask) {
         let work = Task { @MainActor in
+            guard !isRunning else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            isRunning = true
+            defer { isRunning = false }
+
             // Giliran berikutnya diajukan DULU, sebelum kerja apa pun. Kalau
             // sistem menghentikan tugas ini di tengah jalan, rantainya sudah
             // tersambung.

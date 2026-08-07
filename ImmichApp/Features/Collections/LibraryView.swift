@@ -11,6 +11,7 @@ struct LibraryView: View {
     @State private var expanded: Set<Row>
     @State private var showSettings = false
     @State private var showBackup = false
+    @State private var backupNotifier = BackupNotifier.shared
     @State private var editTarget: AlbumResponseDTO?
     @State private var addUserTarget: AlbumResponseDTO?
     @State private var deleteTarget: AlbumResponseDTO?
@@ -77,12 +78,21 @@ struct LibraryView: View {
                 .sheet(isPresented: $showSettings) { settingsSheet }
                 .navigationDestination(isPresented: $showBackup) { BackupView() }
                 // Separuh kedua dari pengantaran itu — lihat `MainTabView`.
-                .onChange(of: BackupNotifier.shared.openBackupRequests) { _, _ in
-                    showBackup = true
+                .onChange(of: backupNotifier.shouldOpenBackup) { _, requested in
+                    guard requested else { return }
+                    openBackupScreen()
                 }
                 .fullScreenCover(isPresented: openedStoryBinding) { memoryStoryCover }
-                .task { await start() }
+                .task {
+                    if backupNotifier.shouldOpenBackup { openBackupScreen() }
+                    await start()
+                }
         }
+    }
+
+    private func openBackupScreen() {
+        showBackup = true
+        backupNotifier.didOpenBackup()
     }
 
     /// Sheet & dialog dipisah jadi dua lapis properti, bukan satu rantai
@@ -341,9 +351,7 @@ struct LibraryView: View {
     }
 
     private var settingsSheet: some View {
-        NavigationStack {
-            SettingsView(session: session)
-        }
+        SettingsSheetView(session: session)
         .navigationTransition(.zoom(sourceID: "profile", in: namespace))
     }
 
@@ -407,11 +415,24 @@ struct LibraryView: View {
         ) {
             ForEach(albums) { album in
                 NavigationLink {
-                    AlbumDetailView(album: album)
+                    AlbumDetailView(
+                        album: album,
+                        onContentsChanged: { assets in
+                            guard vm?.applyAlbumContents(assets, to: album.id) == true
+                            else { return }
+                            Task {
+                                await vm?.refreshAlbums(
+                                    invalidatingCoverFor: album.id)
+                            }
+                        })
                         .navigationTransition(
                             .zoom(sourceID: album.id, in: albumNamespace))
                 } label: {
                     AlbumCard(album: album)
+                        // AlbumResponseDTO memakai id sebagai identitas. Revision
+                        // visual ini memaksa count dan AuthImage cover dibangun
+                        // ulang ketika isi berubah tanpa mengganti id navigasi.
+                        .id("\(album.id)|\(album.assetCount)|\(album.albumThumbnailAssetId ?? "")")
                         .matchedTransitionSource(id: album.id, in: albumNamespace)
                 }
                 .buttonStyle(.plain)

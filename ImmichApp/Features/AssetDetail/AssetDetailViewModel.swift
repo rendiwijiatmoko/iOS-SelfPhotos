@@ -210,6 +210,50 @@ final class AssetDetailViewModel {
         }
     }
 
+    func downloadOriginalFile(_ id: String, filename: String) async -> URL? {
+        do {
+            return try await repo.downloadOriginalFile(id, filename: filename)
+        } catch {
+            actionError = ErrorEvent(Self.describe(error))
+            return nil
+        }
+    }
+
+    @discardableResult
+    func applyEdits(_ edits: [AssetEditCommand], to id: String) async -> Bool {
+        do {
+            if edits.isEmpty {
+                try await repo.removeEdits(from: id)
+            } else {
+                try await repo.applyEdits(edits, to: id)
+            }
+            return true
+        } catch {
+            actionError = ErrorEvent(Self.describe(error))
+            return false
+        }
+    }
+
+    func edits(for id: String) async -> [AssetEditRecord]? {
+        do {
+            return try await repo.edits(for: id)
+        } catch {
+            actionError = ErrorEvent(Self.describe(error))
+            return nil
+        }
+    }
+
+    @discardableResult
+    func setProfileImage(_ data: Data, filename: String) async -> Bool {
+        do {
+            try await repo.setProfileImage(data, filename: filename)
+            return true
+        } catch {
+            actionError = ErrorEvent(Self.describe(error))
+            return false
+        }
+    }
+
     func retry(_ id: String) async {
         await load(id)
     }

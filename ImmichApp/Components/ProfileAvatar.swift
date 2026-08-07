@@ -35,24 +35,17 @@ struct ProfileAvatar: View {
 
     @Environment(SessionManager.self) private var session
     @State private var backup = BackupService.shared
+    @State private var isRingRotating = false
     /// Alasannya sama seperti di `AuthImage`: bitmap-nya milik cache, view ini
     /// hanya perlu digambar ulang saat pemuatannya selesai. Nilainya HARUS ikut
     /// dibaca di `body` supaya ketergantungannya benar-benar terbentuk.
     @State private var revision = 0
 
     var body: some View {
-        Group {
-            if isUploading {
-                uploadingCircle
-            } else {
-                avatarCircle
-            }
-        }
-        // Pergantiannya dihaluskan, bukan berkedip. Unggahan bisa mulai dan
-        // berhenti berkali-kali dalam satu sesi, dan avatar yang berkelip tiap
-        // kali lebih mengganggu daripada memberi kabar.
-        .animation(.smooth(duration: 0.3), value: isUploading)
-        .task(id: cacheKey) { await load() }
+        avatarCircle
+            .overlay { uploadingRing }
+            .animation(.smooth(duration: 0.3), value: isUploading)
+            .task(id: cacheKey) { await load() }
     }
 
     private var avatarCircle: some View {
@@ -70,25 +63,34 @@ struct ProfileAvatar: View {
             .overlay(alignment: .bottomTrailing) { backupIndicator }
     }
 
-    /// Selagi mengunggah, avatarnya DIGANTI — bukan diberi lencana.
-    ///
-    /// Lencana kecil di sudut cukup untuk keadaan yang diam ("sudah aman",
-    /// "masih ada sisa"), tapi tidak untuk sesuatu yang sedang berlangsung.
-    /// Mengganti seluruh lingkarannya membuat perubahan itu tertangkap sudut
-    /// mata, yang memang tujuannya.
-    private var uploadingCircle: some View {
-        Circle()
-            .fill(Self.gradient)
-            .frame(width: side, height: side)
-            .overlay {
-                Image(systemName: "icloud.and.arrow.up")
-                    .font(.system(size: side * 0.45, weight: .semibold))
-                    .foregroundStyle(.white)
-                    // `.breathe`, bukan `.pulse`: yang pertama membesar-mengecil
-                    // perlahan seperti napas, yang kedua berkedip. Untuk sesuatu
-                    // yang berlangsung menit-menitan, kedipan melelahkan.
-                    .symbolEffect(.breathe, options: .repeating)
-            }
+    /// Foto profil tetap menjadi jangkar visual selama backup. Gerakan hanya
+    /// hidup di tepinya, sehingga status upload terlihat tanpa mengganti wajah
+    /// pengguna dengan ikon lain.
+    @ViewBuilder
+    private var uploadingRing: some View {
+        if isUploading {
+            Circle()
+                .trim(from: 0.06, to: 0.78)
+                .stroke(
+                    AngularGradient(
+                        colors: [
+                            Color.accentColor.opacity(0.12),
+                            Color.accentColor,
+                            Color.accentColor.opacity(0.12)
+                        ],
+                        center: .center),
+                    style: StrokeStyle(
+                        lineWidth: style == .toolbar ? 3 : 5,
+                        lineCap: .round))
+                .padding(style == .toolbar ? 1.5 : 2.5)
+                .rotationEffect(.degrees(isRingRotating ? 360 : 0))
+                .animation(
+                    .linear(duration: 1.05).repeatForever(autoreverses: false),
+                    value: isRingRotating)
+                .transition(.opacity)
+                .onAppear { isRingRotating = true }
+                .onDisappear { isRingRotating = false }
+        }
     }
 
     /// Titik kecil di sudut avatar; nil kalau tidak ada yang perlu dikabarkan.
@@ -98,7 +100,8 @@ struct ProfileAvatar: View {
     /// alasan avatarnya ada.
     @ViewBuilder
     private var backupIndicator: some View {
-        if showsBackupState, backup.isEnabled, backup.remainder > 0 {
+        if showsBackupState, !backup.isUploading,
+           backup.isEnabled, backup.remainder > 0 {
             Circle()
                 .fill(.orange)
                 .frame(width: side * 0.28, height: side * 0.28)

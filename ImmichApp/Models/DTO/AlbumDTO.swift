@@ -8,8 +8,10 @@ struct AlbumResponseDTO: Decodable, Identifiable, Hashable {
     /// var dengan alasan yang sama seperti `albumName` — hasil sunting ditambal
     /// di tempat supaya langsung terlihat di sampul.
     var description: String?
-    let assetCount: Int
-    let albumThumbnailAssetId: String?
+    /// `var` supaya layar induk dapat menambal jumlah dan cover segera setelah
+    /// isi album berubah, tanpa menunggu request daftar album selesai.
+    var assetCount: Int
+    var albumThumbnailAssetId: String?
     let shared: Bool
     let createdAt: Date
     let assets: [AssetResponseDTO]?

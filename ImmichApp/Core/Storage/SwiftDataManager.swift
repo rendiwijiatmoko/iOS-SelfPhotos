@@ -1,6 +1,15 @@
 import Foundation
+import SQLite3
 import SwiftData
 import Observation
+
+enum LocalDatabaseMaintenanceError: LocalizedError {
+    case exportFailed
+
+    var errorDescription: String? {
+        "The local sync database could not be exported."
+    }
+}
 
 @MainActor
 @Observable
@@ -9,6 +18,7 @@ final class SwiftDataManager {
 
     let modelContainer: ModelContainer
     let modelContext: ModelContext
+    private let storeURL: URL
 
     private init() {
         let schema = Schema([
@@ -16,6 +26,7 @@ final class SwiftDataManager {
             LocalAssetChecksum.self,
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+        self.storeURL = modelConfiguration.url
         self.modelContainer = try! ModelContainer(for: schema, configurations: [modelConfiguration])
         self.modelContext = ModelContext(modelContainer)
     }
@@ -260,6 +271,83 @@ final class SwiftDataManager {
     func clearAllCache() throws {
         try modelContext.delete(model: CachedAsset.self)
         try modelContext.save()
+    }
+
+    /// Snapshot SQLite yang konsisten untuk dibagikan lewat Sync Status.
+    ///
+    /// Menyalin file `.store` biasa tidak cukup karena perubahan terbaru bisa
+    /// masih berada di WAL. SQLite backup API membaca keduanya sebagai satu
+    /// snapshot tanpa menutup database yang sedang dipakai aplikasi.
+    func exportDatabase() async throws -> URL {
+        try modelContext.save()
+        let sourceURL = storeURL
+        let destinationURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "Immich-Sync-\(Int(Date.now.timeIntervalSince1970)).sqlite")
+
+        return try await Task.detached(priority: .utility) {
+            try Self.createDatabaseSnapshot(
+                from: sourceURL,
+                to: destinationURL)
+            return destinationURL
+        }.value
+    }
+
+    /// Menghapus database/index sinkronisasi yang dapat dibangun ulang.
+    ///
+    /// `BackupRecord` sengaja dipertahankan. Menghapus pasangan unggahan akan
+    /// membuat aset yang sudah aman di server dianggap belum pernah diunggah dan
+    /// berpotensi masuk antrean lagi. Foto perangkat dan server juga tidak
+    /// disentuh.
+    func resetSyncDatabase() throws {
+        try modelContext.delete(model: CachedAsset.self)
+        try modelContext.delete(model: SyncState.self)
+        try modelContext.delete(model: LocalAssetChecksum.self)
+        try modelContext.save()
+    }
+
+    private nonisolated static func createDatabaseSnapshot(
+        from sourceURL: URL,
+        to destinationURL: URL
+    ) throws {
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            try fileManager.removeItem(at: destinationURL)
+        }
+
+        var source: OpaquePointer?
+        var destination: OpaquePointer?
+
+        guard sqlite3_open_v2(
+            sourceURL.path,
+            &source,
+            SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+            nil) == SQLITE_OK
+        else {
+            if source != nil { sqlite3_close(source) }
+            throw LocalDatabaseMaintenanceError.exportFailed
+        }
+        defer { sqlite3_close(source) }
+
+        guard sqlite3_open_v2(
+            destinationURL.path,
+            &destination,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+            nil) == SQLITE_OK
+        else {
+            if destination != nil { sqlite3_close(destination) }
+            throw LocalDatabaseMaintenanceError.exportFailed
+        }
+        defer { sqlite3_close(destination) }
+
+        guard let backup = sqlite3_backup_init(destination, "main", source, "main") else {
+            throw LocalDatabaseMaintenanceError.exportFailed
+        }
+        let stepResult = sqlite3_backup_step(backup, -1)
+        let finishResult = sqlite3_backup_finish(backup)
+        guard stepResult == SQLITE_DONE, finishResult == SQLITE_OK else {
+            throw LocalDatabaseMaintenanceError.exportFailed
+        }
     }
 
     /// Menghapus seluruh data yang terikat akun dari penyimpanan lokal.

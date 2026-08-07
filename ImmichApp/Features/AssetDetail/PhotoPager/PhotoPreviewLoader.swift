@@ -1,4 +1,5 @@
 import AVFoundation
+import Photos
 import UIKit
 
 /// Satu pintu untuk gambar layar detail.
@@ -63,7 +64,12 @@ final class PhotoPreviewLoader {
         let api = session.imageAPI
         let endpoint = Endpoint(
             path: "/assets/\(assetId)/thumbnail",
-            query: [.init(name: "size", value: "preview")])
+            query: [
+                .init(name: "size", value: "preview"),
+                // Kalau aset punya crop/rotate/mirror, tampilkan hasilnya.
+                // Untuk aset tanpa edit server mengembalikan preview biasa.
+                .init(name: "edited", value: "true"),
+            ])
 
         do {
             let image = try await ImageCache.shared.image(
@@ -76,6 +82,34 @@ final class PhotoPreviewLoader {
             // Aset yang ditolak server dibuang dari linimasa — lihat
             // `UnreadableAssets`.
             UnreadableAssets.shared.report(assetId, error: error)
+            return nil
+        }
+    }
+
+    /// Sumber editor harus selalu original. Memakai preview `edited=true`
+    /// kemudian mengirim koordinatnya terhadap original membuat crop kedua
+    /// meleset setelah foto pernah diedit sekali.
+    func originalImageForEditing(_ assetId: String) async -> UIImage? {
+        if LocalPhotoLibrary.isLocal(assetId) {
+            return await LocalPhotoLibrary.shared.preview(
+                for: assetId,
+                size: CGSize(width: Self.maxPixelSize, height: Self.maxPixelSize))
+        }
+
+        let api = session.imageAPI
+        do {
+            return try await ImageCache.shared.image(
+                key: "\(assetId)-preview-original",
+                maxPixelSize: Self.maxPixelSize,
+                fetch: {
+                    try await api.rawData(.init(
+                        path: "/assets/\(assetId)/thumbnail",
+                        query: [
+                            .init(name: "size", value: "preview"),
+                            .init(name: "edited", value: "false"),
+                        ]))
+                })
+        } catch {
             return nil
         }
     }
@@ -123,6 +157,33 @@ final class PhotoPreviewLoader {
             options: ["AVURLAssetHTTPHeaderFieldsKey": source.headers])
     }
 
+    /// Identifier PhotoKit untuk aset perangkat maupun aset server yang masih
+    /// mempunyai salinan tertaut di perangkat ini.
+    private func localAssetID(for assetId: String) -> String? {
+        if LocalPhotoLibrary.isLocal(assetId) { return assetId }
+        guard let identifier = SwiftDataManager.shared.localIdentifier(
+            forServerAsset: assetId)
+        else { return nil }
+        return LocalPhotoLibrary.assetID(for: identifier)
+    }
+
+    /// Deteksi native untuk Live Photo lokal. Jalur ini melengkapi
+    /// `livePhotoVideoId` server, bukan menggantikannya: foto yang baru diambil
+    /// atau cache server lama tetap dikenali dari metadata PhotoKit.
+    func localLivePhotoAssetID(for assetId: String) -> String? {
+        guard let localID = localAssetID(for: assetId) else { return nil }
+        return LocalPhotoLibrary.shared.isLivePhoto(localID) ? localID : nil
+    }
+
+    func matchingLocalLivePhoto(for hint: LocalLivePhotoMatchHint) async -> String? {
+        await LocalPhotoLibrary.shared.matchingLivePhoto(for: hint)
+    }
+
+    func localLivePhoto(forLocalAssetID localID: String, targetSize: CGSize) async -> PHLivePhoto? {
+        return await LocalPhotoLibrary.shared.livePhoto(
+            for: localID, targetSize: targetSize)
+    }
+
     /// Menghangatkan halaman tetangga sebelum diusap ke sana.
     func prefetch(_ assetIds: [String]) {
         // Id perangkat tidak punya alamat di server; menembakkannya ke sana
@@ -138,7 +199,15 @@ final class PhotoPreviewLoader {
                 let assetId = String(key.dropLast("-preview".count))
                 return try await api.rawData(.init(
                     path: "/assets/\(assetId)/thumbnail",
-                    query: [.init(name: "size", value: "preview")]))
+                    query: [
+                        .init(name: "size", value: "preview"),
+                        .init(name: "edited", value: "true"),
+                    ]))
             })
+    }
+
+    func invalidate(_ assetId: String) async {
+        await ImageCache.shared.remove(
+            key: cacheKey(for: assetId), maxPixelSize: Self.maxPixelSize)
     }
 }

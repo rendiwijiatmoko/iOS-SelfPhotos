@@ -3,9 +3,13 @@ import SwiftUI
 /// Layar pencarian: kolom cari yang langsung siap diketik, deret penyaring di
 /// bawahnya, lalu hasilnya.
 struct SearchView: View {
+    let isActive: Bool
+
     @State private var searchText = ""
     @Environment(SessionManager.self) private var session
     @State private var vm: SearchViewModel?
+    @FocusState private var isSearchFocused: Bool
+    @State private var didRequestInitialFocus = false
 
     // MARK: Mode pilih
     @State private var isSelecting = false
@@ -100,10 +104,25 @@ struct SearchView: View {
         //                   satu kolom saja, di bar bawah, mengembang saat
         //                   tab-nya dipilih
         //
-        // Ini juga yang membuat fokusnya tidak perlu diatur sendiri — tab bar
-        // yang memutuskan kapan kolomnya aktif, jadi kembali dari hasil
-        // pencarian tidak lagi memunculkan papan ketik.
         .searchable(text: $searchText, prompt: "Search photos")
+        .searchFocused($isSearchFocused)
+        // SearchView bisa sudah dibangun ketika tab lain masih aktif. Menunggu
+        // `isActive` mencegah keyboard mencuri fokus dari Photos/Library, dan
+        // penanda sekali-jalan menjaga keyboard tidak dipaksa muncul lagi saat
+        // pengguna kembali ke Search pada sesi tab yang sama.
+        .task(id: isActive) {
+            guard isActive, !didRequestInitialFocus else {
+                if !isActive { isSearchFocused = false }
+                return
+            }
+
+            // Beri tab role `.search` waktu menyelesaikan ekspansi kolom di bar
+            // bawah sebelum meminta first responder.
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, isActive else { return }
+            didRequestInitialFocus = true
+            isSearchFocused = true
+        }
         // Bar atas TETAP ada selama mencari.
         //
         // Bawaannya iOS menyembunyikan isi toolbar begitu pencarian aktif —
@@ -478,6 +497,6 @@ private struct SelectedAssets: Identifiable {
 }
 
 #Preview {
-    SearchView()
+    SearchView(isActive: true)
         .environment(SessionManager())
 }

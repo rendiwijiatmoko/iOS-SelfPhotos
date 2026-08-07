@@ -35,6 +35,26 @@ private final class DataAccumulator: @unchecked Sendable {
     }
 }
 
+/// `PHImageManager` dapat memanggil result handler lebih dari sekali (preview
+/// terdegradasi lalu hasil final). Continuation Swift hanya boleh diselesaikan
+/// sekali, jadi seluruh jalan keluar melewati gerbang ini.
+private final class PhotoContinuationGate<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Never>?
+
+    init(_ continuation: CheckedContinuation<Value, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(returning value: Value) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: value)
+    }
+}
+
 /// Satu album di perangkat yang bisa dipilih untuk ikut ditampilkan.
 struct LocalAlbum: Identifiable, Sendable {
     let id: String
@@ -54,6 +74,36 @@ struct LocalPhoto: Identifiable, Sendable {
     let ratio: Double
 }
 
+/// Aset perangkat yang aman ditawarkan oleh halaman Free Up Space.
+///
+/// Daftar ini sengaja hanya berisi metadata yang dibutuhkan UI. `PHAsset`
+/// sendiri tidak `Sendable`, jadi objek PhotoKit tidak pernah diseberangkan dari
+/// antrean pemindaian ke main actor.
+struct LocalSpaceCandidate: Identifiable, Sendable {
+    /// `PHAsset.localIdentifier` tanpa awalan `device:`.
+    let id: String
+    let createdAt: Date
+    let isVideo: Bool
+}
+
+/// Hitungan ringan untuk halaman Sync Status.
+///
+/// Tidak membawa `PHAsset` keluar dari antrean PhotoKit dan tidak membaca byte
+/// foto, jadi aman disegarkan setiap kali halaman dibuka.
+struct LocalLibraryStatusCounts: Sendable {
+    let assets: Int
+    let albums: Int
+}
+
+/// Metadata minimum untuk menemukan kembali pasangan PhotoKit milik aset
+/// server lama yang belum mempunyai `BackupRecord`.
+struct LocalLivePhotoMatchHint: Equatable, Sendable {
+    let createdAt: Date
+    let pixelWidth: Int?
+    let pixelHeight: Int?
+    let originalFileName: String?
+}
+
 /// Jembatan ke pustaka foto perangkat.
 ///
 /// **Kenapa terpisah dari lapisan jaringan.** Foto perangkat dan foto server
@@ -67,7 +117,7 @@ struct LocalPhoto: Identifiable, Sendable {
 /// dan mode pilih tidak perlu tahu asal fotonya kecuali untuk menggambar lencana.
 @MainActor
 @Observable
-final class LocalPhotoLibrary {
+final class LocalPhotoLibrary: NSObject {
     static let shared = LocalPhotoLibrary()
 
     /// Awalan id untuk membedakan aset perangkat dari aset server.
@@ -88,6 +138,11 @@ final class LocalPhotoLibrary {
     /// album hanya bisa dibaca dari arah album ke aset — menanyakannya per foto
     /// belakangan berarti mengulang seluruh enumerasi sekali lagi.
     private(set) var albumTitles: [String: String] = [:]
+
+    /// Dipasang layanan backup. PhotoKit tidak membangunkan aplikasi yang sudah
+    /// disuspend, tetapi perubahan yang datang saat aktif atau ketika iOS
+    /// memberi waktu background dapat langsung memicu scan tanpa menunggu view.
+    @ObservationIgnored var onLibraryChange: (() -> Void)?
 
     /// Album perangkat yang ikut ditampilkan dan dicocokkan.
     ///
@@ -125,9 +180,11 @@ final class LocalPhotoLibrary {
         return options
     }()
 
-    private init() {
+    private override init() {
         let stored = UserDefaults.standard.stringArray(forKey: Self.selectionKey) ?? []
         selectedAlbumIDs = Set(stored)
+        super.init()
+        PHPhotoLibrary.shared().register(self)
     }
 
     // MARK: - Album
@@ -144,6 +201,66 @@ final class LocalPhotoLibrary {
             guard await requestAccess() else { return [] }
         }
         return await Task.detached(priority: .userInitiated) { Self.fetchAlbums() }.value
+    }
+
+    /// Jumlah seluruh foto/video dan album yang dapat diakses aplikasi.
+    ///
+    /// Berbeda dari `photos`, yang memang hanya berisi album pilihan backup.
+    /// Layar status perlu menjelaskan keadaan pustaka perangkat, bukan subset
+    /// yang kebetulan dipilih untuk tampil di linimasa.
+    func statusCounts() async -> LocalLibraryStatusCounts {
+        if !isAuthorized {
+            guard await requestAccess() else {
+                return LocalLibraryStatusCounts(assets: 0, albums: 0)
+            }
+        }
+
+        return await Task.detached(priority: .userInitiated) {
+            let options = PHFetchOptions()
+            options.predicate = NSPredicate(
+                format: "mediaType == %d OR mediaType == %d",
+                PHAssetMediaType.image.rawValue,
+                PHAssetMediaType.video.rawValue)
+            return LocalLibraryStatusCounts(
+                assets: PHAsset.fetchAssets(with: options).count,
+                albums: Self.fetchAlbums().count)
+        }.value
+    }
+
+    /// Metadata seluruh foto/video yang dapat diakses, untuk job manual
+    /// pencocokan cloud id dan hash. Tidak mengubah pilihan album backup dan
+    /// tidak menimpa `photos` yang sedang dipakai linimasa.
+    func allPhotosForSync() async -> [LocalPhoto] {
+        if !isAuthorized {
+            guard await requestAccess() else { return [] }
+        }
+        return await Task.detached(priority: .userInitiated) {
+            Self.fetchAllPhotosForSync()
+        }.value
+    }
+
+    private nonisolated static func fetchAllPhotosForSync() -> [LocalPhoto] {
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(
+            format: "mediaType == %d OR mediaType == %d",
+            PHAssetMediaType.image.rawValue,
+            PHAssetMediaType.video.rawValue)
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
+
+        let assets = PHAsset.fetchAssets(with: options)
+        var result: [LocalPhoto] = []
+        result.reserveCapacity(assets.count)
+        assets.enumerateObjects { asset, _, _ in
+            guard let createdAt = asset.creationDate ?? asset.modificationDate else { return }
+            let height = max(asset.pixelHeight, 1)
+            result.append(LocalPhoto(
+                id: asset.localIdentifier,
+                createdAt: createdAt,
+                isVideo: asset.mediaType == .video,
+                duration: asset.mediaType == .video ? asset.duration : nil,
+                ratio: Double(asset.pixelWidth) / Double(height)))
+        }
+        return result
     }
 
     private nonisolated static func fetchAlbums() -> [LocalAlbum] {
@@ -179,6 +296,86 @@ final class LocalPhotoLibrary {
         collect(PHAssetCollection.fetchAssetCollections(
             with: .album, subtype: .any, options: nil))
         return result
+    }
+
+    // MARK: - Free Up Space
+
+    /// Mencari salinan perangkat yang sudah diketahui mempunyai pasangan di
+    /// server dan lebih lama dari tanggal batas.
+    ///
+    /// Catatan `BackupRecord` adalah pagar pengamannya: aset lokal yang sekadar
+    /// mirip nama/tanggalnya tidak pernah ikut dihapus. Album, favorit, dan tipe
+    /// media yang dipilih pengguna kemudian dikeluarkan dari hasil scan.
+    func freeUpSpaceCandidates(
+        olderThan cutoff: Date,
+        keepFavorites: Bool,
+        keepAlbumIDs: Set<String>,
+        keepPhotos: Bool,
+        keepVideos: Bool
+    ) async -> [LocalSpaceCandidate] {
+        if !isAuthorized {
+            guard await requestAccess() else { return [] }
+        }
+
+        let backedUpIDs = SwiftDataManager.shared.uploadedLocalIdentifiers()
+        guard !backedUpIDs.isEmpty else { return [] }
+
+        return await Task.detached(priority: .userInitiated) {
+            Self.fetchFreeUpSpaceCandidates(
+                backedUpIDs: backedUpIDs,
+                olderThan: cutoff,
+                keepFavorites: keepFavorites,
+                keepAlbumIDs: keepAlbumIDs,
+                keepPhotos: keepPhotos,
+                keepVideos: keepVideos)
+        }.value
+    }
+
+    private nonisolated static func fetchFreeUpSpaceCandidates(
+        backedUpIDs: Set<String>,
+        olderThan cutoff: Date,
+        keepFavorites: Bool,
+        keepAlbumIDs: Set<String>,
+        keepPhotos: Bool,
+        keepVideos: Bool
+    ) -> [LocalSpaceCandidate] {
+        var protectedAlbumAssetIDs = Set<String>()
+
+        if !keepAlbumIDs.isEmpty {
+            let collections = PHAssetCollection.fetchAssetCollections(
+                withLocalIdentifiers: Array(keepAlbumIDs),
+                options: nil)
+            collections.enumerateObjects { collection, _, _ in
+                let assets = PHAsset.fetchAssets(in: collection, options: nil)
+                assets.enumerateObjects { asset, _, _ in
+                    protectedAlbumAssetIDs.insert(asset.localIdentifier)
+                }
+            }
+        }
+
+        let assets = PHAsset.fetchAssets(
+            withLocalIdentifiers: Array(backedUpIDs),
+            options: nil)
+        var result: [LocalSpaceCandidate] = []
+        result.reserveCapacity(assets.count)
+
+        assets.enumerateObjects { asset, _, _ in
+            guard asset.mediaType == .image || asset.mediaType == .video else { return }
+
+            let assetDate = asset.creationDate ?? asset.modificationDate ?? .distantFuture
+            guard assetDate < cutoff else { return }
+            guard !(keepFavorites && asset.isFavorite) else { return }
+            guard !protectedAlbumAssetIDs.contains(asset.localIdentifier) else { return }
+            guard !(keepPhotos && asset.mediaType == .image) else { return }
+            guard !(keepVideos && asset.mediaType == .video) else { return }
+
+            result.append(LocalSpaceCandidate(
+                id: asset.localIdentifier,
+                createdAt: assetDate,
+                isVideo: asset.mediaType == .video))
+        }
+
+        return result.sorted { $0.createdAt < $1.createdAt }
     }
 
     /// Foto satu album, tanpa menyentuh `photos`.
@@ -375,6 +572,103 @@ final class LocalPhotoLibrary {
         }
     }
 
+    /// Apakah aset PhotoKit ini benar-benar Live Photo.
+    ///
+    /// Deteksi dari `mediaSubtypes`, bukan dari ekstensi atau durasi. Sebuah
+    /// Live Photo terlihat sebagai image biasa sampai flag ini dibaca.
+    func isLivePhoto(_ id: String) -> Bool {
+        guard let asset = Self.fetchAsset(id) else { return false }
+        return asset.mediaType == .image && asset.mediaSubtypes.contains(.photoLive)
+    }
+
+    /// Mencari Live Photo lokal yang sama dengan aset server.
+    ///
+    /// Tanggal saja tidak cukup (burst bisa berbagi detik), dan dimensi saja
+    /// juga tidak cukup. Kandidat diterima hanya jika nama file persis sama,
+    /// atau tanggal + dimensi sama. Dengan begitu foto biasa tidak mendapat
+    /// badge LIVE palsu.
+    func matchingLivePhoto(for hint: LocalLivePhotoMatchHint) async -> String? {
+        await Task.detached(priority: .userInitiated) {
+            Self.findMatchingLivePhoto(hint)
+        }.value
+    }
+
+    private nonisolated static func findMatchingLivePhoto(
+        _ hint: LocalLivePhotoMatchHint
+    ) -> String? {
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(
+            format: "mediaType == %d AND creationDate >= %@ AND creationDate <= %@",
+            PHAssetMediaType.image.rawValue,
+            hint.createdAt.addingTimeInterval(-5) as NSDate,
+            hint.createdAt.addingTimeInterval(5) as NSDate)
+
+        let candidates = PHAsset.fetchAssets(with: options)
+        var best: (id: String, score: Int)?
+        candidates.enumerateObjects { asset, _, _ in
+            guard asset.mediaSubtypes.contains(.photoLive),
+                  let date = asset.creationDate
+            else { return }
+
+            let delta = abs(date.timeIntervalSince(hint.createdAt))
+            let dimensionsMatch: Bool
+            if let width = hint.pixelWidth, let height = hint.pixelHeight {
+                dimensionsMatch = (asset.pixelWidth == width && asset.pixelHeight == height)
+                    || (asset.pixelWidth == height && asset.pixelHeight == width)
+            } else {
+                dimensionsMatch = false
+            }
+
+            let filenameMatch: Bool
+            if let expected = hint.originalFileName, !expected.isEmpty {
+                filenameMatch = PHAssetResource.assetResources(for: asset).contains {
+                    $0.originalFilename.caseInsensitiveCompare(expected) == .orderedSame
+                }
+            } else {
+                filenameMatch = false
+            }
+
+            guard filenameMatch || (dimensionsMatch && delta <= 5) else { return }
+            var score = filenameMatch ? 100 : 0
+            if dimensionsMatch { score += 20 }
+            if delta <= 0.1 { score += 10 }
+            else if delta <= 1 { score += 5 }
+
+            if best == nil || score > best!.score {
+                best = (asset.localIdentifier, score)
+            }
+        }
+        return best.map { Self.assetID(for: $0.id) }
+    }
+
+    /// Meminta pasangan still + motion sebagai objek native PhotoKit.
+    /// `PHLivePhotoView` kemudian menangani sinkronisasi frame dan transisinya,
+    /// sama seperti aplikasi Photos.
+    func livePhoto(for id: String, targetSize: CGSize) async -> PHLivePhoto? {
+        guard let asset = Self.fetchAsset(id),
+              asset.mediaType == .image,
+              asset.mediaSubtypes.contains(.photoLive)
+        else { return nil }
+
+        let options = PHLivePhotoRequestOptions()
+        options.deliveryMode = .highQualityFormat
+        options.isNetworkAccessAllowed = true
+
+        return await withCheckedContinuation { continuation in
+            let gate = PhotoContinuationGate<PHLivePhoto?>(continuation)
+            imageManager.requestLivePhoto(
+                for: asset,
+                targetSize: targetSize,
+                contentMode: .aspectFit,
+                options: options
+            ) { livePhoto, info in
+                let degraded = info?[PHImageResultIsDegradedKey] as? Bool ?? false
+                if degraded { return }
+                gate.resume(returning: livePhoto)
+            }
+        }
+    }
+
     func startCaching(_ ids: [String], size: CGSize) {
         let assets = ids.compactMap(Self.fetchAsset)
         guard !assets.isEmpty else { return }
@@ -394,6 +688,79 @@ final class LocalPhotoLibrary {
     }
 
     // MARK: - Berkas asli
+
+    /// Mengekspor resource asli ke file sementara untuk hashing dan upload.
+    ///
+    /// Video tidak boleh dirakit menjadi satu `Data`: setelah badan multipart
+    /// ikut dibuat, ukuran memorinya menjadi dua kali ukuran video. File ini
+    /// memungkinkan hashing dan penyusunan multipart dilakukan per potongan.
+    nonisolated func originalFile(
+        for id: String,
+        allowsNetworkFallback: Bool = true
+    ) async -> (url: URL, filename: String)? {
+        guard let resource = await Task.detached(priority: .utility, operation: {
+            guard let asset = Self.fetchAsset(id) else { return PHAssetResource?.none }
+            return Self.primaryResource(for: asset)
+        }).value else { return nil }
+
+        if let localURL = await Self.writeTemporaryFile(resource, allowsNetwork: false) {
+            return (localURL, resource.originalFilename)
+        }
+        guard allowsNetworkFallback,
+              let remoteURL = await Self.writeTemporaryFile(resource, allowsNetwork: true)
+        else { return nil }
+        return (remoteURL, resource.originalFilename)
+    }
+
+    private nonisolated static func writeTemporaryFile(
+        _ resource: PHAssetResource,
+        allowsNetwork: Bool
+    ) async -> URL? {
+        let ext = URL(fileURLWithPath: resource.originalFilename).pathExtension
+        let suffix = ext.isEmpty ? "" : ".\(ext)"
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("backup-source-\(UUID().uuidString)\(suffix)")
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = allowsNetwork
+
+        return await withCheckedContinuation { continuation in
+            PHAssetResourceManager.default().writeData(
+                for: resource,
+                toFile: destination,
+                options: options
+            ) { error in
+                if error != nil {
+                    try? FileManager.default.removeItem(at: destination)
+                    continuation.resume(returning: nil)
+                } else {
+                    continuation.resume(returning: destination)
+                }
+            }
+        }
+    }
+
+    /// Menyimpan hasil download server ke pustaka perangkat dan mengembalikan
+    /// `PHAsset.localIdentifier` yang baru dibuat.
+    func saveDownloadedFile(_ fileURL: URL, isVideo: Bool) async -> String? {
+        if !isAuthorized {
+            guard await requestAccess() else { return nil }
+        }
+
+        var localIdentifier: String?
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                let request = PHAssetCreationRequest.forAsset()
+                request.addResource(
+                    with: isVideo ? .video : .photo,
+                    fileURL: fileURL,
+                    options: nil)
+                localIdentifier = request.placeholderForCreatedAsset?.localIdentifier
+            }
+            return localIdentifier
+        } catch {
+            return nil
+        }
+    }
 
     /// Byte asli, untuk diunggah maupun dibagikan.
     ///
@@ -529,5 +896,13 @@ final class LocalPhotoLibrary {
     fileprivate nonisolated static func fetchAsset(_ id: String) -> PHAsset? {
         let identifier = Self.isLocal(id) ? Self.localIdentifier(from: id) : id
         return PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject
+    }
+}
+
+extension LocalPhotoLibrary: PHPhotoLibraryChangeObserver {
+    nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
+        Task { @MainActor [weak self] in
+            self?.onLibraryChange?()
+        }
     }
 }

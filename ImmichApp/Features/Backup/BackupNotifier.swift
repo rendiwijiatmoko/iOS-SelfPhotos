@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import UserNotifications
 
 /// Pemberitahuan sistem selama pencadangan berjalan.
@@ -14,6 +15,7 @@ import UserNotifications
 /// biasa: itu satu-satunya yang benar-benar layak mengganggu, dan hanya terjadi
 /// sekali per putaran.
 @MainActor
+@Observable
 final class BackupNotifier: NSObject {
     static let shared = BackupNotifier()
 
@@ -30,17 +32,27 @@ final class BackupNotifier: NSObject {
     private var lastPostedAt: Date?
     private var isAuthorized = false
 
-    /// Pengguna menekan salah satu pemberitahuan pencadangan.
-    ///
-    /// Sebuah penghitung, BUKAN `Bool`. Menekan pemberitahuan dua kali berturut-
-    /// turut tidak mengubah nilai `true` jadi `true`, dan `onChange` tidak
-    /// berbunyi untuk nilai yang sama — ketukan kedua akan diam saja. Angka yang
-    /// naik selalu berbeda dari sebelumnya.
-    private(set) var openBackupRequests = 0
+    /// Dua tahap deep-link disimpan terpisah supaya Library yang sudah dibangun
+    /// di tab tidak dapat menghabiskan permintaan sebelum MainTab sempat pindah.
+    private(set) var shouldSelectLibrary = false
+    private(set) var shouldOpenBackup = false
 
     private override init() {
         super.init()
         UNUserNotificationCenter.current().delegate = self
+    }
+
+    func requestOpenBackup() {
+        shouldSelectLibrary = true
+        shouldOpenBackup = true
+    }
+
+    func didSelectLibrary() {
+        shouldSelectLibrary = false
+    }
+
+    func didOpenBackup() {
+        shouldOpenBackup = false
     }
 
     /// - Parameter prompt: boleh memunculkan dialog izin sistem kalau belum
@@ -190,6 +202,6 @@ extension BackupNotifier: UNUserNotificationCenterDelegate {
         let id = response.notification.request.identifier
         guard id == BackupNotifier.progressID || id == BackupNotifier.completionID
         else { return }
-        await MainActor.run { BackupNotifier.shared.openBackupRequests += 1 }
+        await MainActor.run { BackupNotifier.shared.requestOpenBackup() }
     }
 }

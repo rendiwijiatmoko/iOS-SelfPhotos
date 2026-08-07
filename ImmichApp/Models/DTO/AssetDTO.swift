@@ -118,6 +118,9 @@ struct ExifDTO: Codable {
     let model: String?
     let exifImageWidth: Int?
     let exifImageHeight: Int?
+    /// Nilai EXIF orientation disimpan Immich sebagai string numerik.
+    /// Orientation 5...8 berarti dimensi tampilan harus ditukar.
+    let orientation: String?
     let fileSizeInByte: Int?
     let dateTimeOriginal: Date?
     let latitude: Double?

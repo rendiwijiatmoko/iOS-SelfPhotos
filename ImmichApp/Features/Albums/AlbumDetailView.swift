@@ -8,6 +8,9 @@ import SwiftUI
 /// bersama dengan Favorites dan foto per orang.
 struct AlbumDetailView: View {
     let album: AlbumResponseDTO
+    /// Library memakai daftar aset yang sudah benar di layar ini untuk menambal
+    /// count dan cover tanpa menunggu halaman induk dimuat ulang.
+    var onContentsChanged: (([AssetLite]) -> Void)? = nil
 
     @Environment(SessionManager.self) private var session
     @Environment(\.dismiss) private var dismiss
@@ -50,6 +53,8 @@ struct AlbumDetailView: View {
                 Text("The photos will stay in your library.")
             }
             .task { await start() }
+            .onChange(of: assets.count) { _, _ in reportContents() }
+            .onDisappear { reportContents() }
     }
 
     private var screen: some View {
@@ -100,6 +105,11 @@ struct AlbumDetailView: View {
 
     private var currentAlbum: AlbumResponseDTO {
         editedAlbum ?? album
+    }
+
+    private func reportContents() {
+        guard let vm, case .loaded = vm.phase else { return }
+        onContentsChanged?(vm.assets)
     }
 
     // MARK: - Sheet khas album

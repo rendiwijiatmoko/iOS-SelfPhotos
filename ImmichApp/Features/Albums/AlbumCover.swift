@@ -109,8 +109,10 @@ final class AlbumCoverStore {
         // Sudah ganti akun selagi permintaan ini berjalan — hasilnya milik data
         // yang sudah dibuang, termasuk `inFlight` yang mungkin sudah diisi
         // permintaan baru untuk album lain.
-        guard expectedGeneration == generation else { return }
-        if inFlight[albumID] == task { inFlight[albumID] = nil }
+        guard expectedGeneration == generation,
+              inFlight[albumID] == task
+        else { return }
+        inFlight[albumID] = nil
 
         // Kegagalan jaringan TIDAK dicatat. Kalau dicatat, satu permintaan yang
         // meleset membuat album itu memakai kotak abu-abu sampai aplikasi
@@ -126,6 +128,13 @@ final class AlbumCoverStore {
         resolved.removeAll()
         inFlight.values.forEach { $0.cancel() }
         inFlight.removeAll()
+    }
+
+    /// Isi satu album berubah. Hasil fallback lama tidak boleh terus dipakai,
+    /// khususnya ketika aset yang menjadi cover baru saja dihapus.
+    func invalidate(_ albumID: String) {
+        resolved.removeValue(forKey: albumID)
+        inFlight.removeValue(forKey: albumID)?.cancel()
     }
 
     /// `resolved[id] = nil` akan MENGHAPUS kuncinya, bukan menyimpan nil —
@@ -165,7 +174,9 @@ struct AlbumCoverImage: View {
                     }
             }
         }
-        .task(id: album.id) {
+        // Count/cover menjadi bagian id task agar perubahan isi album memicu
+        // penyelesaian ulang fallback walau id albumnya tetap sama.
+        .task(id: "\(album.id)|\(album.assetCount)|\(album.albumThumbnailAssetId ?? "")") {
             await AlbumCoverStore.shared.resolveCover(for: album, session: session)
         }
     }

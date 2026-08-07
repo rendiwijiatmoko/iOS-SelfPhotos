@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Layar pencadangan.
 ///
@@ -63,6 +64,7 @@ struct BackupView: View {
                 // adalah menutup dan membuka aplikasinya lagi, yang tidak
                 // pernah terbaca sebagai sesuatu yang disengaja.
                 backup.start()
+                BackupScheduler.schedule()
             }
         }
     }
@@ -233,6 +235,9 @@ struct BackupView: View {
                 when background uploads run — opening the app more often makes \
                 them run more often.
                 """
+        }
+        if UIApplication.shared.backgroundRefreshStatus != .available {
+            return "Background App Refresh is disabled. Enable it in Settings > General > Background App Refresh."
         }
         if !NetworkMonitor.shared.isOnline {
             return "Waiting for a network connection."

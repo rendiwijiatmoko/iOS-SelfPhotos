@@ -1,0 +1,508 @@
+import Observation
+import SwiftUI
+import UIKit
+
+private enum SyncStatusJob: String, CaseIterable, Identifiable, Hashable {
+    case syncLocal
+    case syncRemote
+    case syncCloudIDs
+    case hashAssets
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .syncLocal: "Sync Local"
+        case .syncRemote: "Sync Remote"
+        case .syncCloudIDs: "Sync Cloud IDs"
+        case .hashAssets: "Hash Assets"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .syncLocal: "arrow.trianglehead.2.clockwise.rotate.90"
+        case .syncRemote: "arrow.trianglehead.2.clockwise.rotate.90.icloud"
+        case .syncCloudIDs: "icloud.and.arrow.down"
+        case .hashAssets: "number"
+        }
+    }
+}
+
+private enum SyncStatusJobState: Equatable {
+    case idle
+    case running
+    case succeeded(Date?, String)
+    case failed(String)
+}
+
+private struct SyncStatusJobError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+@MainActor
+@Observable
+private final class SyncStatusViewModel {
+    var localAssets: Int?
+    var remoteAssets: Int?
+    var localAlbums: Int?
+    var remoteAlbums: Int?
+    var memories: Int?
+    var hashedAssets: Int?
+    var cacheSize = 0
+    var isRefreshing = false
+    var isClearingCache = false
+    var isExportingDatabase = false
+    var isResettingDatabase = false
+    var runningJob: SyncStatusJob?
+    var jobStates: [SyncStatusJob: SyncStatusJobState] = [:]
+    var completionFeedback = 0
+
+    private let settingsRepo: SettingsRepository
+    private let albumRepo: AlbumRepository
+    private let memoriesRepo: MemoriesRepository
+    private let syncRepo: SyncRepository
+    private let matcher: DeviceAssetMatcher
+    private let dataManager = SwiftDataManager.shared
+    private let library = LocalPhotoLibrary.shared
+    private var didLoad = false
+
+    init(session: SessionManager) {
+        let api = APIClient(session: session)
+        settingsRepo = SettingsRepository(api: api)
+        albumRepo = AlbumRepository(api: api)
+        memoriesRepo = MemoriesRepository(api: api)
+        syncRepo = SyncRepository(api: api, dataManager: .shared)
+        matcher = DeviceAssetMatcher(
+            repo: BackupRepository(api: api),
+            dataManager: .shared)
+
+        for job in SyncStatusJob.allCases { jobStates[job] = .idle }
+    }
+
+    func loadIfNeeded() async {
+        guard !didLoad else { return }
+        didLoad = true
+        await refreshCounts()
+        inferExistingJobStates()
+    }
+
+    func refreshCounts() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
+
+        async let localTask = library.statusCounts()
+        async let statsTask: AssetStatsDTO? = try? settingsRepo.getAssetStats()
+        async let remoteAlbumsTask: [AlbumResponseDTO]? = try? albumRepo.all()
+        async let memoriesTask: [MemoryDTO]? = try? memoriesRepo.getMemories()
+        async let cacheTask = ImageCache.shared.diskCacheSize()
+
+        let (local, stats, albums, memoryItems, cache) = await (
+            localTask,
+            statsTask,
+            remoteAlbumsTask,
+            memoriesTask,
+            cacheTask)
+
+        localAssets = local.assets
+        localAlbums = local.albums
+        remoteAssets = stats?.total
+        remoteAlbums = albums?.count
+        memories = memoryItems?.count
+        hashedAssets = dataManager.storedChecksums().count
+        cacheSize = cache
+    }
+
+    func run(_ job: SyncStatusJob, appSync: SyncViewModel?) async {
+        guard runningJob == nil else { return }
+        runningJob = job
+        jobStates[job] = .running
+
+        do {
+            let result: String
+            switch job {
+            case .syncLocal:
+                let counts = await library.statusCounts()
+                await BackupService.shared.prepare()
+                result = counts.assets == 1
+                    ? "Scanned 1 local asset"
+                    : "Scanned \(counts.assets.formatted()) local assets"
+
+            case .syncRemote:
+                let needsFullSync = dataManager.getSyncState().lastFullSyncAt == nil
+                if let appSync {
+                    let succeeded: Bool
+                    if needsFullSync {
+                        succeeded = await appSync.performFullSync()
+                    } else {
+                        succeeded = await appSync.performDeltaSync()
+                    }
+                    guard succeeded else {
+                        throw SyncStatusJobError(message: appSync.syncProgress)
+                    }
+                } else {
+                    if needsFullSync {
+                        try await syncRepo.fullSync()
+                    } else {
+                        try await syncRepo.deltaSync()
+                    }
+                }
+                result = "Remote library is up to date"
+
+            case .syncCloudIDs:
+                let photos = await library.allPhotosForSync()
+                guard library.isAuthorized else {
+                    throw SyncStatusJobError(
+                        message: "Allow Photos access before syncing cloud IDs.")
+                }
+                let linked = try await matcher.matchNow(photos)
+                result = linked == 0
+                    ? "Cloud IDs are up to date"
+                    : "Matched \(linked.formatted()) cloud IDs"
+
+            case .hashAssets:
+                let photos = await library.allPhotosForSync()
+                guard library.isAuthorized else {
+                    throw SyncStatusJobError(
+                        message: "Allow Photos access before hashing assets.")
+                }
+                let hashed = try await matcher.hashNow(photos)
+                result = hashed == 0
+                    ? "All available assets are hashed"
+                    : "Hashed \(hashed.formatted()) assets"
+            }
+
+            jobStates[job] = .succeeded(.now, result)
+            completionFeedback &+= 1
+            await refreshCounts()
+        } catch is CancellationError {
+            jobStates[job] = .idle
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            jobStates[job] = .failed(message)
+        }
+
+        runningJob = nil
+    }
+
+    func clearCache() async {
+        guard !isClearingCache else { return }
+        isClearingCache = true
+        await ImageCache.shared.clear()
+        cacheSize = await ImageCache.shared.diskCacheSize()
+        isClearingCache = false
+        completionFeedback &+= 1
+    }
+
+    func exportDatabase() async throws -> URL {
+        guard !isExportingDatabase else {
+            throw SyncStatusJobError(message: "A database export is already running.")
+        }
+        isExportingDatabase = true
+        defer { isExportingDatabase = false }
+        return try await dataManager.exportDatabase()
+    }
+
+    func resetDatabase() async throws {
+        guard !isResettingDatabase else { return }
+        isResettingDatabase = true
+        defer { isResettingDatabase = false }
+
+        try dataManager.resetSyncDatabase()
+        hashedAssets = 0
+        jobStates[.syncRemote] = .idle
+        jobStates[.hashAssets] = .idle
+        completionFeedback &+= 1
+    }
+
+    func state(for job: SyncStatusJob) -> SyncStatusJobState {
+        jobStates[job] ?? .idle
+    }
+
+    private func inferExistingJobStates() {
+        if library.isAuthorized {
+            jobStates[.syncLocal] = .succeeded(nil, "Local library is available")
+        }
+
+        let syncState = dataManager.getSyncState()
+        if let date = syncState.lastDeltaSyncAt ?? syncState.lastFullSyncAt {
+            jobStates[.syncRemote] = .succeeded(date, "Remote library synced")
+        }
+
+        if !dataManager.uploadedLocalIdentifiers().isEmpty {
+            jobStates[.syncCloudIDs] = .succeeded(nil, "Cloud IDs are available")
+        }
+
+        if dataManager.storedChecksums().count > 0 {
+            jobStates[.hashAssets] = .succeeded(nil, "Hashed assets are available")
+        }
+    }
+}
+
+/// Ringkasan database sinkronisasi dan pekerjaan perawatannya.
+///
+/// Informasinya mengikuti halaman Immich resmi, sementara tata letaknya memakai
+/// `List`, section, semantic colors, dan SF Symbols agar tetap terasa native di
+/// dalam Settings iOS aplikasi ini.
+struct SyncStatusView: View {
+    @Environment(SyncViewModel.self) private var appSync: SyncViewModel?
+    @State private var vm: SyncStatusViewModel
+    @State private var exportPresentation: DatabaseExportPresentation?
+    @State private var actionError: ErrorEvent?
+    @State private var showResetConfirmation = false
+
+    init(session: SessionManager) {
+        _vm = State(initialValue: SyncStatusViewModel(session: session))
+    }
+
+    var body: some View {
+        List {
+            statusSection(
+                "Assets",
+                leading: ("Local", "iphone", vm.localAssets),
+                trailing: ("Remote", "icloud.fill", vm.remoteAssets))
+            statusSection(
+                "Albums",
+                leading: ("Local", "rectangle.stack", vm.localAlbums),
+                trailing: ("Remote", "icloud.fill", vm.remoteAlbums))
+            statusSection(
+                "Other",
+                leading: ("Memories", "calendar", vm.memories),
+                trailing: ("Hashed Assets", "number", vm.hashedAssets))
+
+            jobsSection
+            actionsSection
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("Sync Status")
+        .navigationBarTitleDisplayMode(.inline)
+        .task { await vm.loadIfNeeded() }
+        .refreshable { await vm.refreshCounts() }
+        .sensoryFeedback(.success, trigger: vm.completionFeedback)
+        .sheet(item: $exportPresentation) { presentation in
+            DatabaseActivityView(url: presentation.url)
+        }
+        .alert("Reset Sync Database?", isPresented: $showResetConfirmation) {
+            Button("Reset", role: .destructive) {
+                Task {
+                    do {
+                        try await vm.resetDatabase()
+                    } catch {
+                        actionError = ErrorEvent(error.localizedDescription)
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the local sync index and hashed-asset cache. Photos on your device and server remain safe. Run Sync Remote afterward to rebuild the index.")
+        }
+        .errorToast($actionError)
+    }
+
+    private func statusSection(
+        _ title: String,
+        leading: (title: String, symbol: String, value: Int?),
+        trailing: (title: String, symbol: String, value: Int?)
+    ) -> some View {
+        Section(title) {
+            HStack(spacing: 12) {
+                statusCard(leading)
+                statusCard(trailing)
+            }
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+        }
+    }
+
+    private func statusCard(
+        _ item: (title: String, symbol: String, value: Int?)
+    ) -> some View {
+        VStack(spacing: 9) {
+            Label(item.title, systemImage: item.symbol)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.tint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+
+            Group {
+                if let value = item.value {
+                    Text(value.formatted())
+                        .contentTransition(.numericText())
+                } else if vm.isRefreshing {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Text("—")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.title2.weight(.medium))
+            .monospacedDigit()
+            .frame(height: 28)
+        }
+        .frame(maxWidth: .infinity, minHeight: 104)
+        .background(
+            Color(uiColor: .secondarySystemGroupedBackground),
+            in: .rect(cornerRadius: 18))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18)
+                .strokeBorder(.separator.opacity(0.35), lineWidth: 0.5)
+        }
+    }
+
+    private var jobsSection: some View {
+        Section {
+            ForEach(SyncStatusJob.allCases) { job in
+                Button {
+                    Task { await vm.run(job, appSync: appSync) }
+                } label: {
+                    HStack(spacing: 14) {
+                        Image(systemName: job.symbol)
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(job.title)
+                                .foregroundStyle(.primary)
+                            Text(jobSubtitle(job))
+                                .font(.caption)
+                                .foregroundStyle(jobSubtitleColor(job))
+                                .lineLimit(2)
+                        }
+
+                        Spacer()
+                        jobIndicator(job)
+                    }
+                    .contentShape(.rect)
+                }
+                .disabled(vm.runningJob != nil)
+            }
+        } header: {
+            Text("Jobs")
+        } footer: {
+            Text("Manual jobs update the local index and server cache. Hashing may need to download originals from iCloud, so it only runs on Wi-Fi.")
+        }
+    }
+
+    private var actionsSection: some View {
+        Section {
+            Button {
+                Task { await vm.clearCache() }
+            } label: {
+                LabeledContent {
+                    if vm.isClearingCache {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text(formatBytes(vm.cacheSize))
+                            .foregroundStyle(.secondary)
+                    }
+                } label: {
+                    Label("Clear File Cache", systemImage: "trash")
+                }
+            }
+            .disabled(vm.cacheSize == 0 || vm.isClearingCache)
+
+            Button {
+                Task {
+                    do {
+                        exportPresentation = DatabaseExportPresentation(
+                            url: try await vm.exportDatabase())
+                    } catch {
+                        actionError = ErrorEvent(error.localizedDescription)
+                    }
+                }
+            } label: {
+                HStack {
+                    Label("Export Database", systemImage: "square.and.arrow.up")
+                    Spacer()
+                    if vm.isExportingDatabase {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+            }
+            .disabled(vm.isExportingDatabase || vm.isResettingDatabase)
+
+            Button(role: .destructive) {
+                showResetConfirmation = true
+            } label: {
+                Label("Reset Sync Database", systemImage: "arrow.counterclockwise.circle")
+            }
+            .disabled(vm.isResettingDatabase || vm.runningJob != nil)
+        } header: {
+            Text("Actions")
+        } footer: {
+            Text("Cache and database actions only affect local app data. Photos on your device and server remain safe.")
+        }
+    }
+
+    private func jobSubtitle(_ job: SyncStatusJob) -> String {
+        switch vm.state(for: job) {
+        case .idle:
+            return "Tap to run job"
+        case .running:
+            return "Running…"
+        case let .succeeded(date, message):
+            if let date {
+                return "\(message) • \(date.formatted(.relative(presentation: .named)))"
+            }
+            return message
+        case let .failed(message):
+            return message
+        }
+    }
+
+    private func formatBytes(_ bytes: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+
+    private func jobSubtitleColor(_ job: SyncStatusJob) -> Color {
+        if case .failed = vm.state(for: job) { return .red }
+        return .secondary
+    }
+
+    @ViewBuilder
+    private func jobIndicator(_ job: SyncStatusJob) -> some View {
+        switch vm.state(for: job) {
+        case .idle:
+            Image(systemName: "chevron.right")
+                .font(.caption.bold())
+                .foregroundStyle(.tertiary)
+        case .running:
+            ProgressView()
+                .controlSize(.small)
+        case .succeeded:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.title3)
+                .foregroundStyle(.green)
+        case .failed:
+            Image(systemName: "xmark.circle.fill")
+                .font(.title3)
+                .foregroundStyle(.red)
+        }
+    }
+}
+
+private struct DatabaseExportPresentation: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+private struct DatabaseActivityView: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+
+    func updateUIViewController(
+        _ uiViewController: UIActivityViewController,
+        context: Context
+    ) {}
+}

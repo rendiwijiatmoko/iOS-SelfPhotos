@@ -15,6 +15,7 @@ struct TimelineView: View {
     var resetScrollRequest = 0
 
     @Environment(SessionManager.self) private var session
+    @Environment(\.scenePhase) private var scenePhase
     /// Linimasa merender dari hasil sync, jadi ia perlu tahu kapan sync selesai.
     @Environment(SyncViewModel.self) private var syncVM: SyncViewModel?
     @State private var vm: TimelineViewModel?
@@ -27,7 +28,6 @@ struct TimelineView: View {
     @State private var albumPickerAsset: AssetLite?
     @State private var isSelecting = false
     @State private var selectedIDs: Set<String> = []
-    @State private var showSelectionDeleteConfirm = false
     @State private var isPreparingSelectionShare = false
     @State private var selectionShareURLs: [URL] = []
     @State private var isSelectionSharePresented = false
@@ -88,18 +88,6 @@ struct TimelineView: View {
             }
         }
         .sheet(item: $selectionLink) { ShareSheet(url: $0.url) }
-        // Dialognya menempel di layar, bukan di tombol sampahnya: tombol itu
-        // sekarang hidup di dalam `SelectionToolbar`.
-        .confirmationDialog(
-            deleteConfirmTitle,
-            isPresented: $showSelectionDeleteConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Delete", role: .destructive) { deleteSelection() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This cannot be undone.")
-        }
         .alert("Action Failed", isPresented: Binding(
             get: { vm?.actionError != nil },
             set: { if !$0 { vm?.actionError = nil } }
@@ -142,6 +130,14 @@ struct TimelineView: View {
         // sama — lencananya — jadi jalur penggambaran ulangnya juga sama.
         .onChange(of: LocalPhotoLibrary.shared.photos.count) { _, _ in
             Task { await vm?.refreshOrigins() }
+        }
+        // Membuka kembali aplikasi selalu kembali ke foto terbaru. Controller
+        // sengaja melepas anchor bawah setelah pengguna scroll; tanpa memasangnya
+        // lagi di foreground, foto yang ditemukan/diunggah auto-backup bertambah
+        // di bawah sementara layar tertahan pada posisi sesi sebelumnya.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            gridController?.scrollToNewest(animated: false)
         }
         .deleteFromDeviceAlert($deviceDeleteID) { deleteFeedback += 1 }
         .sensoryFeedback(.impact(weight: .heavy), trigger: deleteFeedback)
@@ -370,9 +366,7 @@ struct TimelineView: View {
     }
     
     private var settingsSheet: some View {
-        NavigationStack {
-            SettingsView(session: session)
-        }
+        SettingsSheetView(session: session)
         .navigationTransition(.zoom(sourceID: "profile", in: namespace))
     }
 
@@ -467,7 +461,16 @@ struct TimelineView: View {
             }
         }
         actions.archive = { runSelection { await vm?.archiveSelected(ids) } }
-        actions.trash = { showSelectionDeleteConfirm = true }
+        // Konfirmasi dimiliki tombol Trash-nya sendiri. Ini menjaga anchor dan
+        // animasi presentasi berasal dari posisi tombol di bottom toolbar,
+        // bukan muncul sebagai dialog milik layar di tengah.
+        actions.trashConfirmation = SelectionConfirmation(
+            title: deleteConfirmTitle,
+            message: String(localized: "This cannot be undone."),
+            options: [SelectionConfirmationOption(
+                title: String(localized: "Delete"),
+                isDestructive: true,
+                handler: deleteSelection)])
         actions.menu = [
             SelectionMenuAction(title: "Share Link", systemImage: "link") {
                 createSharedLink(for: ids)

@@ -23,8 +23,12 @@ struct AssetDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var vm: AssetDetailViewModel?
     @State private var isSharePresented = false
+    @State private var sharedLink: SharedLinkPresentation?
     /// true selama file asli masih diunduh, sebelum share sheet dibuka.
     @State private var isPreparingShare = false
+    @State private var isDownloadingToDevice = false
+    @State private var isUploadingLocalAsset = false
+    @State private var isSettingProfilePhoto = false
     @State private var downloadedFileURL: URL?
     /// Pratinjau untuk header share sheet, diambil dari cache preview.
     @State private var sharePreviewImage: UIImage?
@@ -74,6 +78,10 @@ struct AssetDetailView: View {
     @State private var isEditingDate = false
     @State private var isEditingLocation = false
     @State private var isPickingAlbum = false
+    @State private var isEditingPhoto = false
+    @State private var isPreparingEditor = false
+    @State private var existingPhotoEdits: [AssetEditRecord] = []
+    @State private var showRemoveDeviceConfirm = false
     /// Salinan kerja dari `assets`, milik layar ini.
     ///
     /// `assets` dimiliki pemanggil dan tidak bisa diubah dari sini. Dulu
@@ -93,6 +101,14 @@ struct AssetDetailView: View {
     @State private var filmstripController: PhotoFilmstripController?
     /// Pegangan ke pager, supaya bar kontrol video bisa menyambung langsung.
     @State private var pagerController: PhotoPagerController?
+    /// Salinan eksplisit metadata Live Photo. Membacanya langsung dari objek
+    /// observable di dalam representable dapat melewatkan update ketika detail
+    /// cache dan detail jaringan mempunyai ID aset yang sama.
+    @State private var currentLivePhotoVideoID: String? = nil
+    @State private var currentLivePhotoHint: LocalLivePhotoMatchHint? = nil
+    /// Menjaga metadata async tidak pernah dipasang ke halaman yang berbeda
+    /// selama satu frame transisi pager.
+    @State private var currentLivePhotoContextAssetID: String? = nil
 
     /// Daftar yang benar-benar dipakai untuk menggambar.
     ///
@@ -163,6 +179,9 @@ struct AssetDetailView: View {
             .ignoresSafeArea(.keyboard, edges: .bottom)
             .onChange(of: currentAsset) { oldAsset, newAsset in
                 onAssetChange?(newAsset)
+                currentLivePhotoContextAssetID = newAsset.id
+                currentLivePhotoVideoID = newAsset.livePhotoVideoID
+                currentLivePhotoHint = nil
                 // Foto lain = metadata lain = tinggi isi lain. Nilai maksimum
                 // yang tersimpan harus dilupakan, bukan dibawa-bawa.
                 panelContentHeight = 0
@@ -170,11 +189,15 @@ struct AssetDetailView: View {
                 // fokusnya. Tanpa ini keyboard dan toolbar mode edit bertahan
                 // di foto baru sambil menyunting teks milik foto lama.
                 if isEditingDescription {
-                    saveDescriptionEdit(for: oldAsset.id)
+                    saveDescriptionEdit(for: serverAssetID(for: oldAsset))
                 }
                 Task {
-                    await vm?.load(newAsset.id)
-                    await vm?.loadContainingAlbums(newAsset.id)
+                    let detailAssetID = serverAssetID(for: newAsset) ?? newAsset.id
+                    await vm?.load(detailAssetID)
+                    syncLivePhotoContextFromDetail()
+                    if let serverID = serverAssetID(for: newAsset) {
+                        await vm?.loadContainingAlbums(serverID)
+                    }
                 }
             }
     }
@@ -207,15 +230,51 @@ struct AssetDetailView: View {
     /// overlay kosong supaya rantai modifier di `body` tetap pendek.
     private var presentations: some View {
         stateSync
-            .sheet(isPresented: $isSharePresented) { shareSheet }
+            .sheet(isPresented: $isSharePresented, onDismiss: cleanupSharedFile) { shareSheet }
+            .sheet(item: $sharedLink) { ShareSheet(url: $0.url) }
             .sheet(isPresented: $isEditingDate) { dateEditor }
             .sheet(isPresented: $isEditingLocation) { locationEditor }
             .sheet(isPresented: $isPickingAlbum) { albumPicker }
+            .fullScreenCover(isPresented: $isEditingPhoto) { photoEditor }
+            .confirmationDialog(
+                currentAsset.needsUpload ? "Remove This Photo?" : "Remove from Device",
+                isPresented: $showRemoveDeviceConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Remove from Device", role: .destructive) {
+                    removeFromDevice()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                if currentAsset.needsUpload {
+                    Text("This is the only copy and it has not been uploaded yet.")
+                } else {
+                    Text("The local copy will be removed. The photo stays on your server.")
+                }
+            }
+    }
+
+    @ViewBuilder
+    private var photoEditor: some View {
+        if let serverID = currentServerAssetID,
+           let pixelSize = editablePixelSize {
+            PhotoCropEditor(
+                assetID: serverID,
+                originalPixelSize: pixelSize,
+                existingEdits: existingPhotoEdits,
+                onSave: { edits in
+                    guard await vm?.applyEdits(edits, to: serverID) == true else { return false }
+                    await pagerController?.reloadCurrentImage()
+                    onAssetUpdated?(serverID)
+                    return true
+                })
+        }
     }
 
     private var albumPicker: some View {
         AlbumPickerSheet(albums: albums) { album in
-            Task { await vm?.addToAlbum(currentAsset.id, album: album) }
+            guard let serverID = currentServerAssetID else { return }
+            Task { await vm?.addToAlbum(serverID, album: album) }
         }
     }
 
@@ -223,7 +282,7 @@ struct AssetDetailView: View {
     private var dateEditor: some View {
         if let detail = vm?.detail {
             AssetDateEditor(initialDate: detail.fileCreatedAt) { newDate in
-                let id = currentAsset.id
+                guard let id = currentServerAssetID else { return }
                 Task {
                     await vm?.updateDate(id, to: newDate)
                     onAssetUpdated?(id)
@@ -235,7 +294,7 @@ struct AssetDetailView: View {
     @ViewBuilder
     private var locationEditor: some View {
         AssetLocationEditor(initialCoordinate: currentCoordinate) { coordinate in
-            let id = currentAsset.id
+            guard let id = currentServerAssetID else { return }
             Task {
                 await vm?.updateLocation(
                     id,
@@ -562,7 +621,7 @@ struct AssetDetailView: View {
         descriptionDraft = trimmed
         descriptionFocused = false
         guard trimmed != savedDescription else { return }
-        let id = assetID ?? currentAsset.id
+        guard let id = assetID ?? currentServerAssetID else { return }
         Task { await vm?.updateDescription(id, to: trimmed) }
     }
 
@@ -591,9 +650,31 @@ struct AssetDetailView: View {
             let repo = AssetDetailRepository(api: api)
             vm = AssetDetailViewModel(repo: repo, albumRepo: AlbumRepository(api: api))
         }
-        await vm?.load(currentAsset.id)
-        await vm?.loadContainingAlbums(currentAsset.id)
+        let detailAssetID = currentServerAssetID ?? currentAsset.id
+        await vm?.load(detailAssetID)
+        syncLivePhotoContextFromDetail()
+        if let serverID = currentServerAssetID {
+            await vm?.loadContainingAlbums(serverID)
+        }
         await vm?.loadAlbumsIfNeeded()
+    }
+
+    /// Menyalin metadata hasil fetch ke state view dan menyiapkan fallback
+    /// PhotoKit. Nama file + waktu + dimensi dipakai bersama supaya pencocokan
+    /// tidak salah memilih Live Photo lain yang kebetulan berdekatan waktunya.
+    private func syncLivePhotoContextFromDetail() {
+        guard let detail = vm?.detail,
+              detail.id == currentServerAssetID
+        else { return }
+
+        currentLivePhotoVideoID = detail.livePhotoVideoId
+            ?? currentAsset.livePhotoVideoID
+        currentLivePhotoHint = LocalLivePhotoMatchHint(
+            createdAt: detail.fileCreatedAt,
+            pixelWidth: detail.exifInfo?.exifImageWidth,
+            pixelHeight: detail.exifInfo?.exifImageHeight,
+            originalFileName: detail.originalFileName)
+        currentLivePhotoContextAssetID = currentAsset.id
     }
 
     private var pager: some View {
@@ -620,9 +701,18 @@ struct AssetDetailView: View {
                 // berangkat dari sel yang ditekan.
                 assets: visibleAssets,
                 currentAssetID: currentAsset.id,
+                // Detail lengkap adalah sumber paling baru; fallback menjaga
+                // Live Photo tetap bekerja saat layar dibuka offline.
+                livePhotoVideoID: currentLivePhotoContextAssetID == currentAsset.id
+                    ? (currentLivePhotoVideoID ?? currentAsset.livePhotoVideoID)
+                    : currentAsset.livePhotoVideoID,
+                localLivePhotoHint: currentLivePhotoContextAssetID == currentAsset.id
+                    ? currentLivePhotoHint
+                    : nil,
                 layout: pagerLayout(available: max(1, box.height - 16), centerY: box.midY),
-                // Panel terbuka berarti fotonya sedang jadi latar, bukan objek
-                // utama — usapan mendatar di situ tidak boleh memindahkannya.
+                // Zoom yang belum menghasilkan ruang pan horizontal tetap boleh
+                // memakai swipe untuk pindah halaman. Penguncian zoom dihitung
+                // langsung oleh controller dari lebar konten aktual.
                 isPagingEnabled: !showInfo && !isEditingDescription,
                 onPageChanged: { asset in
                     currentAsset = asset
@@ -663,6 +753,9 @@ struct AssetDetailView: View {
             // Panel terbuka → pinch dan double tap dimatikan; foto sedang jadi
             // latar, bukan objek utama.
             isZoomEnabled: panelHeight <= 0,
+            // Badge LIVE adalah bagian dari chrome seperti toolbar: ketukan
+            // full-view menyembunyikan semuanya, lalu menampilkannya bersama.
+            showsLivePhotoBadge: showToolbar && !showInfo,
             // Drag = ikuti jari tanpa animasi. Tombol info atau snap = animasikan.
             animates: !isPanelDragging)
     }
@@ -693,8 +786,83 @@ struct AssetDetailView: View {
         if isEditingDescription {
             ToolbarItem(placement: .topBarLeading) { cancelEditButton }
             ToolbarItem(placement: .topBarTrailing) { saveEditButton }
-        } else if isModal {
-            ToolbarItem(placement: .topBarLeading) { closeButton }
+        } else {
+            if isModal {
+                ToolbarItem(placement: .topBarLeading) { closeButton }
+            }
+            ToolbarItem(placement: .topBarTrailing) { detailActionsMenu }
+        }
+    }
+
+    private var detailActionsMenu: some View {
+        Menu {
+            if let serverID = currentServerAssetID {
+                Button {
+                    createSharedLink(for: serverID)
+                } label: {
+                    Label("Share Link", systemImage: "link")
+                }
+            }
+
+            // Aset lokal belum menjadi bagian dari library server, jadi belum
+            // boleh dipakai sebagai foto profil. Setelah upload selesai,
+            // `currentServerAssetID` tersedia dan aksi ini ikut muncul.
+            if !currentAsset.isVideo, currentServerAssetID != nil {
+                Button {
+                    setAsProfilePhoto()
+                } label: {
+                    Label("Set as Profile Photo", systemImage: "person.crop.circle")
+                }
+                .disabled(isSettingProfilePhoto)
+            }
+
+            if currentAsset.origin == .server {
+                Button {
+                    downloadToDevice()
+                } label: {
+                    Label("Download", systemImage: "arrow.down.circle")
+                }
+                .disabled(isDownloadingToDevice)
+            }
+
+            if currentServerAssetID != nil {
+                Section("Move to") {
+                    Button {
+                        moveAsset(to: .locked)
+                    } label: {
+                        Label("Locked Folder", systemImage: "lock")
+                    }
+
+                    Button {
+                        moveAsset(to: .archive)
+                    } label: {
+                        Label("Archive", systemImage: "archivebox")
+                    }
+                }
+
+                Section("Add to") {
+                    Button {
+                        isPickingAlbum = true
+                    } label: {
+                        Label("Album", systemImage: "rectangle.stack.badge.plus")
+                    }
+                }
+            }
+
+            if currentAsset.isOnDevice {
+                Divider()
+                Button(role: .destructive) {
+                    showRemoveDeviceConfirm = true
+                } label: {
+                    Label("Remove from Device", systemImage: "iphone.slash")
+                }
+            }
+        } label: {
+            if isDownloadingToDevice || isSettingProfilePhoto {
+                ProgressView()
+            } else {
+                Image(systemName: "ellipsis")
+            }
         }
     }
 
@@ -725,26 +893,26 @@ struct AssetDetailView: View {
 
     @ToolbarContentBuilder
     private var bottomToolbar: some ToolbarContent {
-        // Kiri: share. Sheet baru dibuka setelah file aslinya selesai
-        // diunduh; selama menunggu, ikonnya berganti spinner supaya
-        // jeda-nya jelas dan tombolnya tidak bisa ditekan dua kali.
-        ToolbarItem(placement: .bottomBar) { shareButton }
+        if currentAsset.needsUpload {
+            // Aset yang hanya ada di perangkat belum punya aksi server. Toolbar
+            // sengaja hanya menawarkan dua hal yang benar-benar bisa dilakukan.
+            ToolbarItem(placement: .bottomBar) { shareButton }
+            ToolbarSpacer(.flexible, placement: .bottomBar)
+            ToolbarItem(placement: .bottomBar) { uploadButton }
+        } else {
+            ToolbarItem(placement: .bottomBar) { shareButton }
+            ToolbarSpacer(.flexible, placement: .bottomBar)
 
-        ToolbarSpacer(.flexible, placement: .bottomBar)
+            ToolbarItemGroup(placement: .bottomBar) {
+                favoriteButton
+                infoButton
+                // Editor hanya untuk image; video tidak menyisakan placeholder.
+                if !currentAsset.isVideo { editPhotoButton }
+            }
 
-        // Tengah: favorite, info, add to album dalam satu grup. Grupnya
-        // selalu tampil; tombol di-disable sampai datanya siap. Kondisi
-        // enable/disable WAJIB dari @State — membacanya langsung dari vm di
-        // sini membuat nilainya beku di kondisi render pertama.
-        ToolbarItemGroup(placement: .bottomBar) {
-            favoriteButton
-            infoButton
-            albumMenu
+            ToolbarSpacer(.flexible, placement: .bottomBar)
+            ToolbarItem(placement: .bottomBar) { deleteButton }
         }
-
-        ToolbarSpacer(.flexible, placement: .bottomBar)
-
-        ToolbarItem(placement: .bottomBar) { deleteButton }
     }
 
     private var shareButton: some View {
@@ -767,7 +935,7 @@ struct AssetDetailView: View {
 
     private var favoriteButton: some View {
         Button {
-            let id = currentAsset.id
+            guard let id = currentServerAssetID else { return }
             Task {
                 if await vm?.toggleFavorite(id) == true {
                     favoriteFeedback += 1
@@ -777,6 +945,7 @@ struct AssetDetailView: View {
         } label: {
             favoriteIcon
         }
+        .disabled(currentServerAssetID == nil)
 
     }
 
@@ -805,36 +974,48 @@ struct AssetDetailView: View {
         .disabled(!hasDetail)
     }
 
-    private var albumMenu: some View {
-        Menu {
-            Button {
-                isPickingAlbum = true
-            } label: {
-                Label("Add to Album", systemImage: "rectangle.stack.badge.plus")
-            }
-
-            Section("Move to") {
-                Button {
-                    moveAsset(to: .archive)
-                } label: {
-                    Label("Archive", systemImage: "archivebox")
-                }
-
-                Button {
-                    moveAsset(to: .locked)
-                } label: {
-                    Label("Locked Folder", systemImage: "lock")
-                }
-            }
+    private var editPhotoButton: some View {
+        Button {
+            preparePhotoEditor()
         } label: {
-            Image(systemName: "rectangle.stack.badge.plus")
+            if isPreparingEditor {
+                ProgressView()
+            } else {
+                Image(systemName: "crop.rotate")
+            }
         }
+        .disabled(currentServerAssetID == nil || editablePixelSize == nil || isPreparingEditor)
+        .accessibilityLabel("Edit Photo")
+    }
 
+    private func preparePhotoEditor() {
+        guard let serverID = currentServerAssetID, !isPreparingEditor else { return }
+        isPreparingEditor = true
+        Task {
+            defer { isPreparingEditor = false }
+            guard let edits = await vm?.edits(for: serverID) else { return }
+            existingPhotoEdits = edits
+            isEditingPhoto = true
+        }
+    }
+
+    private var uploadButton: some View {
+        Button {
+            uploadLocalAsset()
+        } label: {
+            if isUploadingLocalAsset {
+                ProgressView()
+            } else {
+                Label("Upload", systemImage: "icloud.and.arrow.up")
+            }
+        }
+        .disabled(isUploadingLocalAsset)
     }
 
     private func moveAsset(to visibility: AssetDetailRepository.Visibility) {
+        guard let serverID = currentServerAssetID else { return }
         Task {
-            if await vm?.move(currentAsset.id, to: visibility) == true {
+            if await vm?.move(serverID, to: visibility) == true {
                 removeCurrentAsset()
             }
         }
@@ -888,8 +1069,9 @@ struct AssetDetailView: View {
     }
 
     private func performDelete() {
+        guard let serverID = currentServerAssetID else { return }
         Task {
-            if await vm?.delete(currentAsset.id) == true {
+            if await vm?.delete(serverID) == true {
                 deleteFeedback += 1
                 removeCurrentAsset()
             }
@@ -906,30 +1088,199 @@ struct AssetDetailView: View {
     }
 
     private func shareFile() async {
-        guard let vm, !isPreparingShare else { return }
+        guard !isPreparingShare else { return }
 
         isPreparingShare = true
         defer { isPreparingShare = false }
 
-        // Sheet sengaja tidak dibuka lebih dulu: UIActivityViewController
-        // butuh URL file yang sudah ada isinya, jadi unduhan harus selesai
-        // dulu. Spinner di tombol yang menutupi jedanya.
-        guard let data = await vm.downloadOriginal(currentAsset.id) else { return }
+        guard let file = await currentFileURL() else { return }
+        downloadedFileURL = file
+        sharePreviewImage = currentAsset.isVideo ? nil : UIImage(contentsOfFile: file.path)
+        isSharePresented = true
+    }
 
-        let filename = vm.detail?.originalFileName ?? "\(currentAsset.id).jpg"
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(filename)
-        do {
-            try data.write(to: tempURL)
-            downloadedFileURL = tempURL
-            // Didecode dari file yang baru saja diunduh, bukan diambil dari
-            // cache: byte-nya sudah ada di tangan, dan pratinjau share sheet
-            // hanya sekali dipakai — tidak sepadan dengan mengintip cache.
-            sharePreviewImage = UIImage(data: data)
-            isSharePresented = true
-        } catch {
-            vm.actionError = ErrorEvent(error.localizedDescription)
+    private var currentServerAssetID: String? {
+        serverAssetID(for: currentAsset)
+    }
+
+    private func serverAssetID(for asset: AssetLite) -> String? {
+        guard LocalPhotoLibrary.isLocal(asset.id) else {
+            return asset.origin == .device ? nil : asset.id
         }
+        let localID = LocalPhotoLibrary.localIdentifier(from: asset.id)
+        return SwiftDataManager.shared.serverAssetIDsByLocalIdentifier()[localID]
+    }
+
+    private var editablePixelSize: CGSize? {
+        guard let exif = vm?.detail?.exifInfo,
+              let width = exif.exifImageWidth,
+              let height = exif.exifImageHeight,
+              width > 0, height > 0
+        else { return nil }
+
+        // Samakan dengan `getDimensions()` milik server Immich. Crop endpoint
+        // memvalidasi terhadap dimensi yang sudah memperhitungkan EXIF rotate.
+        let orientation = Int(exif.orientation ?? "")
+        let swapsDimensions = orientation.map { [5, 6, 7, 8, -90, 90].contains($0) } ?? false
+        return swapsDimensions
+            ? CGSize(width: height, height: width)
+            : CGSize(width: width, height: height)
+    }
+
+    /// Memilih salinan lokal lebih dulu; server hanya disentuh kalau aset belum
+    /// ada di perangkat. Ini membuat Share pada foto lokal benar-benar lokal.
+    private func currentFileURL() async -> URL? {
+        if currentAsset.isOnDevice {
+            let localIdentifier: String?
+            if LocalPhotoLibrary.isLocal(currentAsset.id) {
+                localIdentifier = LocalPhotoLibrary.localIdentifier(from: currentAsset.id)
+            } else {
+                localIdentifier = SwiftDataManager.shared.localIdentifier(
+                    forServerAsset: currentAsset.id)
+            }
+
+            if let localIdentifier,
+               let file = await LocalPhotoLibrary.shared.originalFile(
+                   for: LocalPhotoLibrary.assetID(for: localIdentifier)) {
+                return file.url
+            }
+        }
+
+        guard let serverID = currentServerAssetID, let vm else { return nil }
+        let filename = vm.detail?.originalFileName
+            ?? (currentAsset.isVideo ? "video.mov" : "photo.jpg")
+        return await vm.downloadOriginalFile(serverID, filename: filename)
+    }
+
+    private func createSharedLink(for serverID: String) {
+        let repo = SharedLinkRepository(api: APIClient(session: session))
+        Task {
+            do {
+                let link = try await repo.create(assetIds: [serverID])
+                guard let url = link.publicURL(base: session.baseURL) else {
+                    throw APIError.invalidURL
+                }
+                sharedLink = SharedLinkPresentation(url: url)
+            } catch {
+                vm?.actionError = ErrorEvent(error.localizedDescription)
+            }
+        }
+    }
+
+    private func uploadLocalAsset() {
+        guard currentAsset.needsUpload else { return }
+        isUploadingLocalAsset = true
+        let id = currentAsset.id
+        Task {
+            await BackupService.shared.uploadNow([id])
+            isUploadingLocalAsset = false
+        }
+    }
+
+    private func downloadToDevice() {
+        guard currentAsset.origin == .server,
+              let serverID = currentServerAssetID,
+              let vm,
+              !isDownloadingToDevice
+        else { return }
+
+        isDownloadingToDevice = true
+        let filename = vm.detail?.originalFileName
+            ?? (currentAsset.isVideo ? "video.mov" : "photo.jpg")
+        let isVideo = currentAsset.isVideo
+        Task {
+            defer { isDownloadingToDevice = false }
+            guard let file = await vm.downloadOriginalFile(serverID, filename: filename)
+            else { return }
+            defer { try? FileManager.default.removeItem(at: file) }
+
+            guard let localID = await LocalPhotoLibrary.shared.saveDownloadedFile(
+                file, isVideo: isVideo)
+            else {
+                vm.actionError = ErrorEvent(String(localized: "Could not save to Photos."))
+                return
+            }
+            try? SwiftDataManager.shared.linkDeviceAsset(
+                localIdentifier: localID, to: serverID)
+            updateCurrentOrigin(.both)
+        }
+    }
+
+    private func setAsProfilePhoto() {
+        guard !currentAsset.isVideo, !isSettingProfilePhoto, let vm else { return }
+        isSettingProfilePhoto = true
+        Task {
+            defer { isSettingProfilePhoto = false }
+            guard let file = await currentFileURL() else {
+                vm.actionError = ErrorEvent(String(localized: "Could not prepare the profile photo."))
+                return
+            }
+            defer { try? FileManager.default.removeItem(at: file) }
+            guard let jpeg = await Self.profileJPEG(from: file) else {
+                vm.actionError = ErrorEvent(String(localized: "Could not prepare the profile photo."))
+                return
+            }
+            guard await vm.setProfileImage(jpeg, filename: "profile.jpg") else { return }
+            await session.refreshUser()
+        }
+    }
+
+    private nonisolated static func profileJPEG(from fileURL: URL) async -> Data? {
+        await Task.detached(priority: .userInitiated) {
+            guard let image = UIImage(contentsOfFile: fileURL.path),
+                  image.size.width > 0, image.size.height > 0 else { return nil }
+            let side = min(image.size.width, image.size.height)
+            let source = CGRect(
+                x: (image.size.width - side) / 2,
+                y: (image.size.height - side) / 2,
+                width: side,
+                height: side)
+            let outputSide = min(1024, side)
+            let renderer = UIGraphicsImageRenderer(
+                size: CGSize(width: outputSide, height: outputSide))
+            let result = renderer.image { _ in
+                image.draw(
+                    in: CGRect(
+                        x: -source.minX * outputSide / side,
+                        y: -source.minY * outputSide / side,
+                        width: image.size.width * outputSide / side,
+                        height: image.size.height * outputSide / side))
+            }
+            return result.jpegData(compressionQuality: 0.9)
+        }.value
+    }
+
+    private func removeFromDevice() {
+        let asset = currentAsset
+        Task {
+            if asset.origin == .both {
+                guard await DeviceCopyDeletion.perform(asset.id) else { return }
+                // Detail album perangkat memakai id PhotoKit. Setelah salinan
+                // perangkat dihapus, item itu memang tidak lagi termasuk dalam
+                // daftar ini; aset servernya tetap ada di timeline server.
+                if LocalPhotoLibrary.isLocal(asset.id) {
+                    removeCurrentAsset()
+                } else {
+                    updateCurrentOrigin(.server)
+                }
+            } else if asset.origin == .device {
+                guard await LocalPhotoLibrary.shared.delete([asset.id]) else { return }
+                removeCurrentAsset()
+            }
+        }
+    }
+
+    private func updateCurrentOrigin(_ origin: AssetOrigin) {
+        currentAsset.origin = origin
+        if pages.indices.contains(currentIndex), pages[currentIndex].id == currentAsset.id {
+            pages[currentIndex] = currentAsset
+        }
+    }
+
+    private func cleanupSharedFile() {
+        if let downloadedFileURL { try? FileManager.default.removeItem(at: downloadedFileURL) }
+        downloadedFileURL = nil
+        sharePreviewImage = nil
     }
 }
 

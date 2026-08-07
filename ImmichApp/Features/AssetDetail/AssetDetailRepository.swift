@@ -1,5 +1,52 @@
 import Foundation
 
+/// Satu operasi editor yang dipahami endpoint Immich `/assets/{id}/edits`.
+struct AssetEditCommand: Encodable, Sendable {
+    enum Payload: Sendable {
+        case crop(x: Int, y: Int, width: Int, height: Int)
+        case rotate(angle: Double)
+        case mirror(axis: String)
+    }
+
+    let payload: Payload
+
+    private enum CodingKeys: String, CodingKey { case action, parameters }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch payload {
+        case .crop(let x, let y, let width, let height):
+            struct Parameters: Encodable { let x: Int; let y: Int; let width: Int; let height: Int }
+            try container.encode("crop", forKey: .action)
+            try container.encode(
+                Parameters(x: x, y: y, width: width, height: height),
+                forKey: .parameters)
+        case .rotate(let angle):
+            struct Parameters: Encodable { let angle: Double }
+            try container.encode("rotate", forKey: .action)
+            try container.encode(Parameters(angle: angle), forKey: .parameters)
+        case .mirror(let axis):
+            struct Parameters: Encodable { let axis: String }
+            try container.encode("mirror", forKey: .action)
+            try container.encode(Parameters(axis: axis), forKey: .parameters)
+        }
+    }
+}
+
+struct AssetEditRecord: Decodable, Sendable {
+    struct Parameters: Decodable, Sendable {
+        let x: Int?
+        let y: Int?
+        let width: Int?
+        let height: Int?
+        let angle: Double?
+        let axis: String?
+    }
+
+    let action: String
+    let parameters: Parameters
+}
+
 class AssetDetailRepository {
     private let api: APIClient
 
@@ -69,5 +116,56 @@ class AssetDetailRepository {
 
     func downloadOriginal(_ id: String) async throws -> Data {
         try await api.rawData(.init(path: "/assets/\(id)/original"))
+    }
+
+    /// Original/hasil edit diunduh sebagai file agar video tidak masuk RAM.
+    func downloadOriginalFile(_ id: String, filename: String) async throws -> URL {
+        let temporary = try await api.rawFile(.init(
+            path: "/assets/\(id)/original",
+            query: [.init(name: "edited", value: "true")]))
+        let safeName = URL(fileURLWithPath: filename).lastPathComponent
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("asset-\(UUID().uuidString)-\(safeName)")
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        return destination
+    }
+
+    func applyEdits(_ edits: [AssetEditCommand], to id: String) async throws {
+        struct Body: Encodable { let edits: [AssetEditCommand] }
+        struct Response: Decodable { let assetId: String }
+        let _: Response = try await api.send(.json(
+            "/assets/\(id)/edits", method: .put, body: Body(edits: edits)))
+    }
+
+    func removeEdits(from id: String) async throws {
+        try await api.sendVoid(.init(path: "/assets/\(id)/edits", method: .delete))
+    }
+
+    func edits(for id: String) async throws -> [AssetEditRecord] {
+        struct Response: Decodable { let edits: [AssetEditRecord] }
+        let response: Response = try await api.send(.init(path: "/assets/\(id)/edits"))
+        return response.edits
+    }
+
+    /// Immich menerima avatar sebagai multipart dengan nama field `file`.
+    func setProfileImage(_ data: Data, filename: String) async throws {
+        struct Response: Decodable { let profileImagePath: String }
+
+        let boundary = "Profile-\(UUID().uuidString)"
+        var body = Data()
+        func append(_ text: String) {
+            if let bytes = text.data(using: .utf8) { body.append(bytes) }
+        }
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n")
+        append("Content-Type: image/jpeg\r\n\r\n")
+        body.append(data)
+        append("\r\n--\(boundary)--\r\n")
+
+        let _: Response = try await api.send(.init(
+            path: "/users/profile-image",
+            method: .post,
+            body: body,
+            extraHeaders: ["Content-Type": "multipart/form-data; boundary=\(boundary)"]))
     }
 }

@@ -11,11 +11,46 @@ import SwiftUI
 /// penantian hanya digambar di baris yang datanya memang harus ditanyakan ke
 /// server.
 struct SettingsView: View {
+    private enum BackupBadgeState: Equatable {
+        case uploading
+        case synced
+        case failed
+        case error
+        case waiting
+
+        var title: LocalizedStringKey {
+            switch self {
+            case .uploading: "Backing Up"
+            case .synced: "Synced to Server"
+            case .failed: "Backup Failed"
+            case .error: "Backup Error"
+            case .waiting: "Waiting to Back Up"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .uploading: "arrow.trianglehead.2.clockwise.rotate.90.icloud"
+            case .synced: "checkmark.icloud.fill"
+            case .failed: "xmark.icloud.fill"
+            case .error: "exclamationmark.icloud.fill"
+            case .waiting: "icloud"
+            }
+        }
+
+        var tint: Color {
+            switch self {
+            case .uploading, .failed: .red
+            case .synced: .green
+            case .error, .waiting: .orange
+            }
+        }
+    }
+
     @Environment(SessionManager.self) private var session
-    @Environment(\.dismiss) private var dismiss
     @State private var vm: SettingsViewModel
+    @State private var backup = BackupService.shared
     @State private var showLogoutAlert = false
-    @State private var showChangeServerAlert = false
 
     /// VM dibuat oleh pemanggilnya, bukan menyusul di `task` layar ini.
     ///
@@ -34,12 +69,10 @@ struct SettingsView: View {
             // Bar dibuat transparan supaya kepalanya terlihat sampai ke belakang
             // tombol tutup, seperti di referensi.
             .toolbarBackground(.hidden, for: .navigationBar)
-            .toolbar { closeButton }
             // Tiga pekerjaan yang benar-benar tidak saling bergantung, jadi
             // masing-masing berjalan sendiri: yang satu gagal atau lambat tidak
             // menahan dua lainnya.
             .task { await vm.loadServerInfo() }
-            .task { await vm.refreshCacheSize() }
             .task { await session.refreshUser() }
             .alert("Sign Out", isPresented: $showLogoutAlert) {
                 Button("Sign Out", role: .destructive) {
@@ -49,25 +82,6 @@ struct SettingsView: View {
             } message: {
                 Text("Are you sure you want to sign out?")
             }
-            .alert("Change Server", isPresented: $showChangeServerAlert) {
-                Button("Change", role: .destructive) {
-                    Task { await session.logout() }
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("You will be logged out and need to enter a new server URL.")
-            }
-    }
-
-    @ToolbarContentBuilder
-    private var closeButton: some ToolbarContent {
-        ToolbarItem(placement: .topBarTrailing) {
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-            }
-        }
     }
 
     // MARK: - Kepala
@@ -115,16 +129,37 @@ struct SettingsView: View {
         return "\(photos), \(videos)"
     }
 
-    /// Menyebut fotonya ADA DI SERVER, bukan mengklaim pencadangan otomatis
-    /// sedang berjalan — aplikasi ini belum melakukan itu, dan lencana yang
-    /// mengaku begitu akan menyesatkan.
     private var backupBadge: some View {
-        Label("Synced to server", systemImage: "icloud.fill")
-            .font(.footnote.weight(.medium))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(.fill.tertiary, in: .capsule)
+        let state = backupBadgeState
+
+        return HStack(spacing: 7) {
+            Image(systemName: state.symbol)
+                .contentTransition(.symbolEffect(.replace))
+                .symbolEffect(
+                    .rotate,
+                    options: .repeating,
+                    isActive: state == .uploading)
+            Text(state.title)
+        }
+        .font(.footnote.weight(.medium))
+        .foregroundStyle(state.tint)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.fill.tertiary, in: .capsule)
+        .animation(.smooth(duration: 0.25), value: state)
+    }
+
+    /// Error yang muncul ketika antrean masih berjalan perlu terlihat segera.
+    /// Setelah putaran selesai, jumlah `failures` menjadi ringkasan akhirnya dan
+    /// memakai cloud-xmark. `remainder` mencegah status synced muncul terlalu
+    /// dini ketika masih ada file yang menunggu kesempatan upload berikutnya.
+    private var backupBadgeState: BackupBadgeState {
+        if backup.isUploading {
+            return backup.lastError == nil ? .uploading : .error
+        }
+        if !backup.failures.isEmpty { return .failed }
+        if backup.lastError != nil { return .error }
+        return backup.remainder == 0 ? .synced : .waiting
     }
 
     // MARK: - Daftar
@@ -143,9 +178,9 @@ struct SettingsView: View {
             updateSection
             serverErrorSection
             librarySection
-            appearanceSection
             storageSection
             cacheSection
+            appearanceSection
             aboutSection
             accountSection
         }
@@ -159,12 +194,6 @@ struct SettingsView: View {
                 BackupView()
             } label: {
                 Label("Back Up Photos", systemImage: "arrow.up.circle")
-            }
-
-            NavigationLink {
-                DeviceAlbumsView()
-            } label: {
-                Label("Device Albums", systemImage: "iphone")
             }
         }
     }
@@ -295,22 +324,26 @@ struct SettingsView: View {
         return "\(used) of \(total) used"
     }
 
-    /// Ukurannya dibaca dari disk perangkat ini, jadi barisnya tidak ada
-    /// hubungannya dengan sambungan ke server.
+    /// Perawatan penyimpanan dikelompokkan di sini. Cache berada di Sync Status
+    /// karena ia bagian dari database/index lokal; Free Up Space tetap menjadi
+    /// alur terpisah karena ia menyentuh pustaka Photos milik pengguna.
     private var cacheSection: some View {
         Section {
-            Button {
-                Task { await vm.clearCache() }
+            NavigationLink {
+                SyncStatusView(session: session)
             } label: {
-                LabeledContent {
-                    Text(formatBytes(vm.cacheSize))
-                } label: {
-                    Label("Free Up Space", systemImage: "internaldrive")
-                }
+                Label("Sync Status", systemImage: "arrow.trianglehead.2.clockwise.rotate.90")
             }
-            .disabled(vm.cacheSize == 0)
+
+            NavigationLink {
+                FreeUpSpaceView()
+            } label: {
+                Label("Free Up Space", systemImage: "internaldrive")
+            }
+        } header: {
+            Text("Storage")
         } footer: {
-            Text("Removes cached photos from this device. They stay on the server.")
+            Text("Review synchronization data or remove backed-up device copies to reclaim storage.")
         }
     }
 
@@ -344,7 +377,6 @@ struct SettingsView: View {
 
     private var accountSection: some View {
         Section {
-            Button("Change Server") { showChangeServerAlert = true }
             Button("Sign Out", role: .destructive) { showLogoutAlert = true }
         } footer: {
             if let email = session.currentUser?.email {
@@ -357,5 +389,31 @@ struct SettingsView: View {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter.string(fromByteCount: Int64(bytes))
+    }
+}
+
+/// Pemilik `NavigationStack` sekaligus tombol penutup sheet.
+///
+/// Tombol sengaja ditempel ke stack, bukan ke halaman Settings pertama. Dengan
+/// begitu toolbar ini tetap hidup ketika pengguna mendorong Backup, Device
+/// Albums, atau halaman turunannya ke dalam stack yang sama.
+struct SettingsSheetView: View {
+    @Environment(\.dismiss) private var dismiss
+    let session: SessionManager
+
+    var body: some View {
+        NavigationStack {
+            SettingsView(session: session)
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .accessibilityLabel("Close Settings")
+            }
+        }
     }
 }

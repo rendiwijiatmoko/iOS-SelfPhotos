@@ -22,5 +22,13 @@
 		<string>app.immich.backup.refresh</string>
 		<string>app.immich.backup.processing</string>
 	</array>
+	<!-- Wajib untuk BGAppRefreshTask dan BGProcessingTask. Tanpa dua mode ini,
+	     identifier di atas terdaftar tetapi sistem tidak memberi aplikasi waktu
+	     eksekusi background yang dimintanya. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>processing</string>
+	</array>
 </dict>
 </plist>

@@ -45,6 +45,29 @@ class APIClient {
         return data
     }
 
+    /// Mengunduh respons langsung ke file sementara.
+    ///
+    /// Jalur ini dipakai untuk original photo/video. `data(for:)` menahan
+    /// seluruh video di RAM sebelum satu byte pun dapat disimpan ke Photos.
+    func rawFile(_ endpoint: Endpoint) async throws -> URL {
+        let request = try await makeRequest(endpoint)
+        do {
+            let (temporaryURL, response) = try await urlSession.download(for: request)
+            guard let http = response as? HTTPURLResponse else { throw APIError.unknown }
+            if !(200..<300).contains(http.statusCode) {
+                let errorData = (try? Data(contentsOf: temporaryURL)) ?? Data()
+                try validate(http, errorData)
+            }
+
+            let destination = FileManager.default.temporaryDirectory
+                .appendingPathComponent("download-\(UUID().uuidString)")
+            try FileManager.default.moveItem(at: temporaryURL, to: destination)
+            return destination
+        } catch let error as URLError where Self.meansOffline(error.code) {
+            throw APIError.notConnected
+        }
+    }
+
     /// Respons JSON Lines (mis. /sync/stream): satu objek JSON per baris.
     func streamLines(_ endpoint: Endpoint) async throws -> AsyncLineSequence<URLSession.AsyncBytes> {
         let req = try await makeRequest(endpoint)

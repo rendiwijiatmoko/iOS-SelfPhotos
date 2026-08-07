@@ -172,6 +172,43 @@ final class LibraryViewModel {
         }
     }
 
+    /// Menambal kartu album seketika dari daftar aset yang sudah benar di layar
+    /// detail. Nilai balik true berarti ada perubahan yang perlu direkonsiliasi
+    /// lagi dengan `/albums` di belakang layar.
+    @discardableResult
+    func applyAlbumContents(_ assets: [AssetLite], to id: String) -> Bool {
+        guard let index = albums.firstIndex(where: { $0.id == id }) else { return false }
+
+        var updated = albums[index]
+        let remainingIDs = Set(assets.map(\.id))
+        let newestID = assets.max(by: { $0.createdAt < $1.createdAt })?.id
+        let currentCoverStillExists = updated.albumThumbnailAssetId
+            .map(remainingIDs.contains) ?? false
+        let nextCover = currentCoverStillExists
+            ? updated.albumThumbnailAssetId
+            : newestID
+
+        guard updated.assetCount != assets.count
+                || updated.albumThumbnailAssetId != nextCover
+        else { return false }
+
+        updated.assetCount = assets.count
+        updated.albumThumbnailAssetId = nextCover
+        var patched = albums
+        patched[index] = updated
+        albums = patched
+        AlbumCoverStore.shared.invalidate(id)
+        LocalSnapshot.save(albums, for: LocalSnapshot.Key.libraryAlbums)
+        return true
+    }
+
+    /// Hanya menyegarkan baris album; perubahan dari Album Detail tidak perlu
+    /// menembak ulang Memories, Favorites, dan People.
+    func refreshAlbums(invalidatingCoverFor id: String? = nil) async {
+        if let id { AlbumCoverStore.shared.invalidate(id) }
+        apply(await fetchAlbums(), to: \.albums, key: LocalSnapshot.Key.libraryAlbums)
+    }
+
     // MARK: - Aksi foto
 
     /// Baris Favorites berisi HANYA foto favorit, jadi mencabut favorit berarti

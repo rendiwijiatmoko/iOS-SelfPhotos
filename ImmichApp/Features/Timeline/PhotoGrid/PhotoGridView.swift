@@ -440,6 +440,15 @@ final class PhotoGridController: UIViewController {
     override func viewSafeAreaInsetsDidChange() {
         super.viewSafeAreaInsetsDidChange()
         applyContentInsets()
+        // Tab bar/safe area sering selesai dihitung SETELAH snapshot pertama
+        // sudah diposisikan. Ulangi di run loop berikutnya dengan inset final;
+        // kalau tidak, baris terbaru berhenti di balik tab bar sampai pengguna
+        // menyentuh scroll view.
+        guard configuration.startsAtNewest, isAnchoredToNewest else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isAnchoredToNewest else { return }
+            _ = self.scrollToNewestIfNeeded()
+        }
     }
 
     /// Layar bersampul menolak penyesuaian inset otomatis.
@@ -701,11 +710,10 @@ final class PhotoGridController: UIViewController {
         // melemparkannya kembali ke awal.
         let animates = shouldAnimate(pending.snapshot)
 
-        // Penambatan HANYA untuk pemasangan tanpa animasi.
-        //
-        // Pembaruan beranimasi sudah menjaga posisinya sendiri lewat batch
-        // update UIKit; menimpanya dengan `setContentOffset` di akhir animasi
-        // justru menghasilkan sentakan tepat setelah gerakannya selesai.
+        // Penambatan foto tertentu hanya untuk pemasangan tanpa animasi.
+        // Pembaruan beranimasi menjaga posisi lama, tetapi kalau layar memang
+        // masih berjangkar ke newest, posisi lama itu justru harus digeser ke
+        // dasar baru setelah aset auto-backup disisipkan.
         let anchor = animates ? nil : currentAnchor()
 
         // SESUDAH jangkarnya dicatat, sebelum snapshotnya dipasang.
@@ -722,8 +730,16 @@ final class PhotoGridController: UIViewController {
         reconfigureChangedItems(in: &snapshot)
 
         dataSource.apply(snapshot, animatingDifferences: animates) { [weak self] in
-            guard let anchor else { return }
-            self?.restorePosition(anchor)
+            guard let self else { return }
+            if let anchor {
+                self.restorePosition(anchor)
+            } else if self.isAnchoredToNewest {
+                // Jalur inilah yang hilang: diff kecil dari auto-backup memakai
+                // animasi, `anchor` nil, lalu completion lama langsung pulang.
+                // Hasilnya baris baru ada di bawah tetapi belum terlihat sampai
+                // pengguna menggeser grid sendiri.
+                _ = self.scrollToNewestIfNeeded()
+            }
         }
     }
 
@@ -948,11 +964,21 @@ final class PhotoGridController: UIViewController {
         // ke dasar, memotong animasinya di tengah jalan.
         guard configuration.startsAtNewest, isAnchoredToNewest, !isReturningToNewest,
               isViewLoaded, collectionView.bounds.height > 0,
-              let last = lastItemIndexPath()
+              lastItemIndexPath() != nil
         else { return false }
 
-        collectionView.scrollToItem(at: last, at: .bottom, animated: false)
+        pinToNewestOffset()
         return true
+    }
+
+    /// Menetapkan offset maksimum secara eksplisit. `scrollToItem(.bottom)`
+    /// dapat memakai inset lama ketika tab bar baru muncul, sehingga item
+    /// terakhir memang terpilih tetapi sebagian barisnya masih tenggelam.
+    private func pinToNewestOffset() {
+        collectionView.layoutIfNeeded()
+        collectionView.setContentOffset(
+            CGPoint(x: 0, y: maxContentOffsetY()),
+            animated: false)
     }
 
     /// Ketukan kedua pada tab: kembali ke foto terbaru sekaligus memasang lagi
@@ -974,9 +1000,9 @@ final class PhotoGridController: UIViewController {
         flushPendingSnapshot()
 
         isAnchoredToNewest = true
-        guard let last = lastItemIndexPath() else { return }
+        guard lastItemIndexPath() != nil else { return }
         guard animated else {
-            collectionView.scrollToItem(at: last, at: .bottom, animated: false)
+            pinToNewestOffset()
             // Gulir tanpa animasi MEMOTONG lemparan yang masih meluncur, dan
             // UIKit tidak mengirim callback akhir-gulir untuk pemotongan itu.
             // Tanpa baris ini, menekan ulang tab di tengah lemparan meninggalkan
