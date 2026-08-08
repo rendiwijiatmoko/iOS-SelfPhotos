@@ -32,10 +32,15 @@ struct ProfileAvatar: View {
     /// Aksinya TIDAK berubah: menekannya tetap membuka pengaturan. Yang berubah
     /// hanya rupanya.
     var showsBackupState = false
+    /// Coach mark login pertama memakai avatar sebagai jangkar visual. Cincin
+    /// ini sengaja terpisah dari indikator upload: journey hanya aktif sebelum
+    /// backup disetel, jadi kedua animasi tidak saling berebut perhatian.
+    var isJourneyHighlighted = false
 
     @Environment(SessionManager.self) private var session
     @State private var backup = BackupService.shared
     @State private var isRingRotating = false
+    @State private var isJourneyPulsing = false
     /// Alasannya sama seperti di `AuthImage`: bitmap-nya milik cache, view ini
     /// hanya perlu digambar ulang saat pemuatannya selesai. Nilainya HARUS ikut
     /// dibaca di `body` supaya ketergantungannya benar-benar terbentuk.
@@ -44,6 +49,7 @@ struct ProfileAvatar: View {
     var body: some View {
         avatarCircle
             .overlay { uploadingRing }
+            .overlay { journeyRing }
             .animation(.smooth(duration: 0.3), value: isUploading)
             .task(id: cacheKey) { await load() }
     }
@@ -113,6 +119,24 @@ struct ProfileAvatar: View {
 
     private var isUploading: Bool {
         showsBackupState && backup.isUploading
+    }
+
+    @ViewBuilder
+    private var journeyRing: some View {
+        if isJourneyHighlighted {
+            Circle()
+                .stroke(Color.accentColor, lineWidth: 3)
+                .padding(-3)
+                .scaleEffect(isJourneyPulsing ? 1.18 : 1)
+                .opacity(isJourneyPulsing ? 0.18 : 0.95)
+                .animation(
+                    .easeInOut(duration: 0.9).repeatForever(autoreverses: true),
+                    value: isJourneyPulsing)
+                .onAppear { isJourneyPulsing = true }
+                .onDisappear { isJourneyPulsing = false }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
     }
 
     private var side: CGFloat {

@@ -251,13 +251,15 @@ struct FreeUpSpaceView: View {
                 Label("Continue", systemImage: "arrow.right")
                     .frame(maxWidth: .infinity)
             }
-            .tint(.primary)
-            .buttonStyle(.borderedProminent)
+            .tint(.accentColor)
+            .foregroundStyle(.primary)
+            .buttonStyle(.bordered)
             .controlSize(.large)
             .disabled(cutoffDate == nil || stage == .scanning || stage == .deleting)
         } header: {
             stepHeader(1, title: "Select Cutoff Date", active: true)
         }
+        .listRowSeparator(.hidden)
     }
 
     private var scanSection: some View {

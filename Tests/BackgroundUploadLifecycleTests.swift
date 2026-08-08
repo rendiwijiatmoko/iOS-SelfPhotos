@@ -26,6 +26,51 @@ final class BackgroundUploadQueueTests: XCTestCase {
         XCTAssertEqual(restored.owner?.userID, "user-1")
     }
 
+    func testCompletedBatchNotificationIsConsumedAcrossRelaunch() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let queue = BackupQueueStore(fileURL: fixture.queueURL)
+        try queue.enqueue(["local-a"])
+        try queue.markCompleted("local-a")
+
+        XCTAssertTrue(queue.snapshot.completionNotificationPending)
+        try queue.consumeCompletionNotification()
+
+        let restored = BackupQueueStore(fileURL: fixture.queueURL)
+        XCTAssertEqual(restored.snapshot.completed, 1)
+        XCTAssertFalse(restored.snapshot.completionNotificationPending)
+    }
+
+    func testNewBatchRearmsCompletionNotification() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let queue = BackupQueueStore(fileURL: fixture.queueURL)
+        try queue.enqueue(["first"])
+        try queue.markCompleted("first")
+        try queue.consumeCompletionNotification()
+
+        try queue.enqueue(["second"])
+
+        XCTAssertEqual(queue.snapshot.completed, 0)
+        XCTAssertEqual(queue.snapshot.queued, 1)
+        XCTAssertTrue(queue.snapshot.completionNotificationPending)
+    }
+
+    func testRediscoveringSameFailedItemDoesNotReplayCompletion() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let queue = BackupQueueStore(fileURL: fixture.queueURL)
+        try queue.enqueue(["failed"])
+        try queue.markFailed("failed", error: "invalid asset")
+        try queue.consumeCompletionNotification()
+
+        // Automatic scans rediscover failed local assets on every launch.
+        try queue.enqueue(["failed"])
+
+        XCTAssertFalse(queue.snapshot.completionNotificationPending)
+        XCTAssertEqual(queue.snapshot.failed, 1)
+    }
+
     func testStalePreparingItemBecomesRetryInsteadOfHangingForever() throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }

@@ -39,43 +39,46 @@ class TimelineRepository {
     /// berubah tanpa masa deprecation, jalur itu memerlukan satu request per
     /// bulan. Metadata search memberi hingga 1.000 aset per halaman dan punya
     /// kontrak pagination stabil.
-    func albumAssets(_ albumId: String) async throws -> [AssetLite] {
+    func albumAssets(
+        _ albumId: String,
+        expectedCount: Int? = nil
+    ) async throws -> [AssetLite] {
         let pageSize = 1_000
-        let first = try await albumPage(albumId, page: 1, size: pageSize)
-        var assets = first.assets.items.map(AssetLite.init)
+        var page = 1
+        var response = try await albumPage(albumId, page: page, size: pageSize)
+        var assets = response.assets.items.map(AssetLite.init)
+        var seenIDs = Set(assets.map(\.id))
 
-        let pageCount = max(1, (first.assets.total + pageSize - 1) / pageSize)
-        guard pageCount > 1 else { return assets }
+        // `nextPage` adalah continuation resmi dan tidak boleh diturunkan dari
+        // `total`. Beberapa server membatasi nilai total ke ukuran halaman
+        // (misalnya 1.000) tetapi tetap mengirim nextPage="2". Menghitung
+        // pageCount dari total membuat sisa album tidak pernah diminta.
+        //
+        // `total` tetap menjadi fallback untuk server lama yang tidak mengirim
+        // nextPage. Permintaan dibuat berurutan karena baru halaman saat ini
+        // yang dapat memastikan halaman berikutnya memang ada.
+        let knownTotal = max(response.assets.total, expectedCount ?? 0)
+        var pageCountFallback = max(1, (knownTotal + pageSize - 1) / pageSize)
+        while response.assets.nextPage != nil || page < pageCountFallback {
+            page += 1
+            response = try await albumPage(albumId, page: page, size: pageSize)
+            pageCountFallback = max(
+                pageCountFallback,
+                (response.assets.total + pageSize - 1) / pageSize)
 
-        // Batasi konkurensi agar album besar tidak membuka puluhan request dan
-        // decoder sekaligus. Empat halaman tetap jauh lebih cepat daripada
-        // request bucket berurutan tanpa menekan memori secara berlebihan.
-        let batchSize = 4
-        var start = 2
-        while start <= pageCount {
-            let end = min(start + batchSize - 1, pageCount)
-            var pages: [(Int, [AssetLite])] = try await withThrowingTaskGroup(
-                of: (Int, [AssetLite]).self
-            ) { group in
-                for page in start...end {
-                    group.addTask { [api] in
-                        var request = SearchRequestDTO(page: page)
-                        request.albumIds = [albumId]
-                        request.order = "desc"
-                        request.size = pageSize
-                        request.withExif = true
-                        let response: SearchResponseDTO = try await api.send(.json(
-                            "/search/metadata", method: .post, body: request))
-                        return (page, response.assets.items.map(AssetLite.init))
-                    }
+            // Perubahan album saat pagination berjalan dapat membuat batas dua
+            // halaman tumpang tindih. Deduplikasi menjaga grid dan count tetap
+            // konsisten tanpa membuang item baru pada halaman berikutnya.
+            for item in response.assets.items {
+                let asset = AssetLite(item)
+                if seenIDs.insert(asset.id).inserted {
+                    assets.append(asset)
                 }
-                var values: [(Int, [AssetLite])] = []
-                for try await value in group { values.append(value) }
-                return values
             }
-            pages.sort { $0.0 < $1.0 }
-            assets.append(contentsOf: pages.flatMap(\.1))
-            start = end + 1
+
+            // Lindungi dari server bermasalah yang terus memberi nextPage pada
+            // halaman kosong; tanpa ini satu album bisa membuat loop permanen.
+            if response.assets.items.isEmpty { break }
         }
         return assets
     }

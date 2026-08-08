@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Aplikasi tidak mengimplementasikan enkripsi non-exempt. HTTPS/TLS memakai
+	     API sistem Apple; CryptoKit hanya dipakai untuk checksum SHA-1/SHA-256. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<!-- Pengenal tugas latar HARUS terdaftar di sini.
 
 	     Ini satu-satunya alasan berkas ini ada: nilainya sebuah array, dan

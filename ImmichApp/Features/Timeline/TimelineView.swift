@@ -13,6 +13,9 @@ struct TimelineView: View {
     /// Naik satu setiap tab Photos ditekan ulang; memicu kembali ke posisi
     /// default, yaitu paling bawah (foto terbaru).
     var resetScrollRequest = 0
+    /// Mencegah tab yang sedang tidak terlihat ikut mempresentasikan coach mark
+    /// dari toolbar yang mungkin sudah dibangun lebih dulu oleh TabView.
+    var isActive = true
 
     @Environment(SessionManager.self) private var session
     @Environment(\.scenePhase) private var scenePhase
@@ -51,6 +54,7 @@ struct TimelineView: View {
     /// Pegangan ke controller grid, untuk perintah yang datang dari luar —
     /// ketukan kedua tab Photos, misalnya.
     @State private var gridController: PhotoGridController?
+    @State private var backupSetupJourney = BackupSetupJourney.shared
 
     var body: some View {
         NavigationStack {
@@ -68,6 +72,18 @@ struct TimelineView: View {
                 .toolbar(isSelecting ? .visible : .hidden, for: .bottomBar)
         }
         .sheet(isPresented: $showSettings) { settingsSheet }
+        .onChange(of: showSettings) { _, isPresented in
+            if !isPresented {
+                Task { @MainActor in
+                    // Tunggu animasi dismiss sheet selesai. Membuka TipKit saat
+                    // presentation controller lama masih turun dapat membuat
+                    // overlay tak terlihat yang menahan tap toolbar.
+                    try? await Task.sleep(for: .milliseconds(450))
+                    guard !showSettings else { return }
+                    backupSetupJourney.returnToProfileIfNeeded()
+                }
+            }
+        }
         .sheet(isPresented: $isSharePresented) {
             if let url = shareFileURL {
                 ShareSheet(url: url)
@@ -424,12 +440,9 @@ struct TimelineView: View {
         ToolbarItem(placement: .topBarTrailing) { selectButton }
         if !isSelecting {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
+                JourneyProfileButton(isActive: isActive) {
                     showSettings = true
-                } label: {
-                    ProfileAvatar(style: .toolbar, showsBackupState: true)
                 }
-                .buttonStyle(.plain)
             }
             // Avatarnya sudah bulat penuh; kapsul kaca bawaan toolbar hanya
             // menambah lingkaran kedua yang lebih besar di belakangnya.

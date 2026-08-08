@@ -116,7 +116,11 @@ final class BackupNotifier: NSObject {
 
         if queue.unfinished == 0 {
             lastQueuePresentationKey = nil
-            finish(uploaded: queue.completed, failed: queue.failed)
+            if queue.completionNotificationPending {
+                finish(uploaded: queue.completed, failed: queue.failed)
+            } else {
+                clearProgress()
+            }
             return
         }
 

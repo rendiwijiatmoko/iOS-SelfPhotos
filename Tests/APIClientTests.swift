@@ -137,9 +137,12 @@ final class APIClientTests: XCTestCase {
 }
 
 final class MockURLProtocol: URLProtocol {
+    typealias ResponseProvider = (URLRequest) -> (Data?, URLResponse?, Error?)
+
     static var mockData: Data?
     static var mockResponse: URLResponse?
     static var mockError: Error?
+    static var responseProvider: ResponseProvider?
     static var lastRequest: URLRequest?
     static var lastRequestBody: Data?
 
@@ -147,6 +150,7 @@ final class MockURLProtocol: URLProtocol {
         mockData = nil
         mockResponse = nil
         mockError = nil
+        responseProvider = nil
         lastRequest = nil
         lastRequestBody = nil
     }
@@ -162,6 +166,22 @@ final class MockURLProtocol: URLProtocol {
     override func startLoading() {
         Self.lastRequest = request
         Self.lastRequestBody = request.httpBody ?? Self.readBodyStream(request.httpBodyStream)
+
+        if let responseProvider = Self.responseProvider {
+            let (data, response, error) = responseProvider(request)
+            if let error {
+                client?.urlProtocol(self, didFailWithError: error)
+                return
+            }
+            if let response {
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            }
+            if let data {
+                client?.urlProtocol(self, didLoad: data)
+            }
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
 
         if let error = Self.mockError {
             client?.urlProtocol(self, didFailWithError: error)

@@ -1,82 +1,88 @@
 import SwiftUI
 
-/// Layar masuk: alamat server dan kredensial dalam SATU halaman.
-///
-/// Sebelumnya dua langkah berurutan. Memisahkannya tidak memberi apa pun kepada
-/// pengguna — keduanya sama-sama harus benar sebelum ada yang terjadi — dan
-/// justru menambah satu ketukan serta satu layar yang harus di-"Back".
+/// Login dua tahap: server dibuktikan lebih dulu, kredensial baru diminta
+/// setelah endpoint publik, versi, dan capability-nya lolos pemeriksaan.
 struct OnboardingView: View {
     @Environment(SessionManager.self) private var session
     @State private var vm: OnboardingViewModel?
+    @State private var showsCredentials = false
+    @State private var errorEvent: ErrorEvent?
 
     var body: some View {
         Group {
             if let vm {
-                form(vm)
+                flow(vm)
             } else {
                 Color.clear.onAppear { vm = OnboardingViewModel(session: session) }
             }
         }
     }
 
-    private func form(_ vm: OnboardingViewModel) -> some View {
+    private func flow(_ vm: OnboardingViewModel) -> some View {
+        NavigationStack {
+            serverPage(vm)
+                .navigationDestination(isPresented: $showsCredentials) {
+                    credentialsPage(vm)
+                }
+        }
+        .errorToast($errorEvent)
+        .onChange(of: showsCredentials) { _, isPresented in
+            if !isPresented { vm.prepareToEditServer() }
+        }
+    }
+
+    // MARK: - Tahap server
+
+    private func serverPage(_ vm: OnboardingViewModel) -> some View {
         @Bindable var vm = vm
 
-        return ScrollView {
-            VStack(spacing: 28) {
-                masthead
-                serverField(vm)
-                credentials(vm)
-                submitArea(vm)
+        return loginScroll {
+            masthead(
+                title: "Connect to Immich",
+                subtitle: "Enter the address of your Immich server.")
+
+            field("Server") {
+                TextField("http://your-server-ip:port", text: $vm.serverText)
+                    .textInputAutocapitalization(.never)
+                    .textContentType(.URL)
+                    .keyboardType(.URL)
+                    .autocorrectionDisabled()
+                    .submitLabel(.continue)
+                    .onSubmit { connect(vm) }
             }
-            .padding(.horizontal, 24)
-            .padding(.top, 48)
-            .padding(.bottom, 32)
-            .frame(maxWidth: 480)
-            .frame(maxWidth: .infinity)
+
+            Button { connect(vm) } label: {
+                buttonLabel("Continue", isLoading: vm.phase.isLoading)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(!vm.canConnect || vm.phase.isLoading)
         }
-        // Kolom terakhir tidak boleh tertutup papan ketik pada layar pendek.
-        .scrollDismissesKeyboard(.interactively)
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
-    // MARK: - Kepala
-
-    private var masthead: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "photo.stack.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.tint)
-
-            Text("Immich")
-                .font(.largeTitle.bold())
-
-            Text("Sign in to your own photo server.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+    private func connect(_ vm: OnboardingViewModel) {
+        Task {
+            guard await vm.connectToServer() else {
+                presentCurrentError(from: vm)
+                return
+            }
+            showsCredentials = true
         }
-        .padding(.bottom, 8)
     }
 
-    // MARK: - Kolom
+    // MARK: - Tahap kredensial
 
-    private func serverField(_ vm: OnboardingViewModel) -> some View {
+    private func credentialsPage(_ vm: OnboardingViewModel) -> some View {
         @Bindable var vm = vm
 
-        return field("Server") {
-            TextField("https://immich.example.com", text: $vm.serverText)
-                .textInputAutocapitalization(.never)
-                .textContentType(.URL)
-                .keyboardType(.URL)
-                .autocorrectionDisabled()
-                .submitLabel(.next)
-        }
-    }
+        return loginScroll {
+            masthead(
+                title: "Sign In",
+                subtitle: "Choose how you want to authenticate.",
+                logoSize: 48)
 
-    @ViewBuilder
-    private func credentials(_ vm: OnboardingViewModel) -> some View {
-        @Bindable var vm = vm
-
-        VStack(spacing: 16) {
             methodPicker(vm)
 
             switch vm.method {
@@ -89,11 +95,12 @@ struct OnboardingView: View {
                         .autocorrectionDisabled()
                         .submitLabel(.next)
                 }
+
                 field("Password") {
                     SecureField("Required", text: $vm.password)
                         .textContentType(.password)
                         .submitLabel(.go)
-                        .onSubmit { Task { await vm.submit() } }
+                        .onSubmit { signIn(vm) }
                 }
 
             case .apiKey:
@@ -101,18 +108,37 @@ struct OnboardingView: View {
                     SecureField("Required", text: $vm.apiKey)
                         .textContentType(.password)
                         .submitLabel(.go)
-                        .onSubmit { Task { await vm.submit() } }
+                        .onSubmit { signIn(vm) }
                 }
+
                 Text("Generate an API key in your Immich account settings.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+
+            Button { signIn(vm) } label: {
+                buttonLabel("Sign In", isLoading: vm.phase.isLoading)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(!vm.canSubmit || vm.phase.isLoading)
+        }
+        .navigationTitle("Sign In")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func signIn(_ vm: OnboardingViewModel) {
+        Task {
+            guard await vm.signIn() else {
+                presentCurrentError(from: vm)
+                return
+            }
         }
     }
 
-    /// API Key selalu tersedia — justru di server OAuth-only, tempat login kata
-    /// sandi dimatikan, itulah satu-satunya cara masuk.
+    /// API Key selalu tersedia. Pada server yang mematikan password login,
+    /// hanya pilihan ini yang ditampilkan dan dipilih otomatis oleh view model.
     private func methodPicker(_ vm: OnboardingViewModel) -> some View {
         @Bindable var vm = vm
 
@@ -123,13 +149,46 @@ struct OnboardingView: View {
             Text("API Key").tag(OnboardingViewModel.Method.apiKey)
         }
         .pickerStyle(.segmented)
-        .onChange(of: vm.features?.passwordLogin) { _, enabled in
-            if enabled == false { vm.method = .apiKey }
-        }
     }
 
-    /// Label kecil di atas kolom, bukan placeholder di dalamnya: placeholder
-    /// hilang begitu diketik, dan pengguna kehilangan penanda kolom mana itu.
+    // MARK: - Komponen
+
+    private func loginScroll<Content: View>(
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                content()
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 36)
+            .padding(.bottom, 32)
+            .frame(maxWidth: 480)
+            .frame(maxWidth: .infinity)
+        }
+        .scrollDismissesKeyboard(.interactively)
+    }
+
+    private func masthead(
+        title: LocalizedStringKey,
+        subtitle: LocalizedStringKey,
+        logoSize: CGFloat = 58
+    ) -> some View {
+        VStack(spacing: 10) {
+            ImmichTortoiseLogo(size: logoSize)
+                .accessibilityHidden(true)
+
+            Text(title)
+                .font(.largeTitle.bold())
+
+            Text(subtitle)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(.bottom, 8)
+    }
+
     private func field<Content: View>(
         _ label: LocalizedStringKey,
         @ViewBuilder content: () -> Content
@@ -146,35 +205,26 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Kirim
-
-    @ViewBuilder
-    private func submitArea(_ vm: OnboardingViewModel) -> some View {
-        VStack(spacing: 12) {
-            if case .failed(let message) = vm.phase {
-                Label(message, systemImage: "exclamationmark.triangle.fill")
-                    .font(.footnote)
-                    .foregroundStyle(Color.red)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+    private func buttonLabel(
+        _ title: LocalizedStringKey,
+        isLoading: Bool
+    ) -> some View {
+        Group {
+            if isLoading {
+                ProgressView()
+            } else {
+                Text(title)
             }
-
-            Button {
-                Task { await vm.submit() }
-            } label: {
-                Group {
-                    if vm.phase.isLoading {
-                        ProgressView()
-                    } else {
-                        Text("Sign In")
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: 22)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(!vm.canSubmit || vm.phase.isLoading)
         }
+        .frame(maxWidth: .infinity)
+        .frame(height: 22)
+    }
+
+    private func presentCurrentError(from vm: OnboardingViewModel) {
+        guard let message = vm.phase.errorMessage else { return }
+        // ErrorEvent beridentitas baru membuat kegagalan berulang tetap
+        // memunculkan toast dan haptic baru walaupun teksnya sama.
+        errorEvent = ErrorEvent(message)
     }
 }
 

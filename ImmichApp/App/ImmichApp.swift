@@ -1,4 +1,5 @@
 import SwiftUI
+import TipKit
 import UIKit
 
 /// Ada HANYA untuk satu panggilan yang tidak punya padanan di SwiftUI.
@@ -52,6 +53,7 @@ struct ImmichApp: App {
     @State private var session = SessionManager()
 
     init() {
+        try? Tips.configure([.displayFrequency(.immediate)])
         // Pendaftaran tugas latar harus terjadi SEBELUM peluncuran selesai.
         // `BGTaskScheduler` menegakkan itu dengan keras: mendaftar belakangan
         // menjatuhkan aplikasinya, bukan sekadar gagal.

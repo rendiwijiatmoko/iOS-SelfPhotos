@@ -4,7 +4,16 @@ import Observation
 @MainActor
 @Observable
 final class OnboardingViewModel {
-    var serverText = ""
+    var serverText = "" {
+        didSet {
+            guard let validatedServerText,
+                  normalized(serverText) != validatedServerText
+            else { return }
+            self.validatedServerText = nil
+            features = nil
+            phase = .idle
+        }
+    }
     var email = ""
     var password = ""
     var apiKey = ""
@@ -16,6 +25,7 @@ final class OnboardingViewModel {
     /// Dipakai untuk menyembunyikan tab yang tidak berlaku — mis. server
     /// OAuth-only yang mematikan login kata sandi.
     var features: ServerFeaturesDTO?
+    private(set) var validatedServerText: String?
 
     enum Method: String, CaseIterable, Identifiable {
         case password, apiKey
@@ -42,32 +52,53 @@ final class OnboardingViewModel {
         UserDefaults.standard.removeObject(forKey: lastServerKey)
     }
 
+    var canConnect: Bool {
+        !normalized(serverText).isEmpty
+    }
+
     var canSubmit: Bool {
-        guard !serverText.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        guard validatedServerText != nil else { return false }
         switch method {
         case .password: return !email.isEmpty && !password.isEmpty
         case .apiKey:   return !apiKey.isEmpty
         }
     }
 
-    /// Menyambung dan masuk dalam SATU tindakan.
-    ///
-    /// Dulu ini dua langkah terpisah dengan layar sendiri-sendiri. Memisahkannya
-    /// tidak memberi apa pun kepada pengguna — alamat server dan kredensial
-    /// sama-sama harus benar sebelum ada yang terjadi — dan justru menambah satu
-    /// ketukan serta satu layar yang harus di-"Back".
-    func submit() async {
+    /// Tahap pertama hanya menyentuh endpoint publik. Kredensial belum pernah
+    /// dikirim ketika alamat salah, server tidak tersedia, atau versinya tidak
+    /// kompatibel.
+    @discardableResult
+    func connectToServer() async -> Bool {
+        guard canConnect else { return false }
         phase = .loading
         do {
             try session.setServer(serverText)
-            // Kredensial baru boleh dikirim setelah alamat ini terbukti Immich,
-            // versi API-nya didukung, dan capability-nya berhasil dibaca.
             let compatibility = try await session.checkServerCompatibility()
             features = compatibility.features
+            validatedServerText = normalized(serverText)
+            if !compatibility.features.passwordLogin {
+                method = .apiKey
+            }
+            phase = .loaded(())
+            return true
+        } catch {
+            validatedServerText = nil
+            features = nil
+            phase = .failed(message(for: error))
+            return false
+        }
+    }
 
+    /// Tahap kedua hanya mengirim kredensial ke server yang sudah lolos tahap
+    /// koneksi. Kembali ke halaman server dan mengubah alamat membatalkan gate.
+    @discardableResult
+    func signIn() async -> Bool {
+        guard canSubmit else { return false }
+        phase = .loading
+        do {
             switch method {
             case .password:
-                guard compatibility.features.passwordLogin else {
+                guard features?.passwordLogin == true else {
                     throw ServerCompatibilityError.passwordLoginUnavailable
                 }
                 try await session.loginPassword(email: email, password: password)
@@ -76,9 +107,20 @@ final class OnboardingViewModel {
             }
 
             UserDefaults.standard.set(serverText, forKey: Self.lastServerKey)
+            phase = .loaded(())
+            return true
         } catch {
             phase = .failed(message(for: error))
+            return false
         }
+    }
+
+    func prepareToEditServer() {
+        phase = .idle
+    }
+
+    private func normalized(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Galat sambungan dan galat kredensial dibedakan: keduanya menuntut

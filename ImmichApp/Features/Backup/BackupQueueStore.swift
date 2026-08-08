@@ -61,6 +61,9 @@ struct BackupQueueSnapshot: Equatable, Sendable {
     let waitingForAuthentication: Int
     let retryScheduled: Int
     let failed: Int
+    /// True only until the terminal notification for this batch is consumed.
+    /// Persisting it prevents a completed queue from looking new after launch.
+    let completionNotificationPending: Bool
     let nextAttemptAt: Date?
     let lastError: String?
 
@@ -159,6 +162,10 @@ final class BackupQueueStore {
         var owner: BackupQueueOwner?
         var completed = 0
         var items: [BackupQueueItem] = []
+        // Optional keeps queues written by older app versions decodable. An
+        // absent value is treated as already consumed so an old completion is
+        // not replayed immediately after upgrading.
+        var completionNotificationPending: Bool?
     }
 
     private(set) var snapshot: BackupQueueSnapshot
@@ -229,7 +236,9 @@ final class BackupQueueStore {
             ledger.completed = 0
         }
         var known = Set(ledger.items.map(\.id))
+        var insertedNewItem = false
         for id in localIdentifiers where known.insert(id).inserted {
+            insertedNewItem = true
             ledger.items.append(BackupQueueItem(
                 id: id,
                 phase: .primaryAsset,
@@ -242,6 +251,9 @@ final class BackupQueueStore {
                 motionAssetID: nil,
                 createdAt: now,
                 updatedAt: now))
+        }
+        if insertedNewItem {
+            ledger.completionNotificationPending = true
         }
         try persist()
     }
@@ -323,12 +335,25 @@ final class BackupQueueStore {
             item.taskIdentifier = nil
             item.updatedAt = now
         }
+        // Also arms legacy queues that predate the persisted notification flag.
+        ledger.completionNotificationPending = true
+        try persist()
     }
 
     func markCompleted(_ id: String) throws {
         guard let index = ledger.items.firstIndex(where: { $0.id == id }) else { return }
         ledger.items.remove(at: index)
         ledger.completed += 1
+        ledger.completionNotificationPending = true
+        try persist()
+    }
+
+    /// Atomically records that the terminal result for the current batch has
+    /// been handed to Notification Center. Repeated cold launches can then
+    /// render the completed queue without creating another banner.
+    func consumeCompletionNotification() throws {
+        guard ledger.completionNotificationPending == true else { return }
+        ledger.completionNotificationPending = false
         try persist()
     }
 
@@ -388,7 +413,10 @@ final class BackupQueueStore {
             ledger.items[index].updatedAt = now
             changed = true
         }
-        if changed { try persist() }
+        if changed {
+            ledger.completionNotificationPending = true
+            try persist()
+        }
     }
 
     /// Memadankan queue dengan task yang benar-benar masih dimiliki
@@ -429,6 +457,7 @@ final class BackupQueueStore {
                     motionAssetID: nil,
                     createdAt: now,
                     updatedAt: now))
+                ledger.completionNotificationPending = true
                 changed = true
             }
         }
@@ -508,6 +537,7 @@ final class BackupQueueStore {
             waitingForAuthentication: count(.waitingForAuthentication),
             retryScheduled: count(.retryScheduled),
             failed: count(.failed),
+            completionNotificationPending: ledger.completionNotificationPending ?? false,
             nextAttemptAt: ledger.items.compactMap(\.nextAttemptAt).min(),
             lastError: ledger.items
                 .sorted { $0.updatedAt > $1.updatedAt }

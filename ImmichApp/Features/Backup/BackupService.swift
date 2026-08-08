@@ -1106,7 +1106,18 @@ final class BackupService {
         let revision = notificationRevision
         Task { [weak self] in
             await BackupNotifier.shared.ensureAuthorization(prompt: false)
-            guard self?.notificationRevision == revision else { return }
+            guard let self, self.notificationRevision == revision else { return }
+            if state.unfinished == 0, state.completionNotificationPending {
+                // Consume before posting. This intentionally guarantees
+                // at-most-once delivery across process termination: a launch
+                // can never reinterpret the same persisted completion as new.
+                do {
+                    try self.queue.consumeCompletionNotification()
+                } catch {
+                    self.lastError = error.localizedDescription
+                    return
+                }
+            }
             BackupNotifier.shared.update(queue: state)
         }
     }

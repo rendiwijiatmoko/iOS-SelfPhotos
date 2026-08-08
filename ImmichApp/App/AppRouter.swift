@@ -53,6 +53,8 @@ struct MainTabView: View {
     @State private var syncVM: SyncViewModel?
     @State private var selectedTab: TabID
     @State private var backupNotifier = BackupNotifier.shared
+    @State private var backupSetupJourney = BackupSetupJourney.shared
+    @State private var localPhotoLibrary = LocalPhotoLibrary.shared
     /// Naik satu setiap tab Photos ditekan ulang saat sudah aktif.
     @State private var photosResetRequest = 0
     /// Layar detail meminta pita offline menyingkir selama ia tampil.
@@ -114,11 +116,13 @@ struct MainTabView: View {
 
             TabView(selection: tabSelection) {
                 Tab("Photos", systemImage: "photo.on.rectangle.angled", value: TabID.photos) {
-                    TimelineView(resetScrollRequest: photosResetRequest)
+                    TimelineView(
+                        resetScrollRequest: photosResetRequest,
+                        isActive: selectedTab == .photos)
                 }
 
                 Tab("Library", systemImage: "photo.stack", value: TabID.library) {
-                    LibraryView()
+                    LibraryView(isActive: selectedTab == .library)
                 }
 
                 // Role .search membuat sistem menempatkannya terpisah di ujung
@@ -144,7 +148,11 @@ struct MainTabView: View {
         // sync itu, bukan dari endpoint linimasa. Tanpa akses ke sini, layar
         // Photos tidak punya cara tahu kapan datanya sudah ada.
         .environment(syncVM)
+        .onChange(of: localPhotoLibrary.selectedAlbumIDs) {
+            backupSetupJourney.refreshForAlbumSelection()
+        }
         .task {
+            backupSetupJourney.refreshForAlbumSelection()
             if backupNotifier.shouldSelectLibrary { openBackupTab() }
             // Splash hanya menutupi pembacaan linimasa. Kalau yang terbuka bukan
             // tab Photos, layar itu tidak pernah dibangun dan tidak ada yang

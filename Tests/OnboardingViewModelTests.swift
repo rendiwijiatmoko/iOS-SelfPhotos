@@ -29,6 +29,7 @@ final class OnboardingViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.apiKey.isEmpty)
         XCTAssertNil(viewModel.features)
         XCTAssertEqual(viewModel.method, .password)
+        XCTAssertFalse(viewModel.canConnect)
         XCTAssertFalse(viewModel.canSubmit)
         if case .idle = viewModel.phase {} else {
             XCTFail("Expected idle phase")
@@ -46,16 +47,19 @@ final class OnboardingViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.canSubmit)
     }
 
-    func testApiKeyMethodIgnoresEmailFields() {
+    func testApiKeyMethodIgnoresEmailFields() async {
+        mockSession.shouldSucceedPing = true
         viewModel.serverText = "https://immich.example.com"
         viewModel.method = .apiKey
+        let connected = await viewModel.connectToServer()
+        XCTAssertTrue(connected)
         XCTAssertFalse(viewModel.canSubmit)
 
         viewModel.apiKey = "key-123"
         XCTAssertTrue(viewModel.canSubmit)
     }
 
-    func testSubmitConnectsAndSignsIn() async {
+    func testConnectThenEmailSignIn() async {
         mockSession.shouldSucceedPing = true
         mockSession.shouldSucceedLogin = true
         mockSession.mockFeatures = ServerFeaturesDTO(
@@ -69,7 +73,14 @@ final class OnboardingViewModelTests: XCTestCase {
         viewModel.email = "user@example.com"
         viewModel.password = "password123"
 
-        await viewModel.submit()
+        let connected = await viewModel.connectToServer()
+        XCTAssertTrue(connected)
+
+        // Tahap server tidak pernah mengirim kredensial.
+        XCTAssertFalse(mockSession.isLoggedIn)
+        XCTAssertEqual(mockSession.loginPasswordCallCount, 0)
+        let signedIn = await viewModel.signIn()
+        XCTAssertTrue(signedIn)
 
         XCTAssertTrue(mockSession.isLoggedIn)
         XCTAssertEqual(mockSession.pingCallCount, 1)
@@ -82,14 +93,37 @@ final class OnboardingViewModelTests: XCTestCase {
     /// alamat yang baru saja gagal dihubungi hanya akan mengisikannya lagi lain
     /// kali.
     func testServerRememberedOnlyAfterSuccess() async {
-        mockSession.shouldSucceedPing = false
-        viewModel.serverText = "https://unreachable.example.com"
+        mockSession.shouldSucceedPing = true
+        mockSession.shouldSucceedLogin = true
+        viewModel.serverText = "https://immich.example.com"
         viewModel.email = "user@example.com"
         viewModel.password = "password123"
 
-        await viewModel.submit()
-
+        let connected = await viewModel.connectToServer()
+        XCTAssertTrue(connected)
         XCTAssertNil(UserDefaults.standard.string(forKey: "onboarding.lastServer"))
+        let signedIn = await viewModel.signIn()
+        XCTAssertTrue(signedIn)
+        XCTAssertEqual(
+            UserDefaults.standard.string(forKey: "onboarding.lastServer"),
+            "https://immich.example.com")
+    }
+
+    func testEditingServerAfterValidationLocksCredentialsAgain() async {
+        mockSession.shouldSucceedPing = true
+        viewModel.serverText = "https://immich.example.com"
+        viewModel.email = "user@example.com"
+        viewModel.password = "password123"
+
+        let connected = await viewModel.connectToServer()
+        XCTAssertTrue(connected)
+        XCTAssertTrue(viewModel.canSubmit)
+
+        viewModel.serverText = "https://another.example.com"
+
+        XCTAssertNil(viewModel.features)
+        XCTAssertNil(viewModel.validatedServerText)
+        XCTAssertFalse(viewModel.canSubmit)
     }
 
     func testUnreachableServerReportsFailure() async {
@@ -99,7 +133,8 @@ final class OnboardingViewModelTests: XCTestCase {
         viewModel.email = "user@example.com"
         viewModel.password = "password123"
 
-        await viewModel.submit()
+        let connected = await viewModel.connectToServer()
+        XCTAssertFalse(connected)
 
         XCTAssertFalse(mockSession.isLoggedIn)
         if case .failed(let msg) = viewModel.phase {
@@ -117,7 +152,10 @@ final class OnboardingViewModelTests: XCTestCase {
         viewModel.email = "user@example.com"
         viewModel.password = "wrongpassword"
 
-        await viewModel.submit()
+        let connected = await viewModel.connectToServer()
+        XCTAssertTrue(connected)
+        let signedIn = await viewModel.signIn()
+        XCTAssertFalse(signedIn)
 
         XCTAssertFalse(mockSession.isLoggedIn)
         if case .failed(let msg) = viewModel.phase {
@@ -135,7 +173,10 @@ final class OnboardingViewModelTests: XCTestCase {
         viewModel.method = .apiKey
         viewModel.apiKey = "valid-api-key-123"
 
-        await viewModel.submit()
+        let connected = await viewModel.connectToServer()
+        XCTAssertTrue(connected)
+        let signedIn = await viewModel.signIn()
+        XCTAssertTrue(signedIn)
 
         XCTAssertTrue(mockSession.isLoggedIn)
         XCTAssertEqual(mockSession.loginApiKeyCallCount, 1)
@@ -149,7 +190,10 @@ final class OnboardingViewModelTests: XCTestCase {
         viewModel.method = .apiKey
         viewModel.apiKey = "bad-key"
 
-        await viewModel.submit()
+        let connected = await viewModel.connectToServer()
+        XCTAssertTrue(connected)
+        let signedIn = await viewModel.signIn()
+        XCTAssertFalse(signedIn)
 
         XCTAssertFalse(mockSession.isLoggedIn)
         if case .failed(let msg) = viewModel.phase {
@@ -168,7 +212,8 @@ final class OnboardingViewModelTests: XCTestCase {
         viewModel.email = "user@example.com"
         viewModel.password = "password123"
 
-        await viewModel.submit()
+        let connected = await viewModel.connectToServer()
+        XCTAssertFalse(connected)
 
         XCTAssertFalse(mockSession.isLoggedIn)
         XCTAssertEqual(mockSession.loginPasswordCallCount, 0)
@@ -188,7 +233,8 @@ final class OnboardingViewModelTests: XCTestCase {
         viewModel.method = .apiKey
         viewModel.apiKey = "secret-key"
 
-        await viewModel.submit()
+        let connected = await viewModel.connectToServer()
+        XCTAssertFalse(connected)
 
         XCTAssertFalse(mockSession.isLoggedIn)
         XCTAssertEqual(mockSession.loginApiKeyCallCount, 0)
@@ -213,13 +259,11 @@ final class OnboardingViewModelTests: XCTestCase {
         viewModel.email = "user@example.com"
         viewModel.password = "password123"
 
-        await viewModel.submit()
+        let connected = await viewModel.connectToServer()
+        XCTAssertTrue(connected)
 
         XCTAssertEqual(mockSession.loginPasswordCallCount, 0)
-        if case .failed(let message) = viewModel.phase {
-            XCTAssertTrue(message.localizedCaseInsensitiveContains("API key"))
-        } else {
-            XCTFail("Expected unavailable password failure")
-        }
+        XCTAssertEqual(viewModel.method, .apiKey)
+        XCTAssertFalse(viewModel.canSubmit)
     }
 }

@@ -1,5 +1,29 @@
 import SwiftUI
 
+/// Identitas visual yang sama untuk splash dan login. Palette memberi lapisan
+/// SF Symbol warna berbeda; masing-masing lapisan memakai linear gradient agar
+/// tetap hidup di light maupun dark mode tanpa aset bitmap terpisah.
+struct ImmichTortoiseLogo: View {
+    let size: CGFloat
+
+    var body: some View {
+        Image(systemName: "tortoise.fill")
+            .font(.system(size: size, weight: .regular))
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(
+                Color.primary,
+                LinearGradient(
+                    colors: [.cyan, .blue, .indigo],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing)
+//                LinearGradient(
+//                    colors: [.orange, .pink, .purple],
+//                    startPoint: .leading,
+//                    endPoint: .trailing)
+            )
+    }
+}
+
 /// Layar pembuka selama cache lokal dibaca.
 ///
 /// Bukan hiasan: membaca puluhan ribu baris dari SwiftData lalu
@@ -16,9 +40,7 @@ struct SplashView: View {
             Color(.systemBackground)
                 .ignoresSafeArea()
 
-            Image(systemName: "photo.stack.fill")
-                .font(.system(size: 64, weight: .regular))
-                .foregroundStyle(.tint)
+            ImmichTortoiseLogo(size: 64)
                 .symbolEffect(.pulse)
                 .accessibilityHidden(true)
         }

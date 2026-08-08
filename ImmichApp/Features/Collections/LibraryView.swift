@@ -4,6 +4,10 @@ import SwiftUI
 /// isinya sebagai deret mendatar, sebagian lagi baris biasa yang langsung
 /// mendorong ke layarnya.
 struct LibraryView: View {
+    /// TabView dapat membangun Library walau Photos masih aktif; hanya tab yang
+    /// terlihat yang boleh menjadi jangkar coach mark profil.
+    var isActive = true
+
     @Environment(SessionManager.self) private var session
     @State private var vm: LibraryViewModel?
     /// Baris yang sedang terbuka. Semua terbuka pada pemakaian pertama, seperti
@@ -20,6 +24,7 @@ struct LibraryView: View {
     @State private var assetToDelete: AssetLite?
     @State private var shareFileURL: SharedLinkPresentation?
     @State private var deleteFeedback = 0
+    @State private var backupSetupJourney = BackupSetupJourney.shared
     /// Kenangan yang sedang dibuka sebagai story; nil berarti tertutup.
     @State private var openedStoryID: String?
     /// Namespace zoom transition untuk kartu album.
@@ -45,7 +50,8 @@ struct LibraryView: View {
     /// Menyetelnya setelah view muncul berarti barisnya sempat tampil terbuka
     /// lalu menutup sendiri — kelihatan seperti animasi lipat yang tidak diminta
     /// setiap kali tab ini dibuka.
-    init() {
+    init(isActive: Bool = true) {
+        self.isActive = isActive
         // Nil berarti belum pernah disimpan (semua terbuka); string kosong
         // berarti pengguna memang menutup semuanya. Keduanya harus dibedakan.
         guard let stored = UserDefaults.standard.string(forKey: Self.expandedKey) else {
@@ -75,6 +81,17 @@ struct LibraryView: View {
                 .toolbarBackground(.hidden, for: .navigationBar)
                 .toolbar { libraryToolbar }
                 .sheet(isPresented: $showSettings) { settingsSheet }
+                .onChange(of: showSettings) { _, isPresented in
+                    if !isPresented {
+                        Task { @MainActor in
+                            // Anchor toolbar baru aman dipakai setelah sheet
+                            // benar-benar meninggalkan presentation hierarchy.
+                            try? await Task.sleep(for: .milliseconds(450))
+                            guard !showSettings else { return }
+                            backupSetupJourney.returnToProfileIfNeeded()
+                        }
+                    }
+                }
                 .navigationDestination(isPresented: $showBackup) { BackupView() }
                 // Separuh kedua dari pengantaran itu — lihat `MainTabView`.
                 .onChange(of: backupNotifier.shouldOpenBackup) { _, requested in
@@ -336,12 +353,9 @@ struct LibraryView: View {
     @ToolbarContentBuilder
     private var profileButton: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
-            Button {
+            JourneyProfileButton(isActive: isActive) {
                 showSettings = true
-            } label: {
-                ProfileAvatar(style: .toolbar, showsBackupState: true)
             }
-            .buttonStyle(.plain)
         }
         // Avatarnya sudah bulat penuh; kapsul kaca bawaan toolbar hanya
         // menambah lingkaran kedua yang lebih besar di belakangnya.

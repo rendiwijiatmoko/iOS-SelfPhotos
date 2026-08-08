@@ -1,4 +1,5 @@
 import SwiftUI
+import TipKit
 
 private struct SettingsSheetDismissActionKey: EnvironmentKey {
     static let defaultValue: (() -> Void)? = nil
@@ -86,8 +87,13 @@ struct SettingsView: View {
     @Environment(SessionManager.self) private var session
     @State private var vm: SettingsViewModel
     @State private var backup = BackupService.shared
+    @State private var backupSetupJourney = BackupSetupJourney.shared
     @State private var showLogoutAlert = false
+    @State private var showBackup = false
+    @State private var settingsFrame = CGRect.zero
+    @State private var backupRowFrame = CGRect.zero
     @Binding private var isSettingsRootVisible: Bool
+    private let backupRowTip = BackupSetupRowTip()
 
     /// VM dibuat oleh pemanggilnya, bukan menyusul di `task` layar ini.
     ///
@@ -102,9 +108,15 @@ struct SettingsView: View {
 
     var body: some View {
         settingsList
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .global)
+            } action: { settingsFrame = $0 }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .settingsSheetCloseButton()
+            .navigationDestination(isPresented: $showBackup) {
+                BackupView()
+            }
             .onAppear { isSettingsRootVisible = true }
             .onDisappear { isSettingsRootVisible = false }
             // Bar dibuat transparan supaya kepalanya terlihat sampai ke belakang
@@ -231,11 +243,126 @@ struct SettingsView: View {
 
     private var librarySection: some View {
         Section("Library") {
-            NavigationLink {
-                BackupView()
-            } label: {
-                Label("Back Up Photos", systemImage: "arrow.up.circle")
+            Button(action: openBackup) {
+                HStack(spacing: 10) {
+                    Label("Back Up Photos", systemImage: "arrow.up.circle")
+                    Spacer()
+                    if backupSetupJourney.step == .backupRow {
+                        Text("Set Up")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tint)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.tint.opacity(0.12), in: .capsule)
+                    }
+                    Image(systemName: "chevron.forward")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .contentShape(.rect)
             }
+            .buttonStyle(.plain)
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .global)
+            } action: { backupRowFrame = $0 }
+            .listRowBackground(backupRowBackground)
+            .overlay { backupRowHighlight }
+            .popoverTip(
+                backupRowTip,
+                isPresented: backupRowTipPresented,
+                attachmentAnchor: .rect(.bounds),
+                arrowEdge: backupRowTipArrowEdge,
+                action: handleBackupRowTipAction)
+            .task(id: backupRowTipPresentationTaskID) {
+                guard backupSetupJourney.step == .backupRow,
+                      hasMeasuredBackupTipLayout,
+                      !backupSetupJourney.isCoachmarkVisible
+                else { return }
+                let request = backupSetupJourney.presentationRequest
+                await backupRowTip.resetEligibility()
+                guard !Task.isCancelled else { return }
+                // Navigation sheet masih menyelesaikan layout pada frame awal.
+                // Presentasi sesudah jeda singkat memberi TipKit frame row final.
+                try? await Task.sleep(for: .milliseconds(180))
+                guard !Task.isCancelled else { return }
+                backupSetupJourney.markTipReady(
+                    for: .backupRow,
+                    request: request)
+            }
+        }
+    }
+
+    /// Arrow di bawah berarti bubble berada di atas row. Posisi ini dipilih
+    /// otomatis ketika ruang bawah tidak cukup—termasuk iPhone 12/13 mini.
+    private var backupRowTipArrowEdge: Edge {
+        guard hasMeasuredBackupTipLayout else { return .top }
+        let spaceBelow = settingsFrame.maxY - backupRowFrame.maxY
+        let spaceAbove = backupRowFrame.minY - settingsFrame.minY
+        return spaceBelow < 280 && spaceAbove > spaceBelow ? .bottom : .top
+    }
+
+    private var hasMeasuredBackupTipLayout: Bool {
+        settingsFrame.height > 0 && backupRowFrame.height > 0
+    }
+
+    private var backupRowTipPresentationTaskID: String {
+        let rowY = Int(backupRowFrame.minY.rounded())
+        let bottom = Int(settingsFrame.maxY.rounded())
+        return "\(backupSetupJourney.presentationRequest)-\(rowY)-\(bottom)-\(backupRowTipArrowEdge)"
+    }
+
+    private var backupRowBackground: Color {
+        backupSetupJourney.step == .backupRow
+            ? Color.accentColor.opacity(0.1)
+            : Color(.secondarySystemGroupedBackground)
+    }
+
+    @ViewBuilder
+    private var backupRowHighlight: some View {
+        if backupSetupJourney.step == .backupRow {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.accentColor, lineWidth: 2)
+                .padding(.horizontal, -8)
+                .padding(.vertical, -5)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
+
+    private var backupRowTipPresented: Binding<Bool> {
+        Binding(
+            get: {
+                backupSetupJourney.step == .backupRow
+                    && backupSetupJourney.isCoachmarkVisible
+            },
+            set: { presented in
+                if !presented, backupSetupJourney.step == .backupRow {
+                    backupSetupJourney.dismissCoachmark()
+                }
+            })
+    }
+
+    private func handleBackupRowTipAction(_ action: Tips.Action) {
+        switch action.id {
+        case "open": openBackup()
+        case "skip": backupSetupJourney.skip()
+        default: break
+        }
+    }
+
+    private func openBackup() {
+        let wasPresentedByJourney = backupSetupJourney.step == .backupRow
+        if wasPresentedByJourney {
+            backupRowTip.invalidate(reason: .actionPerformed)
+        }
+        backupSetupJourney.finish()
+        Task { @MainActor in
+            if wasPresentedByJourney {
+                try? await Task.sleep(for: .milliseconds(300))
+            } else {
+                await Task.yield()
+            }
+            showBackup = true
         }
     }
 

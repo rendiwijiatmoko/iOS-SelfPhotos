@@ -69,6 +69,54 @@ final class RepositoryEndpointContractTests: XCTestCase {
         XCTAssertEqual(body["withExif"] as? Bool, true)
     }
 
+    func testAlbumAssetsFollowsNextPageWhenTotalIsCappedAtPageSize() async throws {
+        var requestCount = 0
+        MockURLProtocol.responseProvider = { request in
+            requestCount += 1
+            let isFirstPage = requestCount == 1
+            let id = isFirstPage
+                ? "11111111-1111-4111-8111-111111111111"
+                : "22222222-2222-4222-8222-222222222222"
+            let json = """
+            {
+              "assets": {
+                "items": [{
+                  "id": "\(id)",
+                  "type": "IMAGE",
+                  "originalFileName": "photo.jpg",
+                  "fileCreatedAt": "2026-08-08T01:00:00.000Z",
+                  "isFavorite": false,
+                  "isArchived": false,
+                  "isTrashed": false,
+                  "duration": null,
+                  "thumbhash": null,
+                  "localDateTime": "2026-08-08T08:00:00.000Z",
+                  "livePhotoVideoId": null,
+                  "exifInfo": null
+                }],
+                "total": \(isFirstPage ? 1_000 : 23),
+                "nextPage": \(isFirstPage ? "\"2\"" : "null")
+              }
+            }
+            """
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil)
+            return (Data(json.utf8), response, nil)
+        }
+
+        let assets = try await TimelineRepository(api: api).albumAssets(
+            "33333333-3333-4333-8333-333333333333")
+
+        XCTAssertEqual(requestCount, 2)
+        XCTAssertEqual(assets.map(\.id), [
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+        ])
+    }
+
     func testRenamePersonUsesStableBulkUpdateEndpoint() async throws {
         let id = "33333333-3333-4333-8333-333333333333"
         stub(status: 200, json: """
