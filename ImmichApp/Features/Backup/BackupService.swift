@@ -21,6 +21,12 @@ private enum LivePhotoBackupError: LocalizedError {
     }
 }
 
+private struct BackupPersistenceError: LocalizedError {
+    var errorDescription: String? {
+        String(localized: "Backup is paused because its local upload mapping cannot be saved safely.")
+    }
+}
+
 /// Pencadangan otomatis foto perangkat ke server.
 ///
 /// **Apa yang bisa dan tidak bisa dilakukan di iOS.** Aplikasi TIDAK bisa
@@ -187,7 +193,7 @@ final class BackupService {
         let api = APIClient(session: session)
         repo = BackupRepository(api: api)
         albumRepo = AlbumRepository(api: api)
-        acceptsUploadResults = true
+        acceptsUploadResults = dataManager.isPersistentStoreAvailable
     }
 
     /// Mencari pekerjaan baru, lalu menyerahkannya.
@@ -275,6 +281,10 @@ final class BackupService {
     /// Dipanggil saat aplikasi dibuka atau kembali aktif.
     func start() {
         guard isEnabled, task == nil, repo != nil else { return }
+        guard dataManager.isPersistentStoreAvailable else {
+            lastError = BackupPersistenceError().localizedDescription
+            return
+        }
         // Masih ada yang menunggu jawaban dari sistem. Menyerahkan lagi sekarang
         // berarti foto yang sama diantre dua kali — catatan unggahannya belum
         // tertulis, jadi penyaring "sudah pernah naik" belum mengenalnya.
@@ -322,6 +332,10 @@ final class BackupService {
     /// - Parameter ids: id petak, boleh berawalan `device:` maupun tidak.
     func uploadNow(_ ids: [String]) async {
         guard repo != nil, task == nil else { return }
+        guard dataManager.isPersistentStoreAvailable else {
+            lastError = BackupPersistenceError().localizedDescription
+            return
+        }
         let wanted = Set(ids.map(LocalPhotoLibrary.localIdentifier(from:)))
         let uploaded = dataManager.uploadedLocalIdentifiers()
         let active = await BackupUploader.shared.activeLocalIdentifiers()
@@ -723,12 +737,20 @@ final class BackupService {
         }
         switch outcome {
         case .success(let assetID):
-            try? dataManager.insertBackupRecord(BackupRecord(
-                id: UUID().uuidString,
-                assetId: assetID,
-                deviceAssetId: checksum,
-                localIdentifier: localIdentifier))
-            uploadedThisRun += 1
+            do {
+                guard dataManager.isPersistentStoreAvailable else {
+                    throw BackupPersistenceError()
+                }
+                try dataManager.insertBackupRecord(BackupRecord(
+                    id: UUID().uuidString,
+                    assetId: assetID,
+                    deviceAssetId: checksum,
+                    localIdentifier: localIdentifier))
+                uploadedThisRun += 1
+            } catch {
+                failures.append(localIdentifier)
+                lastError = error.localizedDescription
+            }
             // Kemajuan HANYA kalau masih ada sisa.
             //
             // Kalau ini yang terakhir, `finish()` di bawah akan membuangnya

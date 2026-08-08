@@ -23,8 +23,8 @@ final class CachedAsset {
     var monthKey: String = ""
     /// Durasi video dalam detik; nil untuk foto.
     ///
-    /// Punya nilai bawaan supaya penambahannya cukup ditangani migrasi ringan
-    /// SwiftData, tanpa skema baru.
+    /// Punya nilai bawaan supaya migration ringan V1 → V2 dapat mengisi store
+    /// lama tanpa menebak durasi.
     var duration: Double?
     /// Id aset video pasangan sebuah Live Photo; nil untuk foto biasa.
     var livePhotoVideoId: String?
@@ -100,8 +100,8 @@ final class BackupRecord {
     /// `PHAsset.localIdentifier` foto asalnya di perangkat.
     ///
     /// Nilai bawaan kosong, dan itu disengaja: catatan lama hanya menyimpan
-    /// checksum, dan migrasi ringan SwiftData menuntut setiap field baru punya
-    /// bawaan. Kosong berarti "diunggah sebelum aplikasi ini melacak asalnya" —
+    /// checksum, dan migration ringan V2 → V3 perlu nilai bawaan. Kosong berarti
+    /// "diunggah sebelum aplikasi ini melacak asalnya" —
     /// fotonya tetap di server, cuma tidak bisa dipasangkan ke petak lokal.
     var localIdentifier: String = ""
     var createdAt: Date

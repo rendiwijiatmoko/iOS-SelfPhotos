@@ -11,11 +11,11 @@ import Foundation
 /// layar ini", dibaca utuh dan ditulis utuh. Tidak ada satu pun query yang perlu
 /// dijawab basis data.
 ///
-/// Dan ada ongkos yang tidak sepadan: menambah entitas ke `Schema` milik
-/// `SwiftDataManager` berarti mempertaruhkan migrasi container yang dibuka
-/// dengan `try!` — skema yang tidak kompatibel bukan berarti album gagal
-/// tersimpan, tapi aplikasi gagal DIBUKA. Potret yang rusak di sini cukup
-/// membuat satu layar kembali kosong seperti sebelum ada cache.
+/// Dan ada ongkos yang tidak sepadan: setiap entitas SwiftData harus dipelihara
+/// sepanjang `VersionedSchema` dan migration plan. Store utama sekarang punya
+/// recovery startup, tetapi potret layar tetap lebih tepat sebagai berkas yang
+/// bisa dibuang sendiri: kerusakannya cukup membuat satu layar kembali kosong,
+/// bukan memaksa pemulihan seluruh database sinkronisasi.
 ///
 /// **Kenapa Application Support, bukan Caches.** `.cachesDirectory` boleh
 /// dikosongkan sistem kapan saja saat penyimpanan menipis. Thumbnail memang di

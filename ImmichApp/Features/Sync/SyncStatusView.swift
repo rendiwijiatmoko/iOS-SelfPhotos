@@ -68,6 +68,10 @@ private final class SyncStatusViewModel {
     private let library = LocalPhotoLibrary.shared
     private var didLoad = false
 
+    var storageStartupState: LocalStoreStartupState {
+        dataManager.startupState
+    }
+
     init(session: SessionManager) {
         let api = APIClient(session: session)
         settingsRepo = SettingsRepository(api: api)
@@ -260,6 +264,7 @@ struct SyncStatusView: View {
 
     var body: some View {
         List {
+            databaseHealthSection
             statusSection(
                 "Assets",
                 leading: ("Local", "iphone", vm.localAssets),
@@ -300,6 +305,55 @@ struct SyncStatusView: View {
             Text("This removes the local sync index and hashed-asset cache. Photos on your device and server remain safe. Run Sync Remote afterward to rebuild the index.")
         }
         .errorToast($actionError)
+    }
+
+    @ViewBuilder
+    private var databaseHealthSection: some View {
+        switch vm.storageStartupState {
+        case .ready:
+            EmptyView()
+
+        case let .recovered(quarantinedStore, restoredCount, warning):
+            Section("Database Recovery") {
+                Label {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Local cache was rebuilt")
+                        Text("Restored \(restoredCount.formatted()) protected backup mappings. Remote sync can rebuild the remaining cache.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "arrow.clockwise.icloud.fill")
+                        .foregroundStyle(.orange)
+                }
+
+                if quarantinedStore != nil || warning != nil {
+                    Text("The unreadable database was preserved for diagnostics instead of being deleted.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+        case let .protectionUnavailable(message):
+            Section("Database Protection") {
+                Label(message, systemImage: "exclamationmark.shield.fill")
+                    .foregroundStyle(.orange)
+            }
+
+        case let .persistentStoreUnavailable(message):
+            Section("Database Unavailable") {
+                Label {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Automatic backup is paused")
+                        Text(message)
+                            .font(.caption)
+                    }
+                } icon: {
+                    Image(systemName: "externaldrive.badge.xmark")
+                }
+                .foregroundStyle(.red)
+            }
+        }
     }
 
     private func statusSection(

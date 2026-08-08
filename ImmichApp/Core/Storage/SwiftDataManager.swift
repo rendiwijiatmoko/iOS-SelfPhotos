@@ -5,10 +5,49 @@ import Observation
 
 enum LocalDatabaseMaintenanceError: LocalizedError {
     case exportFailed
+    case persistentStoreUnavailable
 
     var errorDescription: String? {
-        "The local sync database could not be exported."
+        switch self {
+        case .exportFailed:
+            "The local sync database could not be exported."
+        case .persistentStoreUnavailable:
+            "The local sync database is temporarily unavailable."
+        }
     }
+}
+
+enum LocalStoreStartupState: Equatable {
+    case ready
+    case recovered(
+        quarantinedStore: URL?,
+        restoredBackupRecords: Int,
+        warning: String?
+    )
+    case protectionUnavailable(String)
+    case persistentStoreUnavailable(String)
+
+    var isPersistentStoreAvailable: Bool {
+        switch self {
+        case .ready, .recovered, .protectionUnavailable:
+            true
+        case .persistentStoreUnavailable:
+            false
+        }
+    }
+}
+
+private struct BackupRecordSnapshot: Codable, Equatable {
+    let id: String
+    let assetId: String
+    let deviceAssetId: String
+    let localIdentifier: String
+    let createdAt: Date
+}
+
+private struct BackupRecordJournal: Codable {
+    let version: Int
+    let records: [BackupRecordSnapshot]
 }
 
 @MainActor
@@ -19,16 +58,140 @@ final class SwiftDataManager {
     let modelContainer: ModelContainer
     let modelContext: ModelContext
     private let storeURL: URL
+    private let backupJournalURL: URL
+    private let fileManager: FileManager
+    private(set) var startupState: LocalStoreStartupState
 
-    private init() {
-        let schema = Schema([
-            CachedAsset.self, BackupRecord.self, SyncState.self,
-            LocalAssetChecksum.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-        self.storeURL = modelConfiguration.url
-        self.modelContainer = try! ModelContainer(for: schema, configurations: [modelConfiguration])
-        self.modelContext = ModelContext(modelContainer)
+    var isPersistentStoreAvailable: Bool {
+        startupState.isPersistentStoreAvailable
+    }
+
+    init(
+        storeURL requestedStoreURL: URL? = nil,
+        backupJournalURL requestedJournalURL: URL? = nil,
+        fileManager: FileManager = .default
+    ) {
+        let schema = Schema(versionedSchema: LocalStoreSchemaV3.self)
+        let configuration: ModelConfiguration
+        if let requestedStoreURL {
+            configuration = ModelConfiguration(
+                schema: schema,
+                url: requestedStoreURL,
+                cloudKitDatabase: .none)
+        } else {
+            configuration = ModelConfiguration(
+                schema: schema,
+                isStoredInMemoryOnly: false,
+                cloudKitDatabase: .none)
+        }
+
+        let resolvedStoreURL = configuration.url
+        let resolvedJournalURL = requestedJournalURL
+            ?? resolvedStoreURL.deletingLastPathComponent()
+                .appendingPathComponent("ImmichBackupRecords-v1.json")
+        let bootstrap = Self.bootstrapContainer(
+            schema: schema,
+            configuration: configuration,
+            storeURL: resolvedStoreURL,
+            fileManager: fileManager)
+
+        self.storeURL = resolvedStoreURL
+        self.backupJournalURL = resolvedJournalURL
+        self.fileManager = fileManager
+        self.modelContainer = bootstrap.container
+        self.modelContext = ModelContext(bootstrap.container)
+        self.startupState = bootstrap.state
+
+        reconcileBackupRecordJournalAfterStartup()
+    }
+
+    private struct ContainerBootstrap {
+        let container: ModelContainer
+        let state: LocalStoreStartupState
+    }
+
+    private static func bootstrapContainer(
+        schema: Schema,
+        configuration: ModelConfiguration,
+        storeURL: URL,
+        fileManager: FileManager
+    ) -> ContainerBootstrap {
+        do {
+            let container = try ModelContainer(
+                for: schema,
+                migrationPlan: LocalStoreMigrationPlan.self,
+                configurations: [configuration])
+            return ContainerBootstrap(container: container, state: .ready)
+        } catch {
+            let openingError = error.localizedDescription
+            let quarantinedStore = try? quarantineStoreFiles(
+                at: storeURL,
+                fileManager: fileManager)
+
+            do {
+                let recoveredConfiguration = ModelConfiguration(
+                    schema: schema,
+                    url: storeURL,
+                    cloudKitDatabase: .none)
+                let container = try ModelContainer(
+                    for: schema,
+                    migrationPlan: LocalStoreMigrationPlan.self,
+                    configurations: [recoveredConfiguration])
+                return ContainerBootstrap(
+                    container: container,
+                    state: .recovered(
+                        quarantinedStore: quarantinedStore,
+                        restoredBackupRecords: 0,
+                        warning: "The previous local cache could not be opened: \(openingError)"))
+            } catch {
+                // A broken disk store must not crash application launch. The
+                // in-memory container keeps read-only/cache UI usable, while
+                // backup is explicitly disabled through `startupState` so an
+                // empty mapping can never be mistaken for a clean database.
+                let fallbackConfiguration = ModelConfiguration(
+                    schema: schema,
+                    isStoredInMemoryOnly: true,
+                    cloudKitDatabase: .none)
+                do {
+                    let container = try ModelContainer(
+                        for: schema,
+                        configurations: [fallbackConfiguration])
+                    return ContainerBootstrap(
+                        container: container,
+                        state: .persistentStoreUnavailable(error.localizedDescription))
+                } catch {
+                    // If SwiftData cannot even construct the current schema in
+                    // memory, no storage-backed feature can run safely.
+                    fatalError("Unable to create the SwiftData model: \(error)")
+                }
+            }
+        }
+    }
+
+    private static func quarantineStoreFiles(
+        at storeURL: URL,
+        fileManager: FileManager
+    ) throws -> URL? {
+        let candidates = [
+            storeURL,
+            URL(fileURLWithPath: storeURL.path + "-shm"),
+            URL(fileURLWithPath: storeURL.path + "-wal"),
+        ].filter { fileManager.fileExists(atPath: $0.path) }
+        guard !candidates.isEmpty else { return nil }
+
+        let quarantineDirectory = storeURL.deletingLastPathComponent()
+            .appendingPathComponent("RecoveredStores", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(
+            at: quarantineDirectory,
+            withIntermediateDirectories: true)
+
+        for source in candidates {
+            try fileManager.moveItem(
+                at: source,
+                to: quarantineDirectory.appendingPathComponent(source.lastPathComponent))
+        }
+        return quarantineDirectory
     }
 
     func getCachedAsset(id: String) -> CachedAsset? {
@@ -279,6 +442,10 @@ final class SwiftDataManager {
     /// masih berada di WAL. SQLite backup API membaca keduanya sebagai satu
     /// snapshot tanpa menutup database yang sedang dipakai aplikasi.
     func exportDatabase() async throws -> URL {
+        guard startupState.isPersistentStoreAvailable else {
+            throw LocalDatabaseMaintenanceError.persistentStoreUnavailable
+        }
+
         try modelContext.save()
         let sourceURL = storeURL
         let destinationURL = FileManager.default.temporaryDirectory
@@ -304,6 +471,117 @@ final class SwiftDataManager {
         try modelContext.delete(model: SyncState.self)
         try modelContext.delete(model: LocalAssetChecksum.self)
         try modelContext.save()
+    }
+
+    // MARK: - Backup-record protection
+
+    /// `BackupRecord` bukan cache: kehilangan tabel ini membuat foto yang sudah
+    /// ada di server tampak belum pernah diunggah. Karena itu ia dicerminkan ke
+    /// journal JSON kecil di luar SQLite. Jika cache SQLite rusak, store boleh
+    /// dibangun ulang dan mapping upload dipulihkan dari journal ini.
+    private func reconcileBackupRecordJournalAfterStartup() {
+        guard startupState.isPersistentStoreAvailable else { return }
+
+        do {
+            let protectedRecords = try readBackupRecordJournal()
+            let restoredCount = try restoreMissingBackupRecords(protectedRecords)
+            try writeBackupRecordJournal(currentBackupRecordSnapshots())
+
+            if case let .recovered(quarantinedStore, _, warning) = startupState {
+                startupState = .recovered(
+                    quarantinedStore: quarantinedStore,
+                    restoredBackupRecords: restoredCount,
+                    warning: warning)
+            }
+        } catch {
+            let message = "Backup mapping protection is unavailable: \(error.localizedDescription)"
+            if case let .recovered(quarantinedStore, restoredCount, warning) = startupState {
+                startupState = .recovered(
+                    quarantinedStore: quarantinedStore,
+                    restoredBackupRecords: restoredCount,
+                    warning: [warning, message].compactMap { $0 }.joined(separator: " "))
+            } else {
+                startupState = .protectionUnavailable(message)
+            }
+        }
+    }
+
+    private func readBackupRecordJournal() throws -> [BackupRecordSnapshot] {
+        guard fileManager.fileExists(atPath: backupJournalURL.path) else { return [] }
+        let data = try Data(contentsOf: backupJournalURL)
+        let journal = try JSONDecoder().decode(BackupRecordJournal.self, from: data)
+        guard journal.version == 1 else {
+            throw CocoaError(.coderReadCorrupt)
+        }
+        return journal.records
+    }
+
+    private func currentBackupRecordSnapshots() throws -> [BackupRecordSnapshot] {
+        try modelContext.fetch(FetchDescriptor<BackupRecord>())
+            .map {
+                BackupRecordSnapshot(
+                    id: $0.id,
+                    assetId: $0.assetId,
+                    deviceAssetId: $0.deviceAssetId,
+                    localIdentifier: $0.localIdentifier,
+                    createdAt: $0.createdAt)
+            }
+            .sorted { $0.id < $1.id }
+    }
+
+    @discardableResult
+    private func restoreMissingBackupRecords(
+        _ snapshots: [BackupRecordSnapshot]
+    ) throws -> Int {
+        guard !snapshots.isEmpty else { return 0 }
+        let existingIDs = Set(
+            try modelContext.fetch(FetchDescriptor<BackupRecord>()).map(\.id))
+        var restoredCount = 0
+
+        for snapshot in snapshots where !existingIDs.contains(snapshot.id) {
+            modelContext.insert(BackupRecord(
+                id: snapshot.id,
+                assetId: snapshot.assetId,
+                deviceAssetId: snapshot.deviceAssetId,
+                localIdentifier: snapshot.localIdentifier,
+                createdAt: snapshot.createdAt))
+            restoredCount += 1
+        }
+        if restoredCount > 0 { try modelContext.save() }
+        return restoredCount
+    }
+
+    private func writeBackupRecordJournal(
+        _ snapshots: [BackupRecordSnapshot]
+    ) throws {
+        let directory = backupJournalURL.deletingLastPathComponent()
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(BackupRecordJournal(version: 1, records: snapshots))
+        try data.write(to: backupJournalURL, options: [.atomic])
+
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableURL = backupJournalURL
+        try? mutableURL.setResourceValues(values)
+
+        #if os(iOS)
+        try? fileManager.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: backupJournalURL.path)
+        #endif
+    }
+
+    private func refreshBackupRecordJournal() {
+        guard startupState.isPersistentStoreAvailable else { return }
+        do {
+            try writeBackupRecordJournal(currentBackupRecordSnapshots())
+        } catch {
+            startupState = .protectionUnavailable(
+                "Backup mapping protection is unavailable: \(error.localizedDescription)")
+        }
     }
 
     private nonisolated static func createDatabaseSnapshot(
@@ -356,11 +634,23 @@ final class SwiftDataManager {
     /// full sync. Logout juga harus menghapus checkpoint sync, pasangan backup,
     /// dan checksum lokal agar akun berikutnya tidak mewarisi keadaan akun lama.
     func clearAllAccountData() throws {
-        try modelContext.delete(model: CachedAsset.self)
-        try modelContext.delete(model: BackupRecord.self)
-        try modelContext.delete(model: SyncState.self)
-        try modelContext.delete(model: LocalAssetChecksum.self)
-        try modelContext.save()
+        let previousMappings = try currentBackupRecordSnapshots()
+        // Kosongkan journal lebih dahulu agar mapping akun lama tidak dapat
+        // dipulihkan ke akun baru bila proses dihentikan tepat setelah logout.
+        try writeBackupRecordJournal([])
+        do {
+            try modelContext.delete(model: CachedAsset.self)
+            try modelContext.delete(model: BackupRecord.self)
+            try modelContext.delete(model: SyncState.self)
+            try modelContext.delete(model: LocalAssetChecksum.self)
+            try modelContext.save()
+        } catch {
+            modelContext.rollback()
+            // Logout yang gagal tidak boleh sekaligus menghapus salinan
+            // perlindungan mapping akun yang masih ada di database.
+            try? writeBackupRecordJournal(previousMappings)
+            throw error
+        }
     }
 
     func getBackupRecord(deviceAssetId: String) -> BackupRecord? {
@@ -424,12 +714,16 @@ final class SwiftDataManager {
     /// server, jadi catatannya harus bertahan supaya tidak terunggah dua kali.
     /// Yang tidak berlaku lagi hanya kaitannya ke berkas yang sudah tidak ada.
     func unlinkDeviceAsset(localIdentifier: String) throws {
+        guard startupState.isPersistentStoreAvailable else {
+            throw LocalDatabaseMaintenanceError.persistentStoreUnavailable
+        }
         let descriptor = FetchDescriptor<BackupRecord>(
             predicate: #Predicate { $0.localIdentifier == localIdentifier })
         for record in (try? modelContext.fetch(descriptor)) ?? [] {
             record.localIdentifier = ""
         }
         try modelContext.save()
+        refreshBackupRecordJournal()
     }
 
     // MARK: - Checksum foto perangkat
@@ -456,6 +750,9 @@ final class SwiftDataManager {
     /// yang dicatat memang hal yang sama — foto perangkat ini berpasangan dengan
     /// aset server itu — dan yang membedakan cuma siapa yang mengunggahnya.
     func linkDeviceAsset(localIdentifier: String, to serverAssetID: String) throws {
+        guard startupState.isPersistentStoreAvailable else {
+            throw LocalDatabaseMaintenanceError.persistentStoreUnavailable
+        }
         let descriptor = FetchDescriptor<BackupRecord>(
             predicate: #Predicate { $0.localIdentifier == localIdentifier })
         // Fetch yang GAGAL menghasilkan nil, dan nil tidak boleh dibaca sebagai
@@ -469,11 +766,16 @@ final class SwiftDataManager {
             deviceAssetId: "",
             localIdentifier: localIdentifier))
         try modelContext.save()
+        refreshBackupRecordJournal()
     }
 
     func insertBackupRecord(_ record: BackupRecord) throws {
+        guard startupState.isPersistentStoreAvailable else {
+            throw LocalDatabaseMaintenanceError.persistentStoreUnavailable
+        }
         modelContext.insert(record)
         try modelContext.save()
+        refreshBackupRecordJournal()
     }
 
     func getSyncState() -> SyncState {
