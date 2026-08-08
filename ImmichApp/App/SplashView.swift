@@ -11,7 +11,7 @@ struct ImmichTortoiseLogo: View {
             .font(.system(size: size, weight: .regular))
             .symbolRenderingMode(.palette)
             .foregroundStyle(
-                Color.primary,
+                Color.gray,
                 LinearGradient(
                     colors: [.cyan, .blue, .indigo],
                     startPoint: .topLeading,

@@ -266,7 +266,6 @@ struct SettingsView: View {
                 proxy.frame(in: .global)
             } action: { backupRowFrame = $0 }
             .listRowBackground(backupRowBackground)
-            .overlay { backupRowHighlight }
             .popoverTip(
                 backupRowTip,
                 isPresented: backupRowTipPresented,
@@ -315,18 +314,6 @@ struct SettingsView: View {
         backupSetupJourney.step == .backupRow
             ? Color.accentColor.opacity(0.1)
             : Color(.secondarySystemGroupedBackground)
-    }
-
-    @ViewBuilder
-    private var backupRowHighlight: some View {
-        if backupSetupJourney.step == .backupRow {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.accentColor, lineWidth: 2)
-                .padding(.horizontal, -8)
-                .padding(.vertical, -5)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-        }
     }
 
     private var backupRowTipPresented: Binding<Bool> {
@@ -386,6 +373,7 @@ struct SettingsView: View {
                 Text("2 Columns").tag(2)
                 Text("3 Columns").tag(3)
                 Text("4 Columns").tag(4)
+                Text("5 Columns").tag(5)
             } label: {
                 Label("Grid Columns", systemImage: "square.grid.3x3")
             }
@@ -529,6 +517,13 @@ struct SettingsView: View {
                 }
             }
 
+            if let latest = vm.latestVersion {
+                LabeledContent("Latest Version", value: latest)
+            }
+            if let url = session.baseURL {
+                LabeledContent("Server URL", value: displayURL(url))
+                    .lineLimit(1)
+            }
             NavigationLink {
                 ServerCompatibilityView()
             } label: {
@@ -540,14 +535,6 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-            }
-
-            if let latest = vm.latestVersion {
-                LabeledContent("Latest Version", value: latest)
-            }
-            if let url = session.baseURL {
-                LabeledContent("Server URL", value: displayURL(url))
-                    .lineLimit(1)
             }
         }
     }

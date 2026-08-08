@@ -21,6 +21,7 @@ struct AssetDetailView: View {
 
     @Environment(SessionManager.self) private var session
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var vm: AssetDetailViewModel?
     @State private var isSharePresented = false
     @State private var sharedLink: SharedLinkPresentation?
@@ -226,8 +227,13 @@ struct AssetDetailView: View {
         ToolbarChrome(
             showToolbar: showToolbar,
             showInfo: showInfo,
-            isEditing: isEditingDescription)
+            isEditing: isEditingDescription,
+            usesTopToolbarOnly: usesTopToolbarOnly)
     }
+
+    /// Pada iPad seluruh aksi digabung ke navigation bar seperti Photos.
+    /// Compact width mempertahankan bottom bar agar tombol tidak berdesakan.
+    private var usesTopToolbarOnly: Bool { horizontalSizeClass == .regular }
 
     private func toggleToolbar() {
         // Saat panel info terbuka, toolbar bawah adalah satu-satunya jalan
@@ -835,7 +841,9 @@ struct AssetDetailView: View {
     @ToolbarContentBuilder
     private var detailToolbar: some ToolbarContent {
         topToolbar
-        bottomToolbar
+        if !usesTopToolbarOnly {
+            bottomToolbar
+        }
     }
 
     @ToolbarContentBuilder
@@ -846,6 +854,25 @@ struct AssetDetailView: View {
         if isEditingDescription {
             ToolbarItem(placement: .topBarLeading) { cancelEditButton }
             ToolbarItem(placement: .topBarTrailing) { saveEditButton }
+        } else if usesTopToolbarOnly {
+            ToolbarItemGroup(placement: .topBarLeading) {
+                if isModal { closeButton }
+                shareButton
+                if !currentAsset.needsUpload { favoriteButton }
+            }
+
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if currentAsset.needsUpload {
+                    uploadButton
+                } else {
+                    // Urutannya mengikuti Photos iPad: edit, info, hapus,
+                    // kemudian menu tindakan tambahan.
+                    if !currentAsset.isVideo { editPhotoButton }
+                    infoButton
+                    deleteButton
+                }
+                detailActionsMenu
+            }
         } else {
             if isModal {
                 ToolbarItem(placement: .topBarLeading) { closeButton }
@@ -1359,13 +1386,18 @@ private struct ToolbarChrome: ViewModifier {
     /// Mode edit deskripsi membalik keadaan itu: navigation bar wajib tampil
     /// (di situ tombol batal & simpan), bottom bar justru disembunyikan.
     let isEditing: Bool
+    /// Regular-width iPad tidak punya bottom action bar; seluruh aksi berada di
+    /// atas, sehingga navigation bar harus tetap tampil saat panel info terbuka.
+    let usesTopToolbarOnly: Bool
 
     private var topVisibility: Visibility {
         if isEditing { return .visible }
+        if usesTopToolbarOnly { return showToolbar ? .visible : .hidden }
         return showToolbar && !showInfo ? .visible : .hidden
     }
 
     private var bottomVisibility: Visibility {
+        if usesTopToolbarOnly { return .hidden }
         if isEditing { return .hidden }
         return showToolbar ? .visible : .hidden
     }

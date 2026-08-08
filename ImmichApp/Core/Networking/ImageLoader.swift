@@ -604,6 +604,13 @@ struct AuthImage: View {
     /// Kartu memori setinggi 240pt tidak butuh bitmap 2048px — itu 12 MB untuk
     /// petak yang tidak pernah lebih dari 720px. `nil` berarti ikut bawaan.
     var pixelSize: Int? = nil
+    /// Memotong bitmap menjadi 1:1 dan menormalkan ukuran intrinsiknya sebelum
+    /// dibungkus sebagai SwiftUI `Image`.
+    ///
+    /// Ini berbeda dari `clipShape`: container seperti sidebar `TabView` dapat
+    /// membaca rasio intrinsik gambar dan menata label sebelum modifier view
+    /// diterapkan. Nilai ini adalah ukuran sisi dalam point; `nil` tidak crop.
+    var squareCropPointSize: CGFloat? = nil
 
     @Environment(SessionManager.self) private var session
     /// TIDAK ada `UIImage` yang disimpan di sini.
@@ -645,7 +652,7 @@ struct AuthImage: View {
 
         return ZStack {
             if let shown {
-                Image(uiImage: shown)
+                Image(uiImage: displayImage(shown))
                     .resizable()
                     .aspectRatio(contentMode: contentMode)
             } else if hasError {
@@ -679,6 +686,30 @@ struct AuthImage: View {
             return thumbnail
         }
         return ThumbHash.placeholder(for: thumbhash)
+    }
+
+    private func displayImage(_ image: UIImage) -> UIImage {
+        guard let squareCropPointSize,
+              squareCropPointSize > 0,
+              let source = image.cgImage
+        else { return image }
+
+        let side = min(source.width, source.height)
+        let cropRect = CGRect(
+            x: CGFloat((source.width - side) / 2),
+            y: CGFloat((source.height - side) / 2),
+            width: CGFloat(side),
+            height: CGFloat(side))
+        guard let cropped = source.cropping(to: cropRect) else { return image }
+
+        // UIImage.size dihitung dari jumlah pixel dibagi scale. Menyetel scale
+        // dari target point size membuat semua cover melaporkan intrinsic size
+        // yang sama, walaupun bitmap sumbernya punya pixel/scale berbeda.
+        let normalizedScale = CGFloat(side) / squareCropPointSize
+        return UIImage(
+            cgImage: cropped,
+            scale: normalizedScale,
+            orientation: image.imageOrientation)
     }
 
     private var cacheKey: String {

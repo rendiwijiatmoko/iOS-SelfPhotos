@@ -32,6 +32,12 @@ struct AlbumsListView: View {
         case grid, list
     }
 
+    /// Sidebar iPad dan layar All Albums berbagi instance yang sama agar hasil
+    /// membuat/menghapus album langsung terlihat di kedua tempat.
+    init(viewModel: AlbumListViewModel? = nil) {
+        _vm = State(initialValue: viewModel)
+    }
+
     var body: some View {
         content
             // Isi SELALU mengisi ruangnya, sebesar apa pun isinya.
@@ -232,32 +238,54 @@ struct AlbumsListView: View {
     /// detailnya baru terlihat setelah ditekan back. Jalur dari Collections
     /// tidak pernah bermasalah justru karena memakai tujuan langsung.
     private func albumsGrid(_ albums: [AlbumResponseDTO]) -> some View {
-        ScrollView {
-            LazyVGrid(columns: gridColumns, spacing: 16) {
-                ForEach(albums) { album in
-                    NavigationLink {
-                        AlbumDetailView(album: album)
-                            .navigationTransition(
-                                .zoom(sourceID: album.id, in: albumNamespace))
-                    } label: {
-                        AlbumGridCard(album: album)
-                            .matchedTransitionSource(id: album.id, in: albumNamespace)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        contextMenu(for: album)
-                    } preview: {
-                        AlbumCoverPreview(album: album, session: session)
+        GeometryReader { proxy in
+            ScrollView {
+                LazyVGrid(columns: gridColumns(for: proxy.size.width), spacing: 16) {
+                    ForEach(albums) { album in
+                        NavigationLink {
+                            AlbumDetailView(album: album)
+                                .navigationTransition(
+                                    .zoom(sourceID: album.id, in: albumNamespace))
+                        } label: {
+                            AlbumGridCard(album: album)
+                                .matchedTransitionSource(id: album.id, in: albumNamespace)
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            contextMenu(for: album)
+                        } preview: {
+                            AlbumCoverPreview(album: album, session: session)
+                        }
                     }
                 }
+                .padding(.horizontal, Self.gridHorizontalPadding)
+                .padding(.top, 8)
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
         }
     }
 
-    private var gridColumns: [GridItem] {
-        [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+    private static let maximumGridColumns = 4
+    private static let minimumGridColumns = 2
+    private static let minimumAlbumCardWidth: CGFloat = 150
+    private static let gridSpacing: CGFloat = 12
+    private static let gridHorizontalPadding: CGFloat = 16
+
+    /// Dua kolom tetap menjadi batas bawah agar iPhone mempertahankan tampilan
+    /// yang sekarang. Ruang ekstra menambah kolom satu per satu sampai empat;
+    /// perhitungannya memakai lebar container, jadi ikut beradaptasi saat
+    /// sidebar atau multitasking mengubah lebar area detail iPad.
+    private func gridColumns(for containerWidth: CGFloat) -> [GridItem] {
+        let availableWidth = max(0, containerWidth - Self.gridHorizontalPadding * 2)
+        let fittingCount = Int(
+            (availableWidth + Self.gridSpacing)
+                / (Self.minimumAlbumCardWidth + Self.gridSpacing))
+        let count = min(
+            Self.maximumGridColumns,
+            max(Self.minimumGridColumns, fittingCount))
+
+        return Array(
+            repeating: GridItem(.flexible(), spacing: Self.gridSpacing),
+            count: count)
     }
 
     private func albumsList(

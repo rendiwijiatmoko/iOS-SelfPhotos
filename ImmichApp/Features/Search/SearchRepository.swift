@@ -20,6 +20,40 @@ class SearchRepository {
         try await api.send(.json("/search/metadata", method: .post, body: request))
     }
 
+    /// Mengambil seluruh halaman metadata search.
+    ///
+    /// Server dapat membatasi halaman lebih kecil daripada `size` yang diminta
+    /// (contohnya Trash mengembalikan 5 dari total 24). Karena itu kelanjutan
+    /// mengikuti `nextPage` DAN `total`, bukan menebak dari request size.
+    func allMetadata(_ initialRequest: SearchRequestDTO) async throws -> [AssetResponseDTO] {
+        var request = initialRequest
+        var page = request.page ?? 1
+        request.page = page
+
+        var response = try await metadataSearch(request)
+        var items = response.assets.items
+        var seenIDs = Set(items.map(\.id))
+        var knownTotal = response.assets.total
+
+        while response.assets.nextPage != nil || items.count < knownTotal {
+            page += 1
+            request.page = page
+            response = try await metadataSearch(request)
+            knownTotal = max(knownTotal, response.assets.total)
+
+            let countBeforePage = items.count
+            for item in response.assets.items where seenIDs.insert(item.id).inserted {
+                items.append(item)
+            }
+
+            // Server rusak yang mengulang halaman sama tidak boleh membuat loop
+            // tanpa akhir. Halaman kosong juga menandai akhir yang nyata.
+            if response.assets.items.isEmpty || items.count == countBeforePage { break }
+        }
+
+        return items
+    }
+
     /// GET /search/suggestions wajib menyertakan `type` dan mengembalikan [String] polos.
     func suggestions(type: String = "city") async throws -> [String] {
         try await api.send(.init(

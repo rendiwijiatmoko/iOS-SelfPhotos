@@ -22,13 +22,19 @@ final class AlbumListViewModelTests: XCTestCase {
         try await super.tearDown()
     }
 
-    private func makeAlbum(id: String, name: String, shared: Bool = false, assetCount: Int = 0) -> AlbumResponseDTO {
+    private func makeAlbum(
+        id: String,
+        name: String,
+        shared: Bool = false,
+        assetCount: Int = 0,
+        thumbnailID: String? = nil
+    ) -> AlbumResponseDTO {
         AlbumResponseDTO(
             id: id,
             albumName: name,
             description: nil,
             assetCount: assetCount,
-            albumThumbnailAssetId: nil,
+            albumThumbnailAssetId: thumbnailID,
             shared: shared,
             createdAt: Date(),
             assets: nil
@@ -141,6 +147,44 @@ final class AlbumListViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.sharedAlbums.count, 1)
         XCTAssertTrue(viewModel.myAlbums.allSatisfy { !$0.shared })
         XCTAssertTrue(viewModel.sharedAlbums.allSatisfy { $0.shared })
+    }
+
+    func testApplyContentsUpdatesCountAndReplacesMissingCover() {
+        viewModel.albums = [
+            makeAlbum(
+                id: "1",
+                name: "Changing",
+                assetCount: 3,
+                thumbnailID: "removed-cover")
+        ]
+        let older = AssetLite(
+            id: "older",
+            isVideo: false,
+            ratio: 1,
+            thumbhash: nil,
+            createdAt: Date(timeIntervalSince1970: 1))
+        let newer = AssetLite(
+            id: "newer",
+            isVideo: false,
+            ratio: 1,
+            thumbhash: nil,
+            createdAt: Date(timeIntervalSince1970: 2))
+
+        viewModel.applyContents([older, newer], to: "1")
+
+        XCTAssertEqual(viewModel.albums[0].assetCount, 2)
+        XCTAssertEqual(viewModel.albums[0].albumThumbnailAssetId, "newer")
+    }
+
+    func testRemoveDeletedAlbumUpdatesSharedList() {
+        viewModel.albums = [
+            makeAlbum(id: "1", name: "Deleted"),
+            makeAlbum(id: "2", name: "Kept")
+        ]
+
+        viewModel.removeDeletedAlbum("1")
+
+        XCTAssertEqual(viewModel.albums.map(\.id), ["2"])
     }
 }
 

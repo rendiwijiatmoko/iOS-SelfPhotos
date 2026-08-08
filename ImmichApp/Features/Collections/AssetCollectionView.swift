@@ -43,6 +43,7 @@ struct AssetCollectionView: View {
             layout: layout,
             assets: vm?.assets ?? [],
             phase: vm?.phase ?? .loading,
+            emptyState: emptyState,
             onRetry: { Task { await vm?.load() } },
             onToggleFavorite: { await vm?.toggleFavorite($0) },
             onDelete: { await vm?.delete($0) },
@@ -138,6 +139,14 @@ struct AssetCollectionView: View {
         return nil
     }
 
+    private var emptyState: PhotoCollectionEmptyState? {
+        guard request.visibility == "archive" else { return nil }
+        return PhotoCollectionEmptyState(
+            title: "Archive is Empty",
+            systemImage: "archivebox",
+            description: "Archived photos will appear here.")
+    }
+
     private func start() async {
         if vm == nil {
             let api = APIClient(session: session)
@@ -148,8 +157,8 @@ struct AssetCollectionView: View {
                 albumRepo: AlbumRepository(api: api),
                 snapshotKey: snapshotKey,
                 loader: {
-                    let response = try await searchRepo.metadataSearch(request)
-                    return response.assets.items.map(AssetLite.init)
+                    let items = try await searchRepo.allMetadata(request)
+                    return items.map(AssetLite.init)
                 })
         }
         // SETIAP kali, bukan sekali.

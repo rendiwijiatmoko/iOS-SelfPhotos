@@ -50,7 +50,8 @@ struct TimelineView: View {
     /// Sebagai objek `@Observable`, hanya view yang benar-benar MEMBACA judulnya
     /// yang ikut digambar ulang.
     @State private var monthTracker = VisibleMonthTracker()
-    @AppStorage(SettingsViewModel.gridColumnsKey) private var gridColumns = 3
+    @AppStorage(SettingsViewModel.gridColumnsKey)
+    private var gridColumns = SettingsViewModel.defaultGridColumns
     /// Pegangan ke controller grid, untuk perintah yang datang dari luar —
     /// ketukan kedua tab Photos, misalnya.
     @State private var gridController: PhotoGridController?

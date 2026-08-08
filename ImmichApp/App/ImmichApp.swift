@@ -2,13 +2,14 @@ import SwiftUI
 import TipKit
 import UIKit
 
-/// Ada HANYA untuk satu panggilan yang tidak punya padanan di SwiftUI.
+/// Ada untuk panggilan sistem yang tidak punya padanan langsung di SwiftUI.
 ///
 /// Saat transfer latar selesai sementara aplikasinya sudah tidak berjalan,
 /// sistem meluncurkannya kembali dan memanggil metode di bawah. SwiftUI tidak
 /// menyediakan jalur untuk itu — `.onOpenURL`, `.backgroundTask`, dan
-/// `scenePhase` semuanya tentang hal lain. Jadi delegate-nya dipasang kembali,
-/// seminimal mungkin.
+/// `scenePhase` semuanya tentang hal lain. Delegate ini juga mendaftarkan
+/// `AppSceneDelegate`, karena quick action sekarang dikirim lewat lifecycle
+/// UIScene, bukan launch options UIApplication.
 final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(
         _ application: UIApplication,
@@ -22,7 +23,22 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             await notifier.ensureAuthorization(prompt: false)
             await BackupService.shared.restoreBackgroundLifecycle()
         }
+
         return true
+    }
+
+    func application(
+        _ application: UIApplication,
+        configurationForConnecting connectingSceneSession: UISceneSession,
+        options: UIScene.ConnectionOptions
+    ) -> UISceneConfiguration {
+        let configuration = UISceneConfiguration(
+            name: nil,
+            sessionRole: connectingSceneSession.role)
+        if connectingSceneSession.role == .windowApplication {
+            configuration.delegateClass = AppSceneDelegate.self
+        }
+        return configuration
     }
 
     func application(
@@ -46,6 +62,29 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     }
 }
 
+/// Penerima quick action berbasis UIScene untuk cold start dan saat aplikasi
+/// sudah berjalan. SwiftUI tetap membuat serta mengelola window-nya; delegate
+/// ini hanya menangani event scene yang belum punya modifier SwiftUI.
+final class AppSceneDelegate: NSObject, UIWindowSceneDelegate {
+    func scene(
+        _ scene: UIScene,
+        willConnectTo session: UISceneSession,
+        options connectionOptions: UIScene.ConnectionOptions
+    ) {
+        guard let shortcutItem = connectionOptions.shortcutItem else { return }
+        AppNavigation.shared.handle(shortcutItem)
+    }
+
+    func windowScene(
+        _ windowScene: UIWindowScene,
+        performActionFor shortcutItem: UIApplicationShortcutItem,
+        completionHandler: @escaping (Bool) -> Void
+    ) {
+        AppNavigation.shared.handle(shortcutItem)
+        completionHandler(true)
+    }
+}
+
 @main
 struct ImmichApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -65,6 +104,7 @@ struct ImmichApp: App {
             AppRouter()
                 .environment(session)
                 .task { await session.restore() }
+                .onOpenURL { AppNavigation.shared.handle($0) }
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
                     case .active:

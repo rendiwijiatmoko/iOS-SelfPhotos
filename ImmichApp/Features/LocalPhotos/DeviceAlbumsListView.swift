@@ -82,25 +82,45 @@ struct DeviceAlbumsListView: View {
     }
 
     private var grid: some View {
-        ScrollView {
-            LazyVGrid(columns: gridColumns, spacing: 16) {
-                ForEach(visibleAlbums) { album in
-                    NavigationLink {
-                        detail(for: album)
-                    } label: {
-                        DeviceAlbumGridCard(album: album)
-                            .matchedTransitionSource(id: album.id, in: albumNamespace)
+        GeometryReader { proxy in
+            ScrollView {
+                LazyVGrid(columns: gridColumns(for: proxy.size.width), spacing: 16) {
+                    ForEach(visibleAlbums) { album in
+                        NavigationLink {
+                            detail(for: album)
+                        } label: {
+                            DeviceAlbumGridCard(album: album)
+                                .matchedTransitionSource(id: album.id, in: albumNamespace)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
+                .padding(.horizontal, Self.gridHorizontalPadding)
+                .padding(.top, 8)
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
         }
     }
 
-    private var gridColumns: [GridItem] {
-        [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+    private static let maximumGridColumns = 4
+    private static let minimumGridColumns = 2
+    private static let minimumAlbumCardWidth: CGFloat = 150
+    private static let gridSpacing: CGFloat = 12
+    private static let gridHorizontalPadding: CGFloat = 16
+
+    /// Sama dengan Albums server: iPhone tetap minimal dua kolom, sedangkan
+    /// ruang tambahan menambah kolom secara bertahap sampai maksimum empat.
+    private func gridColumns(for containerWidth: CGFloat) -> [GridItem] {
+        let availableWidth = max(0, containerWidth - Self.gridHorizontalPadding * 2)
+        let fittingCount = Int(
+            (availableWidth + Self.gridSpacing)
+                / (Self.minimumAlbumCardWidth + Self.gridSpacing))
+        let count = min(
+            Self.maximumGridColumns,
+            max(Self.minimumGridColumns, fittingCount))
+
+        return Array(
+            repeating: GridItem(.flexible(), spacing: Self.gridSpacing),
+            count: count)
     }
 
     private var list: some View {

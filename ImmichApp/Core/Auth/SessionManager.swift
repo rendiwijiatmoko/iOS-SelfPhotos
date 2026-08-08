@@ -301,6 +301,7 @@ class SessionManager {
         // lama; membawanya ke akun berikutnya berarti permintaan gambar yang
         // pasti ditolak.
         AlbumCoverStore.shared.clear()
+        WidgetSnapshotExporter.clear()
         // Potret album, orang, favorit, arsip, dan sampah ikut dibuang dengan
         // alasan yang lebih keras lagi: itu bukan sekadar data basi, itu isi
         // perpustakaan orang lain yang akan tergambar di layar akun berikutnya

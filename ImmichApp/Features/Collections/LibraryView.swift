@@ -25,6 +25,8 @@ struct LibraryView: View {
     @State private var shareFileURL: SharedLinkPresentation?
     @State private var deleteFeedback = 0
     @State private var backupSetupJourney = BackupSetupJourney.shared
+    @State private var navigation = AppNavigation.shared
+    @State private var navigationPath: [ExternalRoute] = []
     /// Kenangan yang sedang dibuka sebagai story; nil berarti tertutup.
     @State private var openedStoryID: String?
     /// Namespace zoom transition untuk kartu album.
@@ -41,6 +43,12 @@ struct LibraryView: View {
         // UserDefaults tidak masalah: `Row(rawValue:)` mengembalikan nil dan
         // `compactMap` membuangnya.
         case memories, albums, favorites, people
+    }
+
+    private enum ExternalRoute: Hashable {
+        case favorites
+        case memories
+        case album(String)
     }
 
     private static let expandedKey = "library.expandedRows"
@@ -69,7 +77,7 @@ struct LibraryView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             assetActionPresentations
                 // Nav bar TETAP dipakai — blur tepi progresifnya digambar oleh
                 // bar itu; menyembunyikannya berarti kehilangan blurnya. Yang
@@ -99,11 +107,69 @@ struct LibraryView: View {
                     openBackupScreen()
                 }
                 .fullScreenCover(isPresented: openedStoryBinding) { memoryStoryCover }
+                .navigationDestination(for: ExternalRoute.self) { route in
+                    externalDestination(route)
+                }
+                .onChange(of: navigation.pendingDestination) { _, destination in
+                    // TabView membangun Library walau Photos/Search masih
+                    // terlihat. Hanya Library aktif yang boleh mengonsumsi
+                    // rute; kalau tidak, MainTabView kehilangan kesempatan
+                    // memindahkan tab dan pengguna tetap berada di halaman lama.
+                    guard isActive, let destination else { return }
+                    openExternalDestination(destination)
+                }
+                .onChange(of: isActive) { _, active in
+                    guard active, let destination = navigation.pendingDestination
+                    else { return }
+                    openExternalDestination(destination)
+                }
                 .task {
                     if backupNotifier.shouldOpenBackup { openBackupScreen() }
                     await start()
+                    if isActive, let destination = navigation.pendingDestination {
+                        openExternalDestination(destination)
+                    }
                 }
         }
+    }
+
+    @ViewBuilder
+    private func externalDestination(_ route: ExternalRoute) -> some View {
+        switch route {
+        case .favorites:
+            AssetCollectionView(
+                title: "Favorites",
+                request: SearchRequestDTO(isFavorite: true, size: 200),
+                isFavoritesCollection: true)
+        case .memories:
+            MemoriesView()
+        case .album(let id):
+            RoutedAlbumView(
+                albumID: id,
+                cachedAlbum: vm?.albums.first(where: { $0.id == id }),
+                onContentsChanged: { assets in
+                    guard vm?.applyAlbumContents(assets, to: id) == true
+                    else { return }
+                    Task { await vm?.refreshAlbums(invalidatingCoverFor: id) }
+                })
+        }
+    }
+
+    private func openExternalDestination(_ destination: AppNavigation.Destination) {
+        let route: ExternalRoute
+        switch destination {
+        case .favorites:
+            route = .favorites
+        case .memories:
+            route = .memories
+        case .album(let id):
+            route = .album(id)
+        case .search:
+            return
+        }
+
+        navigationPath = [route]
+        navigation.consume(destination)
     }
 
     private func openBackupScreen() {
@@ -616,6 +682,45 @@ struct LibraryView: View {
             .buttonStyle(.plain)
 
             Divider().padding(.leading, 20)
+        }
+    }
+}
+
+/// Album dari widget bisa bukan salah satu kartu ringkas yang sedang dimuat di
+/// Library. Ambil DTO-nya langsung berdasarkan id agar deep link selalu menuju
+/// album yang dipilih, bukan jatuh kembali ke daftar semua album.
+private struct RoutedAlbumView: View {
+    let albumID: String
+    let cachedAlbum: AlbumResponseDTO?
+    let onContentsChanged: ([AssetLite]) -> Void
+
+    @Environment(SessionManager.self) private var session
+    @State private var album: AlbumResponseDTO?
+    @State private var didFail = false
+
+    var body: some View {
+        Group {
+            if let album = album ?? cachedAlbum {
+                AlbumDetailView(
+                    album: album,
+                    onContentsChanged: onContentsChanged)
+            } else if didFail {
+                ContentUnavailableView(
+                    "Album Unavailable",
+                    systemImage: "rectangle.stack.badge.exclamationmark",
+                    description: Text("This album could not be loaded."))
+            } else {
+                ProgressView("Loading Album…")
+            }
+        }
+        .task(id: albumID) {
+            guard cachedAlbum == nil else { return }
+            do {
+                album = try await AlbumRepository(
+                    api: APIClient(session: session)).detail(albumID)
+            } catch {
+                didFail = true
+            }
         }
     }
 }

@@ -29,6 +29,12 @@ enum PhotoCollectionLayout {
     case monthly
 }
 
+struct PhotoCollectionEmptyState {
+    let title: LocalizedStringKey
+    let systemImage: String
+    var description: LocalizedStringKey? = nil
+}
+
 /// Layar koleksi foto ala Photos.
 ///
 /// Dipakai bersama oleh detail album, Favorites, foto per orang, dan
@@ -51,6 +57,9 @@ struct PhotoCollectionScreen<Options: View>: View {
     /// yang sudah dibersihkan dari aset yang dibuang di layar lain.
     let assets: [AssetLite]
     let phase: LoadingPhase<Void>
+    /// Pesan khusus setelah server berhasil menyatakan koleksinya kosong.
+    /// `nil` mempertahankan tampilan kosong bawaan layar tersebut.
+    var emptyState: PhotoCollectionEmptyState? = nil
 
     var onRetry: () -> Void
     var onToggleFavorite: (AssetLite) async -> Void
@@ -86,6 +95,9 @@ struct PhotoCollectionScreen<Options: View>: View {
     /// sampah. Mengubah peringatannya, dan membuat penghapusan lewat context menu
     /// ikut bertanya lebih dulu.
     var deletesPermanently = false
+    /// Detail album di iPad tetap membutuhkan sidebar sebagai jalan kembali ke
+    /// All Albums. Di compact/iPhone, tab bar tetap disembunyikan seperti biasa.
+    var keepsTabBarVisibleOnRegularWidth = false
     /// Aksi tambahan di menu elipsis, dirakit dari id yang sedang terpilih.
     var selectionMenu: ((Set<String>) -> [SelectionMenuAction])? = nil
 
@@ -93,9 +105,11 @@ struct PhotoCollectionScreen<Options: View>: View {
     @ViewBuilder var options: () -> Options
 
     @Environment(SessionManager.self) private var session
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     /// Jumlah kolom mengikuti Settings, sama seperti linimasa — kalau tidak,
     /// pilihan yang sama memberi hasil berbeda tergantung layar mana yang dibuka.
-    @AppStorage(SettingsViewModel.gridColumnsKey) private var gridColumns = 3
+    @AppStorage(SettingsViewModel.gridColumnsKey)
+    private var gridColumns = SettingsViewModel.defaultGridColumns
     @State private var isSelecting = false
     @State private var selectedIDs: Set<String> = []
     @State private var isPreparingShare = false
@@ -156,15 +170,21 @@ struct PhotoCollectionScreen<Options: View>: View {
             // Judulnya kembali ke nav bar saat sampulnya tidak digambar. Mode
             // sampul menyerahkan judul ke `dockedTitle`, dan tanpa sampul yang
             // bisa merapat, layar gagalnya akan berdiri tanpa judul sama sekali.
-            .navigationTitle(layout == .hero && !isShowingErrorScreen ? "" : title)
+            .navigationTitle(layout == .hero && !isShowingUnavailableScreen ? "" : title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { screenToolbar }
             // Mode pilih tidak boleh bertahan ke layar gagal: seleksi bisa
             // dinyalakan saat masih memuat, dan kalau muatannya gagal, bar
             // aksinya tertinggal menumpangi pesan error dengan nol foto untuk
             // dikerjakan.
-            .toolbar(isSelecting && !isShowingErrorScreen ? .visible : .hidden, for: .bottomBar)
-            .toolbarVisibility(.hidden, for: .tabBar)
+            .toolbar(
+                isSelecting && !isShowingUnavailableScreen ? .visible : .hidden,
+                for: .bottomBar)
+            .toolbarVisibility(
+                keepsTabBarVisibleOnRegularWidth && horizontalSizeClass == .regular
+                    ? .visible
+                    : .hidden,
+                for: .tabBar)
             .sheet(isPresented: $isSharePresented) {
                 MultiShareSheet(urls: preparedURLs)
             }
@@ -229,6 +249,10 @@ struct PhotoCollectionScreen<Options: View>: View {
                 // Seleksi yang sempat dinyalakan sebelum muatannya gagal
                 // dipadamkan di sini juga, bukan cuma disembunyikan barnya —
                 // kalau tidak, ia menyala lagi begitu Retry berhasil.
+                .onAppear { endSelection() }
+        } else if isShowingEmptyScreen, let emptyState {
+            emptyStateView(emptyState)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .onAppear { endSelection() }
         } else {
             grid
@@ -300,7 +324,7 @@ struct PhotoCollectionScreen<Options: View>: View {
     /// selamanya. Mode bulanan tidak punya sampul untuk diperlihatkan, jadi di
     /// sana barnya dibiarkan berperilaku biasa.
     private var barBackground: Visibility {
-        guard layout == .hero, !isShowingErrorScreen else { return .automatic }
+        guard layout == .hero, !isShowingUnavailableScreen else { return .automatic }
         return isTitleDocked ? .visible : .hidden
     }
 
@@ -308,6 +332,16 @@ struct PhotoCollectionScreen<Options: View>: View {
     private var isShowingErrorScreen: Bool {
         guard case .failed = phase else { return false }
         return visibleAssets.isEmpty
+    }
+
+    private var isShowingEmptyScreen: Bool {
+        guard emptyState != nil, visibleAssets.isEmpty else { return false }
+        if case .loaded = phase { return true }
+        return false
+    }
+
+    private var isShowingUnavailableScreen: Bool {
+        isShowingErrorScreen || isShowingEmptyScreen
     }
 
     /// Sampul hanya ada di mode `.hero`; mode bulanan langsung mulai dari grid.
@@ -488,6 +522,16 @@ struct PhotoCollectionScreen<Options: View>: View {
         } actions: {
             Button("Retry", action: onRetry)
                 .buttonStyle(.borderedProminent)
+        }
+    }
+
+    private func emptyStateView(_ state: PhotoCollectionEmptyState) -> some View {
+        ContentUnavailableView {
+            Label(state.title, systemImage: state.systemImage)
+        } description: {
+            if let description = state.description {
+                Text(description)
+            }
         }
     }
 
@@ -682,14 +726,16 @@ struct PhotoCollectionScreen<Options: View>: View {
             // titleView kosong MENGGANTIKAN judul — bukan mundur ke
             // `navigationTitle`. Kalau yang digate cuma isinya, mode bulanan
             // (Archived, Trash, Locked Folder) kehilangan judul barnya.
-            if layout == .hero && !isShowingErrorScreen {
+            if layout == .hero && !isShowingUnavailableScreen {
                 ToolbarItem(placement: .principal) { dockedTitle }
                     // Judul bukan tombol; kapsul kaca bawaan toolbar hanya
                     // menaruh alas di belakang tulisan yang tidak bisa ditekan.
                     .sharedBackgroundVisibility(.hidden)
             }
 
-            ToolbarItem(placement: .topBarTrailing) { optionsMenu }
+            if !isShowingUnavailableScreen {
+                ToolbarItem(placement: .topBarTrailing) { optionsMenu }
+            }
 
             // Tidak ada foto untuk dipilih. Tombolnya bukan cuma percuma — ia
             // mengunci layar di mode pilih yang tidak bisa dibatalkan lewat apa
@@ -698,7 +744,7 @@ struct PhotoCollectionScreen<Options: View>: View {
             // Spacer-nya ikut digate. Ia memisahkan dua kapsul kaca; ditinggal
             // sendirian tanpa item sesudahnya, yang tersisa cuma celah
             // menggantung di ujung bar.
-            if !isShowingErrorScreen {
+            if !isShowingUnavailableScreen {
                 // Memisahkan keduanya jadi dua kapsul kaca terpisah, bukan satu
                 // grup yang menempel.
                 ToolbarSpacer(.fixed, placement: .topBarTrailing)
@@ -959,6 +1005,7 @@ extension PhotoCollectionScreen where Options == EmptyView {
         subtitle: String? = nil,
         assets: [AssetLite],
         phase: LoadingPhase<Void>,
+        emptyState: PhotoCollectionEmptyState? = nil,
         onRetry: @escaping () -> Void,
         onToggleFavorite: @escaping (AssetLite) async -> Void,
         onDelete: @escaping ([String]) async -> Void,
@@ -983,6 +1030,7 @@ extension PhotoCollectionScreen where Options == EmptyView {
             subtitle: subtitle,
             assets: assets,
             phase: phase,
+            emptyState: emptyState,
             onRetry: onRetry,
             onToggleFavorite: onToggleFavorite,
             onDelete: onDelete,

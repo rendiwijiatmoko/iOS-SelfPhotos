@@ -42,6 +42,10 @@ struct TrashView: View {
             layout: .monthly,
             assets: vm?.assets ?? [],
             phase: vm?.phase ?? .loading,
+            emptyState: PhotoCollectionEmptyState(
+                title: "Trash is Empty",
+                systemImage: "trash",
+                description: "Deleted photos will appear here."),
             onRetry: { Task { await vm?.load() } },
             onToggleFavorite: { await vm?.toggleFavorite($0) },
             // Sudah di tong sampah, jadi "hapus" di sini memang permanen.
@@ -95,12 +99,12 @@ struct TrashView: View {
                     // `trashedAfter` yang menyaringnya: aset yang tidak pernah
                     // dibuang tidak punya tanggal buang, jadi tidak satu pun
                     // dari mereka yang lolos.
-                    let response = try await searchRepo.metadataSearch(
+                    let items = try await searchRepo.allMetadata(
                         SearchRequestDTO(
                             size: 200,
                             withDeleted: true,
                             trashedAfter: trashEpoch))
-                    return response.assets.items.map(AssetLite.init)
+                    return items.map(AssetLite.init)
                 })
         }
         // Setiap kali — penyegarannya tak terlihat, dan itu yang memberi jalan

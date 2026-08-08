@@ -139,6 +139,39 @@ final class AlbumListViewModel {
         }
     }
 
+    /// Menambal jumlah dan cover dari detail album tanpa request daftar baru.
+    /// Detail sudah memegang daftar aset yang benar, jadi hasilnya dapat muncul
+    /// seketika di baris sidebar dan kartu All Albums.
+    func applyContents(_ assets: [AssetLite], to id: String) {
+        guard let index = albums.firstIndex(where: { $0.id == id }) else { return }
+
+        var updated = albums[index]
+        let remainingIDs = Set(assets.map(\.id))
+        let newestID = assets.max(by: { $0.createdAt < $1.createdAt })?.id
+        let currentCoverStillExists = updated.albumThumbnailAssetId
+            .map(remainingIDs.contains) ?? false
+        let nextCover = currentCoverStillExists
+            ? updated.albumThumbnailAssetId
+            : newestID
+
+        guard updated.assetCount != assets.count
+                || updated.albumThumbnailAssetId != nextCover
+        else { return }
+
+        updated.assetCount = assets.count
+        updated.albumThumbnailAssetId = nextCover
+        albums[index] = updated
+        AlbumCoverStore.shared.invalidate(id)
+        persist()
+    }
+
+    /// Detail album sudah menghapusnya di server. Yang tersisa di sini hanya
+    /// membuang representasi bersama yang dipakai sidebar dan All Albums.
+    func removeDeletedAlbum(_ id: String) {
+        albums.removeAll { $0.id == id }
+        persist()
+    }
+
     func retry() async {
         await loadAlbums()
     }

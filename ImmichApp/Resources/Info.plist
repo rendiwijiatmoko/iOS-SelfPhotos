@@ -34,5 +34,37 @@
 		<string>fetch</string>
 		<string>processing</string>
 	</array>
+	<!-- URL yang dipakai WidgetKit untuk membuka tujuan di dalam aplikasi. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>xyz.0xmwehehe.ImmichApp.navigation</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>immiches</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Menu saat ikon aplikasi ditekan lama. -->
+	<key>UIApplicationShortcutItems</key>
+	<array>
+		<dict>
+            <key>UIApplicationShortcutItemIconSymbolName</key>
+            <string>heart</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Favorites</string>
+			<key>UIApplicationShortcutItemType</key>
+			<string>xyz.0xmwehehe.ImmichApp.favorites</string>
+		</dict>
+		<dict>
+			<key>UIApplicationShortcutItemIconType</key>
+			<string>UIApplicationShortcutIconTypeSearch</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Search</string>
+			<key>UIApplicationShortcutItemType</key>
+			<string>xyz.0xmwehehe.ImmichApp.search</string>
+		</dict>
+	</array>
 </dict>
 </plist>

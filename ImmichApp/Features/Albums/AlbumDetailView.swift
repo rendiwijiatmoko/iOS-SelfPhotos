@@ -11,6 +11,9 @@ struct AlbumDetailView: View {
     /// Library memakai daftar aset yang sudah benar di layar ini untuk menambal
     /// count dan cover tanpa menunggu halaman induk dimuat ulang.
     var onContentsChanged: (([AssetLite]) -> Void)? = nil
+    /// Sidebar memakai callback ini untuk menghapus tab album yang baru saja
+    /// dihapus dan kembali ke All Albums.
+    var onDeleted: (() -> Void)? = nil
 
     @Environment(SessionManager.self) private var session
     @Environment(\.dismiss) private var dismiss
@@ -76,6 +79,7 @@ struct AlbumDetailView: View {
             onArchiveSelection: { await vm?.setArchived($0, to: true) },
             onMoveToLocked: { await vm?.setLocked($0) },
             onShareLink: { createAssetLink(for: $0) },
+            keepsTabBarVisibleOnRegularWidth: true,
             selectionMenu: selectionMenu,
             options: {
                 // Isinya sama persis dengan context menu di daftar album —
@@ -191,6 +195,7 @@ struct AlbumDetailView: View {
     private func deleteAlbum() {
         Task {
             if await vm?.deleteAlbum(album.id) == true {
+                onDeleted?()
                 dismiss()
             }
         }

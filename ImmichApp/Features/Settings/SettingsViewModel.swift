@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UIKit
 
 private extension String {
     var normalizedVersion: String {
@@ -33,6 +34,11 @@ final class SettingsViewModel {
     // preferensi theme/grid, dulu app salah mengirimnya ke server.
     static let themeKey = "settings.theme"
     static let gridColumnsKey = "settings.gridColumns"
+    /// iPad punya bidang cukup luas untuk lima petak tanpa membuat thumbnail
+    /// terlalu kecil. Nilai ini hanya dipakai kalau belum ada pilihan tersimpan.
+    static var defaultGridColumns: Int {
+        UIDevice.current.userInterfaceIdiom == .pad ? 5 : 3
+    }
 
     var selectedTheme: String
     var gridColumns: Int
@@ -43,7 +49,7 @@ final class SettingsViewModel {
         self.repo = repo
         selectedTheme = UserDefaults.standard.string(forKey: Self.themeKey) ?? "system"
         let stored = UserDefaults.standard.integer(forKey: Self.gridColumnsKey)
-        gridColumns = stored > 0 ? stored : 3
+        gridColumns = stored > 0 ? stored : Self.defaultGridColumns
     }
 
     /// Nama dan email penggunanya TIDAK diambil di sini — `SessionManager` sudah

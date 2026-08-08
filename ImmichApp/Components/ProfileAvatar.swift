@@ -80,9 +80,9 @@ struct ProfileAvatar: View {
                 .stroke(
                     AngularGradient(
                         colors: [
-                            Color.accentColor.opacity(0.12),
-                            Color.accentColor,
-                            Color.accentColor.opacity(0.12)
+                            Color.orange.opacity(0.12),
+                            Color.orange,
+                            Color.orange.opacity(0.12)
                         ],
                         center: .center),
                     style: StrokeStyle(
@@ -183,7 +183,7 @@ struct ProfileAvatar: View {
     static let toolbarTrailingCompensation: CGFloat = -10
 
     private static let gradient = LinearGradient(
-        colors: [.orange, .pink, .purple],
+        colors: [.cyan, .blue, .indigo],
         startPoint: .topLeading,
         endPoint: .bottomTrailing)
 
