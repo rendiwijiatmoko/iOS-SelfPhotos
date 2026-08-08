@@ -91,12 +91,17 @@ final class AlbumListViewModel {
 
     func update(_ id: String, name: String, description: String) async {
         let trimmedName = name.trimmingCharacters(in: .whitespaces)
+        let trimmedDescription = description.trimmingCharacters(in: .whitespaces)
         guard !trimmedName.isEmpty else { return }
 
         do {
-            try await repo.update(id, name: trimmedName, description: description)
+            try await repo.update(
+                id,
+                name: trimmedName,
+                description: .some(trimmedDescription.isEmpty ? nil : trimmedDescription))
             if let index = albums.firstIndex(where: { $0.id == id }) {
                 albums[index].albumName = trimmedName
+                albums[index].description = trimmedDescription.isEmpty ? nil : trimmedDescription
                 persist()
             }
         } catch {

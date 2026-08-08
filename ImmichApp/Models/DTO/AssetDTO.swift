@@ -7,9 +7,11 @@ import Foundation
 /// `CodingKeys` di bawah sudah memuat seluruh properti tersimpan, jadi tidak ada
 /// yang hilang di perjalanan pulang.
 ///
-/// Yang perlu diperhatikan cuma `duration`. Server mengirimnya sebagai teks jam
-/// (`"0:00:12.500"`), tapi sintesis akan menuliskannya sebagai angka detik — dan
-/// itu tidak apa-apa, karena `init(from:)` di bawah memang menerima KEDUA bentuk.
+/// Yang perlu diperhatikan cuma `duration`. API lama dapat mengirim teks jam,
+/// sedangkan kontrak API baru mengirim angka milidetik. Snapshot offline milik
+/// aplikasi tetap menyimpannya sebagai angka detik. `userInfo` pada decoder
+/// membedakan kedua sumber itu supaya pembaruan kontrak API tidak merusak
+/// snapshot yang sudah ada di perangkat.
 struct AssetResponseDTO: Codable, Identifiable {
     let id: String
     let type: String
@@ -20,10 +22,8 @@ struct AssetResponseDTO: Codable, Identifiable {
     let isTrashed: Bool
     /// Durasi video dalam detik (null/0 untuk foto).
     ///
-    /// `/assets/{id}` mengirim field ini sebagai STRING berformat
-    /// `"0:00:00.00000"`, bukan angka. Dulu di sini dideklarasikan `Int?`,
-    /// sehingga decoding seluruh DTO gagal, `detail` tidak pernah terisi, dan
-    /// tombol yang bergantung padanya (favorite, info) permanen disabled.
+    /// Di dalam aplikasi nilainya selalu detik. Decoder menormalisasi string
+    /// jam lama maupun angka milidetik dari API sebelum nilai ini dipakai UI.
     let duration: Double?
     let thumbhash: String?
     let localDateTime: Date
@@ -64,14 +64,28 @@ struct AssetResponseDTO: Codable, Identifiable {
         livePhotoVideoId = try c.decodeIfPresent(String.self, forKey: .livePhotoVideoId)
 
         // Terima string "H:MM:SS.sss" maupun angka, supaya perubahan format di
-        // sisi server tidak lagi menjatuhkan seluruh decoding.
+        // sisi server tidak lagi menjatuhkan seluruh decoding. JSON API Immich
+        // menandai angka sebagai milidetik; decoder snapshot tidak memasang
+        // tanda itu karena snapshot Codable lama memang menyimpan detik.
         if let text = try? c.decodeIfPresent(String.self, forKey: .duration) {
             duration = ClockDuration.seconds(fromClock: text)
         } else {
-            duration = try c.decodeIfPresent(Double.self, forKey: .duration)
+            let numeric = try c.decodeIfPresent(Double.self, forKey: .duration)
+            if decoder.userInfo[.immichAssetDurationIsMilliseconds] as? Bool == true {
+                duration = numeric.map { $0 / 1_000 }
+            } else {
+                duration = numeric
+            }
         }
     }
 
+}
+
+extension CodingUserInfoKey {
+    /// Hanya dipasang oleh decoder respons API. Decoder snapshot lokal sengaja
+    /// tidak memasangnya karena snapshot versi lama menyimpan angka detik.
+    static let immichAssetDurationIsMilliseconds = CodingUserInfoKey(
+        rawValue: "xyz.0xmwehehe.ImmichApp.assetDurationMilliseconds")!
 }
 
 /// Init nilai, DI EXTENSION — bukan di dalam struct.

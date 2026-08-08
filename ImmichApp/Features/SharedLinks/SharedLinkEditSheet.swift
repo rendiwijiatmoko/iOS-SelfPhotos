@@ -253,22 +253,16 @@ struct SharedLinkEditSheet: View {
     /// menghitung selisih per field hanya menambah cara baru untuk meleset.
     private var edit: SharedLinkEditDTO {
         let trimmedSlug = slug.trimmingCharacters(in: .whitespaces)
+        let trimmedDescription = description.trimmingCharacters(in: .whitespaces)
 
         return SharedLinkEditDTO(
-            // String kosong DIKIRIM, bukan diubah jadi nil — itulah cara
-            // menghapus deskripsi dan kata sandi. `nil` justru berarti "jangan
-            // sentuh", dan bidang yang dikosongkan pengguna tidak akan pernah
-            // benar-benar kosong.
-            description: description.trimmingCharacters(in: .whitespaces),
-            password: password,
-            // Dikirim hanya kalau memang ada masa berlaku; kalau tidak,
-            // `changeExpiryTime` sendirian yang berarti "tidak pernah
-            // kedaluwarsa".
-            expiresAt: hasExpiry ? expiresAt : nil,
+            // Current SharedLinkEditDto uses null to clear nullable fields.
+            description: .some(trimmedDescription.isEmpty ? nil : trimmedDescription),
+            password: .some(password.isEmpty ? nil : password),
+            expiresAt: .some(hasExpiry ? expiresAt : nil),
             allowUpload: allowUpload,
             allowDownload: allowDownload,
             showMetadata: showMetadata,
-            changeExpiryTime: true,
             // Selalu `.some(...)` — bukan `nil` di lapisan luarnya. Lihat catatan
             // di `SharedLinkEditDTO`: hanya bentuk itu yang terkirim, dan isinya
             // yang nil-lah yang jadi `null` dan benar-benar menghapus URL

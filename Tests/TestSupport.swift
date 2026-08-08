@@ -8,7 +8,9 @@ import XCTest
 @MainActor
 class MockSessionManager: SessionManager {
     /// When set, replaces the real auth headers (used to verify header attachment).
-    var testAuthHeaders: [String: String]?
+    var testAuthHeaders: [String: String]? {
+        didSet { refreshSnapshot() }
+    }
 
     var shouldSucceedPing = false
     var shouldSucceedLogin = false

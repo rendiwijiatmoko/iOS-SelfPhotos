@@ -12,4 +12,8 @@ struct LoginResponseDTO: Decodable {
     let name: String
     let isAdmin: Bool
     let shouldChangePassword: Bool
+    /// Field wajib di OpenAPI v3, opsional di klien agar login ke server lama
+    /// tidak rusak hanya karena metadata ini belum tersedia.
+    let isOnboarded: Bool?
+    let profileImagePath: String?
 }

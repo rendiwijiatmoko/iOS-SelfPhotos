@@ -218,10 +218,11 @@ final class AlbumDetailViewModel {
     }
 
     func updateAlbum(_ id: String, name: String, description: String) async {
+        let trimmedDescription = description.trimmingCharacters(in: .whitespaces)
         try? await albumRepo.update(
             id,
             name: name.trimmingCharacters(in: .whitespaces),
-            description: description)
+            description: .some(trimmedDescription.isEmpty ? nil : trimmedDescription))
     }
 
     func addUsers(_ userIDs: [String], to albumId: String) async {

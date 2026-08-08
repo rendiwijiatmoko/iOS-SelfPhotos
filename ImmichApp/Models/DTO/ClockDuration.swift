@@ -39,7 +39,7 @@ enum ClockDuration {
 /// durasinya saja, bukan seluruh albumnya.
 enum DurationColumn: Decodable {
     case clock(String)
-    case seconds(Double)
+    case milliseconds(Double)
     case absent
 
     init(from decoder: Decoder) throws {
@@ -49,7 +49,7 @@ enum DurationColumn: Decodable {
         } else if let text = try? container.decode(String.self) {
             self = .clock(text)
         } else if let number = try? container.decode(Double.self) {
-            self = .seconds(number)
+            self = .milliseconds(number)
         } else {
             self = .absent
         }
@@ -57,15 +57,12 @@ enum DurationColumn: Decodable {
 
     /// Durasi dalam DETIK.
     ///
-    /// Angka telanjang diperlakukan sebagai detik, sama seperti di
-    /// `AssetResponseDTO` — bukan milidetik. Anggapan milidetik yang lama tidak
-    /// pernah teruji: satu-satunya pemakai endpoint ini adalah detail album, dan
-    /// album berisi video justru selalu gagal decode sebelum angkanya sempat
-    /// terpakai.
+    /// Kontrak `TimeBucketAssetResponseDto.duration` v3 menggunakan integer
+    /// milidetik. String jam tetap diterima untuk kompatibilitas server lama.
     var seconds: Double? {
         switch self {
         case .clock(let text): return ClockDuration.seconds(fromClock: text)
-        case .seconds(let value): return value
+        case .milliseconds(let value): return value / 1_000
         case .absent: return nil
         }
     }

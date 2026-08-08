@@ -1,0 +1,45 @@
+{
+  "source": "https://github.com/immich-app/immich/blob/51c2f21497800225e0622d515d0ef463d7af69cc/open-api/immich-openapi-specs.json",
+  "sourceCommit": "51c2f21497800225e0622d515d0ef463d7af69cc",
+  "openAPIVersion": "3.0.0",
+  "immichAPIVersion": "3.1.0",
+  "contracts": {
+    "AssetResponseDto.duration": {
+      "jsonType": "integer",
+      "nullable": true,
+      "unit": "milliseconds"
+    },
+    "TimeBucketAssetResponseDto.duration.items": {
+      "jsonType": "integer",
+      "nullable": true,
+      "unit": "milliseconds"
+    },
+    "SyncAssetV1.duration": {
+      "jsonType": "string",
+      "nullable": true,
+      "unit": "clock"
+    },
+    "PinCodeSetupDto.pinCode": {
+      "description": "PIN code (4-6 digits)",
+      "minimumLength": 4,
+      "maximumLength": 6
+    },
+    "SharedLinkEditDto": {
+      "nullableFields": ["description", "expiresAt", "password", "slug"],
+      "legacyFieldsNotInV3": ["changeExpiryTime"]
+    },
+    "AlbumCreateDto.description": {
+      "nullable": true,
+      "emptyStringDeprecatedSince": "v3"
+    },
+    "AssetTypeEnum": {
+      "values": ["IMAGE", "VIDEO", "AUDIO", "OTHER"]
+    },
+    "AssetVisibility": {
+      "values": ["archive", "timeline", "hidden", "locked"]
+    },
+    "SharedLinkType": {
+      "values": ["ALBUM", "INDIVIDUAL"]
+    }
+  }
+}

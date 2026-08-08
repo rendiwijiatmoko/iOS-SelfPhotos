@@ -129,9 +129,9 @@ struct LockedFolderView: View {
                         isVerifying = false
                     }
                 })
-            // Sheet pendek yang tidak bisa digulir: tingginya dipatok supaya
-            // tidak menutupi seluruh layar hanya untuk enam lingkaran.
-            .presentationDetents([.height(300)])
+            // Tetap ringkas, tetapi cukup untuk petunjuk 4–6 digit dan tombol
+            // Continue yang dibutuhkan PIN empat atau lima digit.
+            .presentationDetents([.height(360)])
             .presentationDragIndicator(.visible)
         }
     }
@@ -161,8 +161,8 @@ struct LockedFolderView: View {
     ///
     ///   Kalau `/auth/status` gagal di detik itu — jaringan putus sekejap —
     ///   menimpa statusnya dengan nil berarti sheet PIN tidak pernah tertutup
-    ///   padahal PIN-nya sudah benar, dan kolomnya sudah penuh enam digit
-    ///   sehingga tidak bisa dikirim ulang tanpa menghapusnya dulu. Server
+    ///   padahal PIN-nya sudah benar dan input sudah terkirim, sehingga tidak
+    ///   bisa dikirim ulang tanpa menghapusnya dulu. Server
     ///   sudah bilang "diterima"; itu cukup untuk melanjutkan.
     private func checkStatus(assumingUnlocked: Bool = false) async {
         if let fresh = try? await repo?.status() {
@@ -175,10 +175,25 @@ struct LockedFolderView: View {
     }
 }
 
-/// Sheet masukan PIN: enam lingkaran, tanpa tombol.
+enum PinCodeContract {
+    static let minimumLength = 4
+    static let maximumLength = 6
+
+    static func sanitized(_ value: String) -> String {
+        String(value.filter(\.isNumber).prefix(maximumLength))
+    }
+
+    static func isValid(_ value: String) -> Bool {
+        (minimumLength...maximumLength).contains(value.count)
+            && value.allSatisfy(\.isNumber)
+    }
+}
+
+/// Sheet masukan PIN sesuai kontrak Immich: empat sampai enam digit.
 ///
-/// Terkirim sendiri begitu lingkarannya penuh — dengan panjang yang sudah pasti,
-/// tombol konfirmasi hanya menambah satu ketukan yang tidak menentukan apa pun.
+/// Enam digit tetap terkirim otomatis seperti perilaku lama. Untuk PIN empat
+/// atau lima digit tersedia tombol Continue karena panjang akhirnya tidak bisa
+/// diketahui hanya dari ketikan.
 struct PinPromptSheet: View {
     let repo: PinRepository
     /// true kalau pengguna belum pernah membuat PIN sama sekali.
@@ -189,8 +204,6 @@ struct PinPromptSheet: View {
     @State private var isWorking = false
     @State private var failureCount = 0
     @FocusState private var isFocused: Bool
-
-    private let pinLength = 6
 
     var body: some View {
         VStack(spacing: 20) {
@@ -209,11 +222,27 @@ struct PinPromptSheet: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
 
+            Text("Use 4 to 6 digits.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+
             pinField
 
-            if isWorking {
-                ProgressView()
+            Button {
+                Task { await submit() }
+            } label: {
+                Group {
+                    if isWorking {
+                        ProgressView()
+                    } else {
+                        Text("Continue")
+                    }
+                }
+                .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.borderedProminent)
+            .padding(.horizontal, 40)
+            .disabled(!PinCodeContract.isValid(pin) || isWorking)
 
             Spacer(minLength: 0)
         }
@@ -237,13 +266,17 @@ struct PinPromptSheet: View {
                 .focused($isFocused)
                 .opacity(0.01)
                 .onChange(of: pin) { _, newValue in
-                    let digits = newValue.filter(\.isNumber)
-                    pin = String(digits.prefix(pinLength))
-                    if pin.count == pinLength { Task { await submit() } }
+                    let sanitized = PinCodeContract.sanitized(newValue)
+                    if pin != sanitized {
+                        pin = sanitized
+                    }
+                    if sanitized.count == PinCodeContract.maximumLength {
+                        Task { await submit() }
+                    }
                 }
 
             HStack(spacing: 16) {
-                ForEach(0..<pinLength, id: \.self) { index in
+                ForEach(0..<PinCodeContract.maximumLength, id: \.self) { index in
                     dot(filled: index < pin.count)
                 }
             }
@@ -263,7 +296,7 @@ struct PinPromptSheet: View {
     }
 
     private func submit() async {
-        guard !isWorking else { return }
+        guard !isWorking, PinCodeContract.isValid(pin) else { return }
         isWorking = true
         defer { isWorking = false }
 

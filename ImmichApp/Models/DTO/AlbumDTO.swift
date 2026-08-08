@@ -39,3 +39,10 @@ struct AlbumResponseDTO: Decodable, Identifiable, Hashable {
         lhs.id == rhs.id
     }
 }
+
+/// PATCH /albums/{id}. Optional berlapis pada description mengikuti kontrak
+/// nullable v3: nil berarti field tidak dikirim, `.some(nil)` berarti dihapus.
+struct AlbumUpdateDTO: Encodable {
+    let albumName: String?
+    let description: String??
+}

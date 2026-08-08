@@ -236,8 +236,7 @@ final class DTODecodingTests: XCTestCase {
         XCTAssertEqual(dto.durationText, "1:35")
     }
 
-    /// Server yang mengirim angka tidak boleh menjatuhkan decoding; angkanya
-    /// diperlakukan sebagai detik.
+    /// Kontrak API baru mengirim angka milidetik; nilai domain harus tetap detik.
     func testAssetVideoDurationNumberFallback() throws {
         let json = """
         {
@@ -248,7 +247,7 @@ final class DTODecodingTests: XCTestCase {
             "isFavorite": false,
             "isArchived": false,
             "isTrashed": false,
-            "duration": 95,
+            "duration": 95000,
             "thumbhash": null,
             "localDateTime": "2024-01-01T12:00:00.000Z",
             "exifInfo": null,
@@ -259,6 +258,20 @@ final class DTODecodingTests: XCTestCase {
 
         XCTAssertEqual(dto.duration, 95)
         XCTAssertEqual(dto.durationText, "1:35")
+    }
+
+    /// Snapshot offline lama menyimpan angka detik. Decoder non-API tidak boleh
+    /// membaginya lagi dengan 1.000 ketika aplikasi diperbarui.
+    func testAssetVideoDurationSnapshotNumberRemainsSeconds() throws {
+        let asset = makeTestAsset(type: "VIDEO", duration: 95)
+        let data = try JSONEncoder.immich.encode(asset)
+        let snapshotDecoder = JSONDecoder()
+        snapshotDecoder.dateDecodingStrategy = .iso8601
+
+        let decoded = try snapshotDecoder.decode(AssetResponseDTO.self, from: data)
+
+        XCTAssertEqual(decoded.duration, 95)
+        XCTAssertEqual(decoded.durationText, "1:35")
     }
 
     func testExifDTODecoding() throws {
@@ -340,7 +353,7 @@ final class DTODecodingTests: XCTestCase {
         let json = """
         {
             "id": ["a", "b", "c", "d"],
-            "duration": [null, "0:01:35.00000", 95, true]
+            "duration": [null, "0:01:35.00000", 95000, true]
         }
         """
         let dto = try decoder.decode(TimelineBucketDTO.self, from: json.data(using: .utf8)!)

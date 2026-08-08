@@ -157,6 +157,9 @@ struct ServerErrorDTO: Decodable { let message: String? }
 extension JSONDecoder {
     static let immich: JSONDecoder = {
         let d = JSONDecoder()
+        // `AssetResponseDto.duration` pada API Immich adalah milidetik. DTO
+        // menormalisasikannya ke detik untuk AVFoundation dan label durasi.
+        d.userInfo[.immichAssetDurationIsMilliseconds] = true
         d.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
             let raw = try container.decode(String.self)

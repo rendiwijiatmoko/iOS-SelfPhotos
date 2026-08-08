@@ -33,7 +33,9 @@ class SessionManager {
     /// nyaris tidak pernah berubah.
     private(set) var snapshot: (baseURL: URL?, authHeaders: [String: String]) = (nil, [:])
 
-    private func refreshSnapshot() {
+    // Internal so specialized session implementations (including tests) can keep
+    // the request snapshot aligned when overriding request context properties.
+    func refreshSnapshot() {
         snapshot = (baseURL, authHeaders)
     }
 

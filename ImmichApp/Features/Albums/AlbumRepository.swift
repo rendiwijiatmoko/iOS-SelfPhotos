@@ -64,15 +64,11 @@ class AlbumRepository {
 
     /// `description` opsional supaya field yang tidak diisi tidak ikut terkirim
     /// dan menimpa nilai yang sudah ada dengan string kosong.
-    func update(_ id: String, name: String?, description: String?) async throws {
-        struct Body: Encodable {
-            let albumName: String?
-            let description: String?
-        }
+    func update(_ id: String, name: String?, description: String??) async throws {
         try await api.sendVoid(.json(
             "/albums/\(id)",
             method: .patch,
-            body: Body(albumName: name, description: description)))
+            body: AlbumUpdateDTO(albumName: name, description: description)))
     }
 
     /// Peran "editor" mengikuti bawaan Immich saat menambahkan lewat UI.

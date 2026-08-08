@@ -89,18 +89,14 @@ struct SharedLinkDTO: Decodable, Identifiable {
 /// Semua opsional: field yang tidak diisi tidak ikut terkirim dan nilainya di
 /// server dibiarkan apa adanya.
 struct SharedLinkEditDTO: Encodable {
-    var description: String? = nil
-    var password: String? = nil
-    var expiresAt: Date? = nil
+    /// Optional berlapis membedakan "jangan ubah" (`nil`) dari "hapus"
+    /// (`.some(nil)`). SharedLinkEditDto v3 menerima null secara langsung.
+    var description: String?? = nil
+    var password: String?? = nil
+    var expiresAt: Date?? = nil
     var allowUpload: Bool? = nil
     var allowDownload: Bool? = nil
     var showMetadata: Bool? = nil
-    /// WAJIB true setiap kali masa berlaku diubah — termasuk saat dihapus.
-    ///
-    /// Immich tidak bisa membedakan "tidak diisi" dari "dikosongkan" pada
-    /// `expiresAt`, jadi bendera inilah yang menyatakannya: bendera menyala
-    /// tanpa `expiresAt` berarti tautannya tidak pernah kedaluwarsa.
-    var changeExpiryTime: Bool? = nil
     /// Opsional BERLAPIS, dan itu disengaja.
     ///
     /// `encodeIfPresent` membuang lapisan luarnya: `nil` berarti fieldnya tidak
