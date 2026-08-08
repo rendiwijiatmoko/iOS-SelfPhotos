@@ -69,7 +69,14 @@ struct LocalPhoto: Identifiable, Sendable {
     /// `PHAsset.localIdentifier`.
     let id: String
     let createdAt: Date
+    /// Tanggal perubahan asli dari PhotoKit. Upload tidak boleh menyalin
+    /// `createdAt` ke field modified karena server memakai keduanya untuk
+    /// menyusun metadata dan mendeteksi perubahan asset.
+    let modifiedAt: Date
     let isVideo: Bool
+    /// Live Photo adalah satu item di UI, tetapi dua resource saat backup:
+    /// still image dan motion video.
+    let isLivePhoto: Bool
     let duration: Double?
     let ratio: Double
 }
@@ -252,11 +259,15 @@ final class LocalPhotoLibrary: NSObject {
         result.reserveCapacity(assets.count)
         assets.enumerateObjects { asset, _, _ in
             guard let createdAt = asset.creationDate ?? asset.modificationDate else { return }
+            let modifiedAt = asset.modificationDate ?? createdAt
             let height = max(asset.pixelHeight, 1)
             result.append(LocalPhoto(
                 id: asset.localIdentifier,
                 createdAt: createdAt,
+                modifiedAt: modifiedAt,
                 isVideo: asset.mediaType == .video,
+                isLivePhoto: asset.mediaType == .image
+                    && asset.mediaSubtypes.contains(.photoLive),
                 duration: asset.mediaType == .video ? asset.duration : nil,
                 ratio: Double(asset.pixelWidth) / Double(height)))
         }
@@ -488,10 +499,14 @@ final class LocalPhotoLibrary: NSObject {
                     if let title { titles[asset.localIdentifier] = title }
                     let width = Double(asset.pixelWidth)
                     let height = Double(asset.pixelHeight)
+                    let createdAt = asset.creationDate ?? asset.modificationDate ?? Date()
                     unique[asset.localIdentifier] = LocalPhoto(
                         id: asset.localIdentifier,
-                        createdAt: asset.creationDate ?? asset.modificationDate ?? Date(),
+                        createdAt: createdAt,
+                        modifiedAt: asset.modificationDate ?? createdAt,
                         isVideo: asset.mediaType == .video,
+                        isLivePhoto: asset.mediaType == .image
+                            && asset.mediaSubtypes.contains(.photoLive),
                         duration: asset.mediaType == .video ? asset.duration : nil,
                         ratio: height > 0 ? width / height : 1)
                 }
@@ -712,6 +727,52 @@ final class LocalPhotoLibrary: NSObject {
         return (remoteURL, resource.originalFilename)
     }
 
+    /// Motion resource pasangan Live Photo.
+    ///
+    /// PhotoKit menyimpan Live Photo sebagai `.photo + .pairedVideo`. Asset
+    /// yang pernah diedit dapat memakai pasangan `.fullSizePhoto +
+    /// .fullSizePairedVideo`; pemilih resource di bawah selalu mengambil dua
+    /// sisi dari pasangan yang sama agar still dan motion tidak berbeda versi.
+    nonisolated func livePhotoMotionFile(
+        for id: String,
+        allowsNetworkFallback: Bool = true
+    ) async -> (url: URL, filename: String)? {
+        guard let resource = await Task.detached(priority: .utility, operation: {
+            guard let asset = Self.fetchAsset(id),
+                  asset.mediaSubtypes.contains(.photoLive)
+            else { return PHAssetResource?.none }
+            return Self.uploadResources(for: asset).motion
+        }).value else { return nil }
+
+        if let localURL = await Self.writeTemporaryFile(resource, allowsNetwork: false) {
+            return (localURL, resource.originalFilename)
+        }
+        guard allowsNetworkFallback,
+              let remoteURL = await Self.writeTemporaryFile(resource, allowsNetwork: true)
+        else { return nil }
+        return (remoteURL, resource.originalFilename)
+    }
+
+    /// Membaca metadata satu asset langsung dari PhotoKit. Dipakai saat iOS
+    /// meluncurkan ulang aplikasi hanya untuk menyelesaikan tahap kedua upload
+    /// Live Photo; daftar album di memori belum tentu sudah dimuat saat itu.
+    nonisolated func photoMetadata(for id: String) async -> LocalPhoto? {
+        await Task.detached(priority: .utility) {
+            guard let asset = Self.fetchAsset(id) else { return nil }
+            let createdAt = asset.creationDate ?? asset.modificationDate ?? Date()
+            let height = max(asset.pixelHeight, 1)
+            return LocalPhoto(
+                id: asset.localIdentifier,
+                createdAt: createdAt,
+                modifiedAt: asset.modificationDate ?? createdAt,
+                isVideo: asset.mediaType == .video,
+                isLivePhoto: asset.mediaType == .image
+                    && asset.mediaSubtypes.contains(.photoLive),
+                duration: asset.mediaType == .video ? asset.duration : nil,
+                ratio: Double(asset.pixelWidth) / Double(height))
+        }.value
+    }
+
     private nonisolated static func writeTemporaryFile(
         _ resource: PHAssetResource,
         allowsNetwork: Bool
@@ -859,9 +920,31 @@ final class LocalPhotoLibrary: NSObject {
     /// video beserta foto sampulnya. Yang diambil harus sesuai jenis asetnya,
     /// kalau tidak sebuah video bisa terunggah sebagai gambar diam.
     private nonisolated static func primaryResource(for asset: PHAsset) -> PHAssetResource? {
+        uploadResources(for: asset).primary
+    }
+
+    /// Memilih pasangan resource yang konsisten untuk upload.
+    private nonisolated static func uploadResources(
+        for asset: PHAsset
+    ) -> (primary: PHAssetResource?, motion: PHAssetResource?) {
         let resources = PHAssetResource.assetResources(for: asset)
-        let wanted: PHAssetResourceType = asset.mediaType == .video ? .video : .photo
-        return resources.first { $0.type == wanted } ?? resources.first
+        if asset.mediaType == .video {
+            return (resources.first { $0.type == .video } ?? resources.first, nil)
+        }
+
+        if asset.mediaSubtypes.contains(.photoLive) {
+            let fullSizePhoto = resources.first { $0.type == .fullSizePhoto }
+            let fullSizeMotion = resources.first { $0.type == .fullSizePairedVideo }
+            if let fullSizePhoto, let fullSizeMotion {
+                return (fullSizePhoto, fullSizeMotion)
+            }
+
+            let photo = resources.first { $0.type == .photo } ?? fullSizePhoto
+            let motion = resources.first { $0.type == .pairedVideo } ?? fullSizeMotion
+            return (photo ?? resources.first, motion)
+        }
+
+        return (resources.first { $0.type == .photo } ?? resources.first, nil)
     }
 
     // MARK: - Hapus

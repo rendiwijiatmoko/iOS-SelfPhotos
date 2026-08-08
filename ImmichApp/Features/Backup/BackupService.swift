@@ -1,6 +1,26 @@
 import Foundation
 import Observation
 
+private enum LivePhotoBackupError: LocalizedError {
+    case motionResourceMissing
+    case primaryResourceMissing
+    case sessionUnavailable
+    case assetNoLongerLivePhoto
+
+    var errorDescription: String? {
+        switch self {
+        case .motionResourceMissing:
+            String(localized: "The motion part of this Live Photo could not be read.")
+        case .primaryResourceMissing:
+            String(localized: "The photo part of this Live Photo could not be read.")
+        case .sessionUnavailable:
+            String(localized: "The upload session is no longer available.")
+        case .assetNoLongerLivePhoto:
+            String(localized: "This asset is no longer available as a Live Photo.")
+        }
+    }
+}
+
 /// Pencadangan otomatis foto perangkat ke server.
 ///
 /// **Apa yang bisa dan tidak bisa dilakukan di iOS.** Aplikasi TIDAK bisa
@@ -385,6 +405,7 @@ final class BackupService {
     func allowsNetwork(for photo: LocalPhoto) -> Bool {
         guard NetworkMonitor.shared.isOnline else { return false }
         guard NetworkMonitor.shared.isExpensive else { return true }
+        if photo.isLivePhoto { return cellularPhotos && cellularVideos }
         return photo.isVideo ? cellularVideos : cellularPhotos
     }
 
@@ -428,8 +449,28 @@ final class BackupService {
 
         for photo in photos {
             if Task.isCancelled { return }
-            let allowsCellular = photo.isVideo ? cellularVideos : cellularPhotos
+            // Live Photo tidak boleh terpotong menjadi still image ketika opsi
+            // video seluler dimatikan. Kedua izin harus aktif agar pasangan
+            // lengkap boleh naik melalui jaringan mahal.
+            let allowsCellular = photo.isLivePhoto
+                ? (cellularPhotos && cellularVideos)
+                : (photo.isVideo ? cellularVideos : cellularPhotos)
             let mayReadFromICloud = !NetworkMonitor.shared.isExpensive || allowsCellular
+
+            if photo.isLivePhoto {
+                do {
+                    try await enqueueLivePhoto(
+                        photo,
+                        repository: repo,
+                        allowsCellular: allowsCellular,
+                        mayReadFromICloud: mayReadFromICloud)
+                } catch {
+                    pendingPhotos[photo.id] = nil
+                    failures.append(photo.id)
+                    lastError = error.localizedDescription
+                }
+                continue
+            }
 
             guard let file = await LocalPhotoLibrary.shared.originalFile(
                 for: LocalPhotoLibrary.assetID(for: photo.id),
@@ -459,7 +500,7 @@ final class BackupService {
                     // sama.
                     deviceAssetId: photo.id,
                     createdAt: photo.createdAt,
-                    modifiedAt: photo.createdAt)
+                    modifiedAt: photo.modifiedAt)
                 try? FileManager.default.removeItem(at: file.url)
                 if Task.isCancelled {
                     try? FileManager.default.removeItem(at: prepared.bodyFile)
@@ -484,6 +525,169 @@ final class BackupService {
                 failures.append(photo.id)
                 lastError = error.localizedDescription
             }
+        }
+    }
+
+    /// Tahap pertama Live Photo: upload motion video sebagai hidden asset.
+    /// Setelah server mengembalikan id-nya, `BackupUploader` memanggil
+    /// `finishLivePhotoMotionUpload` untuk merakit tahap still image.
+    private func enqueueLivePhoto(
+        _ photo: LocalPhoto,
+        repository: BackupRepository,
+        allowsCellular: Bool,
+        mayReadFromICloud: Bool
+    ) async throws {
+        guard let motion = await LocalPhotoLibrary.shared.livePhotoMotionFile(
+            for: LocalPhotoLibrary.assetID(for: photo.id),
+            allowsNetworkFallback: mayReadFromICloud)
+        else { throw LivePhotoBackupError.motionResourceMissing }
+
+        do {
+            let checksum = try await repository.checksum(forFile: motion.url)
+            try Task.checkCancellation()
+            pendingPhotos[photo.id] = photo
+
+            // Jika motion video sudah sampai ke server pada putaran sebelumnya
+            // tetapi aplikasi mati sebelum still image sempat diantrikan, pakai
+            // kembali id tersebut. Ini mencegah hidden orphan bertambah tiap
+            // retry dan membuat alur dua tahap idempotent.
+            let correlationID = "\(photo.id):live-photo-motion"
+            if let existing = try? await repository.duplicateMatches([
+                (id: correlationID, checksum: checksum),
+            ]).first?.serverAssetID {
+                try? FileManager.default.removeItem(at: motion.url)
+                try await enqueueLivePhotoPrimary(
+                    photo,
+                    motionAssetID: existing,
+                    repository: repository,
+                    allowsCellular: allowsCellular,
+                    mayReadFromICloud: mayReadFromICloud)
+                return
+            }
+
+            let prepared = try await repository.makeUploadRequest(
+                fileURL: motion.url,
+                filename: motion.filename,
+                checksum: checksum,
+                deviceAssetId: photo.id,
+                createdAt: photo.createdAt,
+                modifiedAt: photo.modifiedAt,
+                // Hidden mencegah server menjalankan job media biasa pada klip
+                // motion yang hanya merupakan pasangan Live Photo.
+                additionalFields: ["visibility": "hidden"])
+            try? FileManager.default.removeItem(at: motion.url)
+            try Task.checkCancellation()
+
+            BackupUploader.shared.enqueue(
+                prepared,
+                localIdentifier: photo.id,
+                checksum: checksum,
+                allowsCellular: allowsCellular,
+                phase: .livePhotoMotion)
+        } catch {
+            try? FileManager.default.removeItem(at: motion.url)
+            throw error
+        }
+    }
+
+    /// Callback tahap motion Live Photo. Fungsi ini sengaja `async`: pada cold
+    /// launch daftar PhotoKit dan repository belum tentu sudah tersedia, tetapi
+    /// task description masih membawa local identifier yang dibutuhkan.
+    func finishLivePhotoMotionUpload(
+        localIdentifier: String,
+        motionChecksum: String,
+        outcome: Result<String, Error>,
+        remainingBackgroundTasks: Int
+    ) async {
+        guard acceptsUploadResults else {
+            pendingPhotos[localIdentifier] = nil
+            return
+        }
+        switch outcome {
+        case .failure(let error):
+            finishUpload(
+                localIdentifier: localIdentifier,
+                checksum: motionChecksum,
+                outcome: .failure(error),
+                remainingBackgroundTasks: remainingBackgroundTasks)
+
+        case .success(let motionAssetID):
+            await ensureConfigured()
+            guard let repo else {
+                finishUpload(
+                    localIdentifier: localIdentifier,
+                    checksum: motionChecksum,
+                    outcome: .failure(LivePhotoBackupError.sessionUnavailable),
+                    remainingBackgroundTasks: remainingBackgroundTasks)
+                return
+            }
+            guard let photo = await LocalPhotoLibrary.shared.photoMetadata(
+                for: localIdentifier), photo.isLivePhoto else {
+                finishUpload(
+                    localIdentifier: localIdentifier,
+                    checksum: motionChecksum,
+                    outcome: .failure(LivePhotoBackupError.assetNoLongerLivePhoto),
+                    remainingBackgroundTasks: remainingBackgroundTasks)
+                return
+            }
+
+            pendingPhotos[localIdentifier] = photo
+            let allowsCellular = cellularPhotos && cellularVideos
+            let mayReadFromICloud = !NetworkMonitor.shared.isExpensive || allowsCellular
+            do {
+                try await enqueueLivePhotoPrimary(
+                    photo,
+                    motionAssetID: motionAssetID,
+                    repository: repo,
+                    allowsCellular: allowsCellular,
+                    mayReadFromICloud: mayReadFromICloud)
+            } catch {
+                finishUpload(
+                    localIdentifier: localIdentifier,
+                    checksum: motionChecksum,
+                    outcome: .failure(error),
+                    remainingBackgroundTasks: remainingBackgroundTasks)
+            }
+        }
+    }
+
+    /// Tahap kedua Live Photo: upload still image dengan relasi ke hidden motion
+    /// asset. Hanya tahap ini yang menghasilkan `BackupRecord`.
+    private func enqueueLivePhotoPrimary(
+        _ photo: LocalPhoto,
+        motionAssetID: String,
+        repository: BackupRepository,
+        allowsCellular: Bool,
+        mayReadFromICloud: Bool
+    ) async throws {
+        guard let still = await LocalPhotoLibrary.shared.originalFile(
+            for: LocalPhotoLibrary.assetID(for: photo.id),
+            allowsNetworkFallback: mayReadFromICloud)
+        else { throw LivePhotoBackupError.primaryResourceMissing }
+
+        do {
+            let checksum = try await repository.checksum(forFile: still.url)
+            try Task.checkCancellation()
+            let prepared = try await repository.makeUploadRequest(
+                fileURL: still.url,
+                filename: still.filename,
+                checksum: checksum,
+                deviceAssetId: photo.id,
+                createdAt: photo.createdAt,
+                modifiedAt: photo.modifiedAt,
+                additionalFields: ["livePhotoVideoId": motionAssetID])
+            try? FileManager.default.removeItem(at: still.url)
+            try Task.checkCancellation()
+
+            BackupUploader.shared.enqueue(
+                prepared,
+                localIdentifier: photo.id,
+                checksum: checksum,
+                allowsCellular: allowsCellular,
+                phase: .primaryAsset)
+        } catch {
+            try? FileManager.default.removeItem(at: still.url)
+            throw error
         }
     }
 

@@ -1,6 +1,45 @@
 import Foundation
 import UIKit
 
+enum BackupUploadPhase: String, Codable, Sendable {
+    case primaryAsset
+    case livePhotoMotion
+}
+
+/// State minimum yang harus selamat ketika proses aplikasi dihentikan di antara
+/// dua tahap upload Live Photo. `URLSessionTask.taskDescription` disimpan oleh
+/// `nsurlsessiond`, sehingga konteks ini tetap tersedia saat iOS meluncurkan
+/// proses baru hanya untuk menyampaikan hasil motion video.
+struct BackupUploadTaskContext: Codable, Equatable, Sendable {
+    let phase: BackupUploadPhase
+    let localIdentifier: String
+    let checksum: String
+    let bodyPath: String
+
+    var encoded: String {
+        guard let data = try? JSONEncoder().encode(self) else { return "" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    static func decode(_ value: String?) -> Self? {
+        guard let value else { return nil }
+        if let data = value.data(using: .utf8),
+           let context = try? JSONDecoder().decode(Self.self, from: data) {
+            return context
+        }
+
+        // Task versi sebelum C4 masih dapat selesai setelah aplikasi di-update.
+        // Format lamanya: localIdentifier, checksum, bodyPath.
+        let legacy = value.components(separatedBy: "\u{1}")
+        guard legacy.count == 3 else { return nil }
+        return Self(
+            phase: .primaryAsset,
+            localIdentifier: legacy[0],
+            checksum: legacy[1],
+            bodyPath: legacy[2])
+    }
+}
+
 /// Unggahan yang berjalan terus setelah aplikasinya ditutup.
 ///
 /// **Kenapa BUKAN Background App Refresh.** `BGProcessingTask` — yang sudah ada
@@ -39,6 +78,10 @@ final class BackupUploader: NSObject {
     /// di akhir — dan id aset yang kita butuhkan ada di dalamnya.
     private var responses: [Int: Data] = [:]
     private let lock = NSLock()
+    /// `urlSessionDidFinishEvents` dapat datang sesaat setelah callback motion
+    /// video, sementara tahap foto utamanya masih sedang dirakit di Task async.
+    /// Group ini mencegah completion handler background dipanggil terlalu awal.
+    private let completionHandlers = DispatchGroup()
 
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.background(
@@ -70,7 +113,8 @@ final class BackupUploader: NSObject {
         _ prepared: BackupRepository.PreparedUpload,
         localIdentifier: String,
         checksum: String,
-        allowsCellular: Bool
+        allowsCellular: Bool,
+        phase: BackupUploadPhase = .primaryAsset
     ) {
         var request = prepared.request
         // Ditegakkan PER PERMINTAAN, bukan per sesi: satu sesi latar melayani
@@ -82,8 +126,11 @@ final class BackupUploader: NSObject {
         request.allowsConstrainedNetworkAccess = false
 
         let task = session.uploadTask(with: request, fromFile: prepared.bodyFile)
-        task.taskDescription = [localIdentifier, checksum, prepared.bodyFile.path]
-            .joined(separator: "\u{1}")
+        task.taskDescription = BackupUploadTaskContext(
+            phase: phase,
+            localIdentifier: localIdentifier,
+            checksum: checksum,
+            bodyPath: prepared.bodyFile.path).encoded
         task.resume()
     }
 
@@ -106,8 +153,7 @@ final class BackupUploader: NSObject {
     }
 
     private static func localIdentifier(from task: URLSessionTask) -> String? {
-        let parts = (task.taskDescription ?? "").components(separatedBy: "\u{1}")
-        return parts.count >= 3 ? parts[0] : nil
+        BackupUploadTaskContext.decode(task.taskDescription)?.localIdentifier
     }
 
     /// Membatalkan transfer yang sudah diserahkan ke `nsurlsessiond`.
@@ -140,12 +186,10 @@ extension BackupUploader: URLSessionDataDelegate {
         let body = responses.removeValue(forKey: task.taskIdentifier) ?? Data()
         lock.unlock()
 
-        let parts = (task.taskDescription ?? "").components(separatedBy: "\u{1}")
-        guard parts.count == 3 else { return }
-        let (localID, checksum, bodyPath) = (parts[0], parts[1], parts[2])
+        guard let context = BackupUploadTaskContext.decode(task.taskDescription) else { return }
         // Badan multipart-nya bisa ratusan megabyte; membiarkannya berarti
         // menggandakan pustaka foto di direktori sementara.
-        try? FileManager.default.removeItem(atPath: bodyPath)
+        try? FileManager.default.removeItem(atPath: context.bodyPath)
 
         let outcome: Result<String, Error>
         if let error {
@@ -155,14 +199,26 @@ extension BackupUploader: URLSessionDataDelegate {
         }
 
         let completedTaskID = task.taskIdentifier
+        completionHandlers.enter()
         Task { @MainActor in
+            defer { self.completionHandlers.leave() }
             let activeTasks = await self.session.allTasks
             let remaining = activeTasks.filter { $0.taskIdentifier != completedTaskID }.count
-            BackupService.shared.finishUpload(
-                localIdentifier: localID,
-                checksum: checksum,
-                outcome: outcome,
-                remainingBackgroundTasks: remaining)
+            switch context.phase {
+            case .primaryAsset:
+                BackupService.shared.finishUpload(
+                    localIdentifier: context.localIdentifier,
+                    checksum: context.checksum,
+                    outcome: outcome,
+                    remainingBackgroundTasks: remaining)
+
+            case .livePhotoMotion:
+                await BackupService.shared.finishLivePhotoMotionUpload(
+                    localIdentifier: context.localIdentifier,
+                    motionChecksum: context.checksum,
+                    outcome: outcome,
+                    remainingBackgroundTasks: remaining)
+            }
         }
     }
 
@@ -176,6 +232,11 @@ extension BackupUploader: URLSessionDataDelegate {
     /// sisa, tiap penyelesaian membangunkan aplikasi ini untuk mengantre lagi.
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         Task { @MainActor in
+            await withCheckedContinuation { continuation in
+                self.completionHandlers.notify(queue: .global(qos: .utility)) {
+                    continuation.resume()
+                }
+            }
             await BackupService.shared.continueInBackground()
             // WAJIB. `continueInBackground` pulang begitu `start()` membuat
             // Task-nya — sebelum satu foto pun benar-benar diserahkan. Tanpa

@@ -106,7 +106,8 @@ class BackupRepository {
         checksum: String,
         deviceAssetId: String,
         createdAt: Date,
-        modifiedAt: Date
+        modifiedAt: Date,
+        additionalFields: [String: String] = [:]
     ) async throws -> PreparedUpload {
         let (baseURL, authHeaders) = await api.session.requestContext
         guard let baseURL else { throw APIError.invalidURL }
@@ -121,13 +122,18 @@ class BackupRepository {
             request.setValue(v, forHTTPHeaderField: k)
         }
 
-        let fields = [
+        var fields = [
             ("deviceAssetId", deviceAssetId),
             ("deviceId", DeviceIdentity.current),
             ("fileCreatedAt", ISO8601DateFormatter().string(from: createdAt)),
             ("fileModifiedAt", ISO8601DateFormatter().string(from: modifiedAt)),
             ("filename", filename),
         ]
+        // Field pasangan Live Photo (`visibility` untuk motion video dan
+        // `livePhotoVideoId` untuk still image) memakai multipart yang sama
+        // dengan upload biasa. Urutan dibuat stabil agar request mudah diaudit
+        // dan contract test tidak bergantung pada urutan Dictionary.
+        fields.append(contentsOf: additionalFields.sorted { $0.key < $1.key })
 
         // Badan multipart ditulis per potongan di luar main actor. Dengan ini
         // sebuah video hanya punya buffer 1 MB, bukan dua salinan penuh di RAM.
