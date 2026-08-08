@@ -3,6 +3,26 @@
   "sourceCommit": "51c2f21497800225e0622d515d0ef463d7af69cc",
   "openAPIVersion": "3.0.0",
   "immichAPIVersion": "3.1.0",
+  "endpointContracts": {
+    "albumAssets": {
+      "method": "POST",
+      "path": "/search/metadata",
+      "state": "Stable",
+      "replaces": ["GET /timeline/bucket", "GET /timeline/buckets"]
+    },
+    "updatePeople": {
+      "method": "PUT",
+      "path": "/people",
+      "state": "Stable",
+      "replaces": ["PUT /people/{id}"]
+    },
+    "updateAssetCompatibility": {
+      "method": "PUT",
+      "path": "/assets/{id}",
+      "state": "Deprecated",
+      "replacementAvailable": false
+    }
+  },
   "contracts": {
     "AssetResponseDto.duration": {
       "jsonType": "integer",

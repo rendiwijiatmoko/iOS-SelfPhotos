@@ -33,63 +33,59 @@ class TimelineRepository {
         self.api = api
     }
 
-    func buckets(albumId: String? = nil) async throws -> [TimeBucketDTO] {
-        try await api.send(.init(
-            path: "/timeline/buckets",
-            query: baseQuery(albumId: albumId)))
-    }
+    /// Mengambil seluruh isi album lewat endpoint publik stabil.
+    ///
+    /// `/timeline/bucket*` berstatus **Internal** di OpenAPI Immich. Selain bisa
+    /// berubah tanpa masa deprecation, jalur itu memerlukan satu request per
+    /// bulan. Metadata search memberi hingga 1.000 aset per halaman dan punya
+    /// kontrak pagination stabil.
+    func albumAssets(_ albumId: String) async throws -> [AssetLite] {
+        let pageSize = 1_000
+        let first = try await albumPage(albumId, page: 1, size: pageSize)
+        var assets = first.assets.items.map(AssetLite.init)
 
-    func bucket(_ timeBucket: String, albumId: String? = nil) async throws -> [AssetLite] {
-        let dto: TimelineBucketDTO = try await api.send(.init(
-            path: "/timeline/bucket",
-            query: [URLQueryItem(name: "timeBucket", value: timeBucket)] + baseQuery(albumId: albumId)))
+        let pageCount = max(1, (first.assets.total + pageSize - 1) / pageSize)
+        guard pageCount > 1 else { return assets }
 
-        return parseTimelineBucket(dto)
-    }
-
-    private func baseQuery(albumId: String?) -> [URLQueryItem] {
-        var query = [URLQueryItem(name: "order", value: "desc")]
-        if let albumId {
-            query.append(.init(name: "albumId", value: albumId))
-        } else {
-            query.append(.init(name: "visibility", value: "timeline"))
+        // Batasi konkurensi agar album besar tidak membuka puluhan request dan
+        // decoder sekaligus. Empat halaman tetap jauh lebih cepat daripada
+        // request bucket berurutan tanpa menekan memori secara berlebihan.
+        let batchSize = 4
+        var start = 2
+        while start <= pageCount {
+            let end = min(start + batchSize - 1, pageCount)
+            var pages: [(Int, [AssetLite])] = try await withThrowingTaskGroup(
+                of: (Int, [AssetLite]).self
+            ) { group in
+                for page in start...end {
+                    group.addTask { [api] in
+                        var request = SearchRequestDTO(page: page)
+                        request.albumIds = [albumId]
+                        request.order = "desc"
+                        request.size = pageSize
+                        request.withExif = true
+                        let response: SearchResponseDTO = try await api.send(.json(
+                            "/search/metadata", method: .post, body: request))
+                        return (page, response.assets.items.map(AssetLite.init))
+                    }
+                }
+                var values: [(Int, [AssetLite])] = []
+                for try await value in group { values.append(value) }
+                return values
+            }
+            pages.sort { $0.0 < $1.0 }
+            assets.append(contentsOf: pages.flatMap(\.1))
+            start = end + 1
         }
-        return query
-    }
-
-    private func parseTimelineBucket(_ dto: TimelineBucketDTO) -> [AssetLite] {
-        var assets: [AssetLite] = []
-
-        // Respons berbentuk kolom (array paralel); jaga-jaga kalau ada kolom
-        // yang lebih pendek supaya tidak crash index-out-of-range.
-        func value<T>(_ array: [T]?, _ i: Int) -> T? {
-            guard let array, i < array.count else { return nil }
-            return array[i]
-        }
-
-        for i in 0..<dto.id.count {
-            let isVideo = !(value(dto.isImage, i) ?? true)
-            let ratio = value(dto.ratio, i) ?? 1.0
-            let thumbhash = value(dto.thumbhash, i) ?? nil
-            let dateStr = value(dto.fileCreatedAt, i) ?? ""
-            let createdAt = parseISO8601Date(dateStr) ?? Date()
-
-            assets.append(AssetLite(
-                id: dto.id[i],
-                isVideo: isVideo,
-                ratio: ratio,
-                thumbhash: thumbhash,
-                createdAt: createdAt,
-                isFavorite: value(dto.isFavorite, i) ?? false,
-                duration: value(dto.duration, i)?.seconds
-            ))
-        }
-
         return assets
     }
 
-    private func parseISO8601Date(_ dateString: String) -> Date? {
-        ISO8601DateFormatter.immichFractional.date(from: dateString)
-            ?? ISO8601DateFormatter.immichPlain.date(from: dateString)
+    private func albumPage(_ albumId: String, page: Int, size: Int) async throws -> SearchResponseDTO {
+        var request = SearchRequestDTO(page: page)
+        request.albumIds = [albumId]
+        request.order = "desc"
+        request.size = size
+        request.withExif = true
+        return try await api.send(.json("/search/metadata", method: .post, body: request))
     }
 }

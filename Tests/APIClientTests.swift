@@ -141,12 +141,14 @@ final class MockURLProtocol: URLProtocol {
     static var mockResponse: URLResponse?
     static var mockError: Error?
     static var lastRequest: URLRequest?
+    static var lastRequestBody: Data?
 
     static func reset() {
         mockData = nil
         mockResponse = nil
         mockError = nil
         lastRequest = nil
+        lastRequestBody = nil
     }
 
     override class func canInit(with request: URLRequest) -> Bool {
@@ -159,6 +161,7 @@ final class MockURLProtocol: URLProtocol {
 
     override func startLoading() {
         Self.lastRequest = request
+        Self.lastRequestBody = request.httpBody ?? Self.readBodyStream(request.httpBodyStream)
 
         if let error = Self.mockError {
             client?.urlProtocol(self, didFailWithError: error)
@@ -177,4 +180,22 @@ final class MockURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+
+    /// URLSession memindahkan `httpBody` ke stream sebelum menyerahkannya ke
+    /// URLProtocol. Simpan byte-nya agar contract test bisa memeriksa JSON yang
+    /// benar-benar dikirim, bukan request sebelum transport memprosesnya.
+    private static func readBodyStream(_ stream: InputStream?) -> Data? {
+        guard let stream else { return nil }
+        stream.open()
+        defer { stream.close() }
+
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
 }

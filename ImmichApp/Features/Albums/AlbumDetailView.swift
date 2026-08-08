@@ -402,11 +402,8 @@ final class AlbumDetailViewModel {
 
     /// Potret lokal dulu, jaringan menyusul — lihat `LocalSnapshot`.
     ///
-    /// Album adalah yang paling mahal dimuat di seluruh aplikasi: satu
-    /// permintaan daftar bucket, lalu satu permintaan lagi untuk SETIAP bulan
-    /// yang ada isinya. Album tiga tahun berarti tiga puluh enam perjalanan
-    /// sebelum satu petak pun tergambar — dan offline berarti tidak ada yang
-    /// tergambar sama sekali.
+    /// Album disegarkan lewat pencarian metadata publik dengan pagination.
+    /// Potret lokal tetap dipasang lebih dulu agar offline tidak berarti kosong.
     func loadAlbumDetail(_ albumId: String) async {
         self.albumId = albumId
         let key = LocalSnapshot.Key.album(albumId)
@@ -420,34 +417,9 @@ final class AlbumDetailViewModel {
         }
 
         do {
-            // GET /albums/{id} tidak lagi menyertakan daftar aset;
-            // isi album diambil lewat endpoint timeline dengan filter albumId.
-            let buckets = try await timelineRepo.buckets(albumId: albumId)
-
-            // Bucket ditarik BERSAMAAN, bukan satu per satu.
-            //
-            // Berurutan berarti album berisi tiga tahun foto menunggu 36
-            // perjalanan bolak-balik yang saling antre — dan tidak satu pun di
-            // antaranya bergantung pada hasil sebelumnya.
-            //
-            // Hasilnya dikumpulkan berikut indeksnya lalu diurutkan lagi, karena
-            // task group menyelesaikan pekerjaan sesuai siapa yang lebih dulu
-            // selesai, bukan urutan pengirimannya.
-            let repo = timelineRepo
-            var chunks: [(Int, [AssetLite])] = try await withThrowingTaskGroup(
-                of: (Int, [AssetLite]).self
-            ) { group in
-                for (index, bucket) in buckets.enumerated() {
-                    group.addTask {
-                        (index, try await repo.bucket(bucket.timeBucket, albumId: albumId))
-                    }
-                }
-                var collected: [(Int, [AssetLite])] = []
-                for try await result in group { collected.append(result) }
-                return collected
-            }
-            chunks.sort { $0.0 < $1.0 }
-            let fetched = chunks.flatMap(\.1)
+            // GET /albums/{id} tidak lagi menyertakan daftar aset. Jangan pakai
+            // `/timeline/*`: route itu Internal dan bisa berubah tanpa notice.
+            let fetched = try await timelineRepo.albumAssets(albumId)
             if LocalSnapshot.save(fetched, for: key) || assets.isEmpty {
                 assets = fetched
             }

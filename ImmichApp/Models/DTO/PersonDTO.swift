@@ -9,3 +9,22 @@ struct PersonDTO: Codable, Identifiable, Hashable {
     let thumbnailPath: String?
     var isHidden: Bool
 }
+
+/// Kontrak bulk update stabil Immich (`PUT /people`).
+struct PeopleUpdateRequestDTO: Encodable {
+    struct Item: Encodable {
+        let id: String
+        var name: String? = nil
+        var isHidden: Bool? = nil
+    }
+
+    let people: [Item]
+}
+
+/// Respons per item dari operasi bulk Immich.
+struct BulkIDResponseDTO: Decodable {
+    let id: String
+    let success: Bool
+    let error: String?
+    let errorMessage: String?
+}

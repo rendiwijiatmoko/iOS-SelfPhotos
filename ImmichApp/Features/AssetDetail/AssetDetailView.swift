@@ -412,11 +412,14 @@ struct AssetDetailView: View {
     private var infoPanel: some View {
         if isPanelMounted, let detail = vm?.detail {
             panelBody(for: detail)
-                // alignment .top itu wajib: tanpa itu VStack dipusatkan di
-                // dalam frame, sehingga saat panel masih pendek baris
-                // description (pegangan drag-nya) terdorong ke luar area
-                // terlihat dan tidak bisa disentuh sama sekali.
-                .frame(height: panelHeight, alignment: .top)
+                // Tinggi viewport panel TETAP selama drag. Yang bergerak hanya
+                // transform layer-nya lewat `offset` di bawah.
+                //
+                // Mengubah `.frame(height:)` pada setiap event pan memaksa
+                // seluruh ScrollView — termasuk Map, kartu metadata, dan
+                // pengukuran scroll — layout ulang setiap frame. Itulah sumber
+                // patah-patah ketika panel ditarik turun.
+                .frame(height: panelMaxHeight, alignment: .top)
                 .clipped()
                 // Overlay berhenti di batas safe area, jadi tanpa ini area
                 // toolbar bawah + home indicator tetap tembus pandang dan foto
@@ -436,6 +439,10 @@ struct AssetDetailView: View {
                 // panel selalu di tepi layar: keyboard naik menutupinya tanpa
                 // menggesernya, persis seperti di Photos.
                 .ignoresSafeArea(.all, edges: .bottom)
+                // Panel setinggi `panelMaxHeight` dipatok di bawah. Bagian yang
+                // belum terbuka cukup digeser melewati tepi layar; ini hanya
+                // compositing transform dan tidak mengukur ulang isi panel.
+                .offset(y: max(0, panelMaxHeight - panelHeight))
         }
     }
 
@@ -460,7 +467,15 @@ struct AssetDetailView: View {
                 guard !isPanelDragging, newHeight > 0 else { return }
                 panelContentHeight = max(panelContentHeight, newHeight)
             },
-            onScrollOffsetChange: { panelScrollOffset = $0 },
+            onScrollOffsetChange: { newOffset in
+                // Perubahan tinggi/posisi panel dapat memicu laporan geometry
+                // walaupun ScrollView tidak sedang digulir. Jangan biarkan
+                // callback itu menambah invalidasi state di tengah pan.
+                guard !isPanelDragging,
+                      abs(panelScrollOffset - newOffset) > 0.5
+                else { return }
+                panelScrollOffset = newOffset
+            },
             descriptionDraft: $descriptionDraft,
             descriptionFocus: $descriptionFocused,
             onAdjustDate: { isEditingDate = true },
@@ -545,10 +560,16 @@ struct AssetDetailView: View {
         // langsung dilepas dari hierarki — bukan memudar. Itu yang terlihat
         // seperti toolbar hilang seketika saat mulai menarik.
         if start <= 0, translationY > 0 { return }
-        if panelDragStart == nil { panelDragStart = start }
-        // Tarik ke atas (translation negatif) = panel membesar.
-        panelHeight = clampPanel(start - translationY)
-        if panelHeight > 0 { isPanelMounted = true }
+        // Gesture harus mengikuti jari tanpa mewarisi transaksi animasi dari
+        // toolbar, keyboard, atau snap panel yang baru saja selesai.
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            if panelDragStart == nil { panelDragStart = start }
+            // Tarik ke atas (translation negatif) = panel membesar.
+            panelHeight = clampPanel(start - translationY)
+            if panelHeight > 0 { isPanelMounted = true }
+        }
     }
 
     private func dragEnded(_ translationY: CGFloat, velocity velocityY: CGFloat) {

@@ -36,16 +36,25 @@ class PeopleRepository {
     }
 
     func rename(_ id: String, to name: String) async throws {
-        struct Body: Encodable {
-            let name: String
-        }
-        try await api.sendVoid(.json("/people/\(id)", method: .put, body: Body(name: name)))
+        try await update(.init(id: id, name: name))
     }
 
     func setHidden(_ id: String, to value: Bool) async throws {
-        struct Body: Encodable {
-            let isHidden: Bool
+        try await update(.init(id: id, isHidden: value))
+    }
+
+    /// `PUT /people/{id}` deprecated sejak Immich API v3. Endpoint bulk ini
+    /// adalah pengganti stabilnya, termasuk untuk perubahan satu orang.
+    private func update(_ item: PeopleUpdateRequestDTO.Item) async throws {
+        let response: [BulkIDResponseDTO] = try await api.send(.json(
+            "/people", method: .put,
+            body: PeopleUpdateRequestDTO(people: [item])))
+
+        guard let result = response.first(where: { $0.id == item.id }), result.success else {
+            let failure = response.first(where: { $0.id == item.id })
+            throw APIError.server(
+                status: 422,
+                message: failure?.errorMessage ?? failure?.error ?? "Failed to update person")
         }
-        try await api.sendVoid(.json("/people/\(id)", method: .put, body: Body(isHidden: value)))
     }
 }

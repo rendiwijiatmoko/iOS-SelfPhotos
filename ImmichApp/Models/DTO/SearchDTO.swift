@@ -3,6 +3,10 @@ import Foundation
 struct SearchRequestDTO: Encodable {
     var query: String? = nil
     var page: Int? = 1
+    /// Filter album resmi pada `POST /search/metadata`.
+    var albumIds: [String]? = nil
+    /// Urutan aset menurut waktu pengambilan (`asc` atau `desc`).
+    var order: String? = nil
     var type: String? = nil
     var isFavorite: Bool? = nil
     var takenAfter: String? = nil

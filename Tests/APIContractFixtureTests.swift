@@ -10,6 +10,18 @@ final class APIContractFixtureTests: XCTestCase {
         XCTAssertEqual(root["openAPIVersion"] as? String, "3.0.0")
         XCTAssertEqual(root["immichAPIVersion"] as? String, "3.1.0")
 
+        let endpoints = try XCTUnwrap(root["endpointContracts"] as? [String: Any])
+        let albumAssets = try XCTUnwrap(endpoints["albumAssets"] as? [String: Any])
+        XCTAssertEqual(albumAssets["path"] as? String, "/search/metadata")
+        XCTAssertEqual(albumAssets["state"] as? String, "Stable")
+        let updatePeople = try XCTUnwrap(endpoints["updatePeople"] as? [String: Any])
+        XCTAssertEqual(updatePeople["path"] as? String, "/people")
+        XCTAssertEqual(updatePeople["state"] as? String, "Stable")
+        let updateAsset = try XCTUnwrap(
+            endpoints["updateAssetCompatibility"] as? [String: Any])
+        XCTAssertEqual(updateAsset["state"] as? String, "Deprecated")
+        XCTAssertEqual(updateAsset["replacementAvailable"] as? Bool, false)
+
         let contracts = try XCTUnwrap(root["contracts"] as? [String: Any])
         let assetDuration = try XCTUnwrap(
             contracts["AssetResponseDto.duration"] as? [String: Any])

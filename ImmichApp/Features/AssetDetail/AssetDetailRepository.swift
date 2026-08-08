@@ -59,27 +59,22 @@ class AssetDetailRepository {
     }
 
     func toggleFavorite(_ id: String, to value: Bool) async throws {
-        struct Body: Encodable { let isFavorite: Bool }
-        try await api.sendVoid(.json("/assets/\(id)", method: .put, body: Body(isFavorite: value)))
+        try await update(id, with: AssetMutation(isFavorite: value))
     }
 
     /// Immich menerima `description` di level atas UpdateAssetDto, walau
     /// membacanya kembali lewat `exifInfo.description`.
     func updateDescription(_ id: String, to text: String) async throws {
-        struct Body: Encodable { let description: String }
-        try await api.sendVoid(.json("/assets/\(id)", method: .put, body: Body(description: text)))
+        try await update(id, with: AssetMutation(description: text))
     }
 
     func updateDate(_ id: String, to date: Date) async throws {
-        struct Body: Encodable { let dateTimeOriginal: String }
         let text = ISO8601DateFormatter.immichFractional.string(from: date)
-        try await api.sendVoid(.json("/assets/\(id)", method: .put, body: Body(dateTimeOriginal: text)))
+        try await update(id, with: AssetMutation(dateTimeOriginal: text))
     }
 
     func updateLocation(_ id: String, latitude: Double, longitude: Double) async throws {
-        struct Body: Encodable { let latitude: Double; let longitude: Double }
-        try await api.sendVoid(.json("/assets/\(id)", method: .put,
-                                     body: Body(latitude: latitude, longitude: longitude)))
+        try await update(id, with: AssetMutation(latitude: latitude, longitude: longitude))
     }
 
     func toggleArchive(_ id: String, to value: Bool) async throws {
@@ -94,9 +89,25 @@ class AssetDetailRepository {
     }
 
     func setVisibility(_ id: String, to value: Visibility) async throws {
-        struct Body: Encodable { let visibility: String }
-        try await api.sendVoid(.json("/assets/\(id)", method: .put,
-                                     body: Body(visibility: value.rawValue)))
+        try await update(id, with: AssetMutation(visibility: value.rawValue))
+    }
+
+    /// Compatibility shim untuk satu-satunya kontrak mutasi asset yang tersedia
+    /// pada OpenAPI Immich v3.1.0. Route ini ditandai deprecated, tetapi
+    /// `replacementId` resmi masih menunjuk kembali ke operation yang sama dan
+    /// belum ada endpoint stabil untuk favorite/description/date/location/
+    /// visibility. Disatukan di sini agar penggantian berikutnya hanya satu edit.
+    private func update(_ id: String, with mutation: AssetMutation) async throws {
+        try await api.sendVoid(.json("/assets/\(id)", method: .put, body: mutation))
+    }
+
+    private struct AssetMutation: Encodable {
+        var isFavorite: Bool? = nil
+        var description: String? = nil
+        var dateTimeOriginal: String? = nil
+        var latitude: Double? = nil
+        var longitude: Double? = nil
+        var visibility: String? = nil
     }
 
     func delete(_ id: String) async throws {
