@@ -8,6 +8,8 @@ class SessionManager {
 
     private(set) var baseURL: URL?
     private(set) var currentUser: UserResponseDTO?
+    private(set) var serverCompatibility: ServerCompatibilityReport?
+    private(set) var compatibilityIssue: ServerCompatibilityError?
     var isLoggedIn: Bool = false
 
     private var serverInput: String?
@@ -80,15 +82,44 @@ class SessionManager {
         if !s.hasPrefix("http") { s = "https://" + s }
         while s.hasSuffix("/") { s.removeLast() }
         guard let url = URL(string: s + "/api") else { throw APIError.invalidURL }
+        if baseURL != url {
+            serverCompatibility = nil
+            compatibilityIssue = nil
+        }
         serverInput = s
         baseURL = url
         refreshSnapshot()
     }
 
     func ping() async throws { let _: ServerPingDTO = try await api.send(.init(path: "/server/ping")) }
+    func serverVersion() async throws -> ServerVersionDTO { try await api.send(.init(path: "/server/version")) }
     func features() async throws -> ServerFeaturesDTO { try await api.send(.init(path: "/server/features")) }
 
+    /// Menjalankan urutan pemeriksaan publik sebelum kredensial pernah dikirim.
+    ///
+    /// Ping sendiri hanya membuktikan ada proses Immich di alamat tersebut. Ia
+    /// tidak membuktikan kontrak endpoint berikutnya cocok dengan aplikasi.
+    /// Karena itu versi dan capability wajib berhasil dibaca, lalu major-nya
+    /// harus berada dalam matriks yang didukung.
+    @discardableResult
+    func checkServerCompatibility() async throws -> ServerCompatibilityReport {
+        try await ping()
+        let version = try await serverVersion()
+        let features = try await features()
+        let report = ServerCompatibilityReport(
+            version: version,
+            features: features,
+            status: ServerCompatibilityPolicy.evaluate(version))
+
+        serverCompatibility = report
+        compatibilityIssue = ServerCompatibilityError.incompatibleReport(report)
+
+        if let compatibilityIssue { throw compatibilityIssue }
+        return report
+    }
+
     func loginPassword(email: String, password: String) async throws {
+        try requireCompatibleServer(passwordLogin: true)
         let ep = Endpoint.json("/auth/login", method: .post,
                                body: LoginRequestDTO(email: email, password: password))
         let res: LoginResponseDTO = try await api.send(ep)
@@ -100,11 +131,27 @@ class SessionManager {
     }
 
     func loginApiKey(_ key: String) async throws {
+        try requireCompatibleServer(passwordLogin: false)
         applyAuth(token: key, mode: .apiKey)
         try await fetchMe()
         persist()
         isLoggedIn = true
         BackupService.shared.configure(session: self)
+    }
+
+    /// Pertahanan lapis kedua untuk pemanggil selain onboarding. Dengan ini
+    /// tidak ada jalur internal yang bisa langsung mengirim kredensial tanpa
+    /// menjalankan compatibility gate lebih dahulu.
+    private func requireCompatibleServer(passwordLogin: Bool) throws {
+        guard let report = serverCompatibility else {
+            throw ServerCompatibilityError.checkRequired
+        }
+        if let error = ServerCompatibilityError.incompatibleReport(report) {
+            throw error
+        }
+        if passwordLogin, !report.features.passwordLogin {
+            throw ServerCompatibilityError.passwordLoginUnavailable
+        }
     }
 
     private func fetchMe() async throws {
@@ -145,8 +192,16 @@ class SessionManager {
     func restore() async {
         guard isLoggedIn else { return }
         do {
+            try await checkServerCompatibility()
             try await validate()
             try await fetchMe()
+        } catch let error as ServerCompatibilityError {
+            // Sesi lama tidak boleh membawa pengguna masuk ke kumpulan endpoint
+            // yang sudah diketahui tidak kompatibel. Logout juga membuang cache
+            // akun agar data pengguna lama tidak sempat terlihat pada login
+            // berikutnya; pesannya dipasang kembali setelah cleanup.
+            await logout()
+            compatibilityIssue = error
         } catch APIError.unauthorized {
             await logout()
         } catch {
@@ -203,6 +258,8 @@ class SessionManager {
 
         token = nil
         currentUser = nil
+        serverCompatibility = nil
+        compatibilityIssue = nil
         isLoggedIn = false
         serverInput = nil
         baseURL = nil

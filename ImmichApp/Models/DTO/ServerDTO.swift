@@ -4,7 +4,31 @@ struct ServerPingDTO: Decodable {
     let res: String
 }
 
-struct ServerFeaturesDTO: Decodable {
+/// Bentuk resmi jawaban `GET /server/version`.
+///
+/// `prerelease` baru menjadi field wajib pada kontrak v3. Tetap opsional di
+/// sini agar aplikasi bisa membaca jawaban server v2, sesuai rentang
+/// kompatibilitas mobile yang didokumentasikan Immich.
+struct ServerVersionDTO: Decodable, Equatable, Sendable {
+    let major: Int
+    let minor: Int
+    let patch: Int
+    let prerelease: Int?
+
+    init(major: Int, minor: Int, patch: Int, prerelease: Int? = nil) {
+        self.major = major
+        self.minor = minor
+        self.patch = patch
+        self.prerelease = prerelease
+    }
+
+    var displayName: String {
+        let stable = "v\(major).\(minor).\(patch)"
+        return prerelease.map { "\(stable)-\($0)" } ?? stable
+    }
+}
+
+struct ServerFeaturesDTO: Decodable, Equatable, Sendable {
     let smartSearch: Bool
     let facialRecognition: Bool
     let oauth: Bool

@@ -15,9 +15,17 @@ class MockSessionManager: SessionManager {
     var shouldSucceedPing = false
     var shouldSucceedLogin = false
     var shouldSucceedApiKey = false
-    var mockFeatures: ServerFeaturesDTO?
+    var mockVersion = ServerVersionDTO(major: 3, minor: 0, patch: 0)
+    var mockFeatures: ServerFeaturesDTO? = ServerFeaturesDTO(
+        smartSearch: true,
+        facialRecognition: true,
+        oauth: false,
+        passwordLogin: true,
+        search: true)
 
     private(set) var pingCallCount = 0
+    private(set) var versionCallCount = 0
+    private(set) var featuresCallCount = 0
     private(set) var loginPasswordCallCount = 0
     private(set) var loginApiKeyCallCount = 0
 
@@ -43,8 +51,14 @@ class MockSessionManager: SessionManager {
     }
 
     override func features() async throws -> ServerFeaturesDTO {
+        featuresCallCount += 1
         guard let mockFeatures else { throw APIError.unknown }
         return mockFeatures
+    }
+
+    override func serverVersion() async throws -> ServerVersionDTO {
+        versionCallCount += 1
+        return mockVersion
     }
 
     override func loginPassword(email: String, password: String) async throws {

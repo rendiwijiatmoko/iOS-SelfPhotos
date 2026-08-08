@@ -73,6 +73,8 @@ final class OnboardingViewModelTests: XCTestCase {
 
         XCTAssertTrue(mockSession.isLoggedIn)
         XCTAssertEqual(mockSession.pingCallCount, 1)
+        XCTAssertEqual(mockSession.versionCallCount, 1)
+        XCTAssertEqual(mockSession.featuresCallCount, 1)
         XCTAssertEqual(mockSession.loginPasswordCallCount, 1)
     }
 
@@ -154,6 +156,70 @@ final class OnboardingViewModelTests: XCTestCase {
             XCTAssertFalse(msg.isEmpty)
         } else {
             XCTFail("Expected failed phase")
+        }
+    }
+
+    func testServerOlderThanCompatibilityWindowNeverReceivesCredentials() async {
+        mockSession.shouldSucceedPing = true
+        mockSession.shouldSucceedLogin = true
+        mockSession.mockVersion = ServerVersionDTO(major: 1, minor: 143, patch: 0)
+
+        viewModel.serverText = "https://immich.example.com"
+        viewModel.email = "user@example.com"
+        viewModel.password = "password123"
+
+        await viewModel.submit()
+
+        XCTAssertFalse(mockSession.isLoggedIn)
+        XCTAssertEqual(mockSession.loginPasswordCallCount, 0)
+        if case .failed(let message) = viewModel.phase {
+            XCTAssertTrue(message.localizedCaseInsensitiveContains("server"))
+        } else {
+            XCTFail("Expected compatibility failure")
+        }
+    }
+
+    func testServerNewerThanAppNeverReceivesApiKey() async {
+        mockSession.shouldSucceedPing = true
+        mockSession.shouldSucceedApiKey = true
+        mockSession.mockVersion = ServerVersionDTO(major: 4, minor: 0, patch: 0)
+
+        viewModel.serverText = "https://immich.example.com"
+        viewModel.method = .apiKey
+        viewModel.apiKey = "secret-key"
+
+        await viewModel.submit()
+
+        XCTAssertFalse(mockSession.isLoggedIn)
+        XCTAssertEqual(mockSession.loginApiKeyCallCount, 0)
+        if case .failed(let message) = viewModel.phase {
+            XCTAssertTrue(message.localizedCaseInsensitiveContains("app"))
+        } else {
+            XCTFail("Expected compatibility failure")
+        }
+    }
+
+    func testDisabledPasswordCapabilityNeverCallsPasswordLogin() async {
+        mockSession.shouldSucceedPing = true
+        mockSession.shouldSucceedLogin = true
+        mockSession.mockFeatures = ServerFeaturesDTO(
+            smartSearch: true,
+            facialRecognition: true,
+            oauth: true,
+            passwordLogin: false,
+            search: true)
+
+        viewModel.serverText = "https://immich.example.com"
+        viewModel.email = "user@example.com"
+        viewModel.password = "password123"
+
+        await viewModel.submit()
+
+        XCTAssertEqual(mockSession.loginPasswordCallCount, 0)
+        if case .failed(let message) = viewModel.phase {
+            XCTAssertTrue(message.localizedCaseInsensitiveContains("API key"))
+        } else {
+            XCTFail("Expected unavailable password failure")
         }
     }
 }

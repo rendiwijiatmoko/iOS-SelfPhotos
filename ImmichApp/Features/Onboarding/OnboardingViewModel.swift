@@ -27,6 +27,9 @@ final class OnboardingViewModel {
     init(session: SessionManager) {
         self.session = session
         serverText = UserDefaults.standard.string(forKey: Self.lastServerKey) ?? ""
+        if let issue = session.compatibilityIssue {
+            phase = .failed(issue.localizedDescription)
+        }
     }
 
     /// Alamat server terakhir yang BERHASIL dipakai.
@@ -57,14 +60,16 @@ final class OnboardingViewModel {
         phase = .loading
         do {
             try session.setServer(serverText)
-            try await session.ping()
-            // Fitur diambil sebelum masuk supaya kalau kata sandi ditolak karena
-            // server memang mematikan login kata sandi, pilihannya sudah ikut
-            // menyesuaikan saat pesan galatnya muncul.
-            features = try? await session.features()
+            // Kredensial baru boleh dikirim setelah alamat ini terbukti Immich,
+            // versi API-nya didukung, dan capability-nya berhasil dibaca.
+            let compatibility = try await session.checkServerCompatibility()
+            features = compatibility.features
 
             switch method {
             case .password:
+                guard compatibility.features.passwordLogin else {
+                    throw ServerCompatibilityError.passwordLoginUnavailable
+                }
                 try await session.loginPassword(email: email, password: password)
             case .apiKey:
                 try await session.loginApiKey(apiKey)

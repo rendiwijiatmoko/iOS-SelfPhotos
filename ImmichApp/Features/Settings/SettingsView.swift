@@ -351,13 +351,29 @@ struct SettingsView: View {
         Section("About") {
             LabeledContent("App Version", value: vm.appVersion)
 
-            if let server = vm.serverInfo {
+            if let compatibility = session.serverCompatibility {
+                LabeledContent("Server Version", value: compatibility.version.displayName)
+            } else if let server = vm.serverInfo {
                 LabeledContent("Server Version", value: server.version)
             } else if vm.serverPhase.isLoading {
                 LabeledContent("Server Version") {
                     ProgressView().controlSize(.small)
                 }
             }
+
+            NavigationLink {
+                ServerCompatibilityView()
+            } label: {
+                HStack {
+                    Label("Compatibility", systemImage: "checkmark.shield")
+                    Spacer()
+                    if let compatibility = session.serverCompatibility {
+                        Text(compatibility.status.title)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
             if let latest = vm.latestVersion {
                 LabeledContent("Latest Version", value: latest)
             }
