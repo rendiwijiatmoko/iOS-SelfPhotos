@@ -31,6 +31,7 @@ final class BackupNotifier: NSObject {
 
     private var lastPostedAt: Date?
     private var isAuthorized = false
+    private var lastQueuePresentationKey: String?
 
     /// Dua tahap deep-link disimpan terpisah supaya Library yang sudah dibangun
     /// di tab tidak dapat menghabiskan permintaan sebelum MainTab sempat pindah.
@@ -103,8 +104,41 @@ final class BackupNotifier: NSObject {
         post(uploaded: uploaded, total: total, force: false)
     }
 
+    /// Queue dan notification memakai snapshot identik. Ini penting pada cold
+    /// launch: angka tidak dibangun ulang dari variabel putaran yang sudah
+    /// hilang bersama proses sebelumnya.
+    func update(queue: BackupQueueSnapshot) {
+        guard queue.total > 0 else {
+            clearProgress()
+            lastQueuePresentationKey = nil
+            return
+        }
+
+        if queue.unfinished == 0 {
+            lastQueuePresentationKey = nil
+            finish(uploaded: queue.completed, failed: queue.failed)
+            return
+        }
+
+        UNUserNotificationCenter.current().removeDeliveredNotifications(
+            withIdentifiers: [Self.completionID])
+
+        guard let presentation = queue.presentation else { return }
+        let force = presentation.key != lastQueuePresentationKey
+        lastQueuePresentationKey = presentation.key
+        post(title: presentation.title, body: presentation.body, force: force)
+    }
+
     private func post(uploaded: Int, total: Int, force: Bool) {
-        guard isAuthorized, total > 0 else { return }
+        guard total > 0 else { return }
+        post(
+            title: String(localized: "Backing Up"),
+            body: String(localized: "\(uploaded) of \(total) uploaded"),
+            force: force)
+    }
+
+    private func post(title: String, body: String, force: Bool) {
+        guard isAuthorized else { return }
         let now = Date()
         if !force, let last = lastPostedAt, now.timeIntervalSince(last) < Self.minimumInterval {
             return
@@ -112,8 +146,8 @@ final class BackupNotifier: NSObject {
         lastPostedAt = now
 
         let content = UNMutableNotificationContent()
-        content.title = String(localized: "Backing Up")
-        content.body = String(localized: "\(uploaded) of \(total) uploaded")
+        content.title = title
+        content.body = body
         // `passive`: masuk daftar, tapi tidak menyalakan layar dan tidak
         // berbunyi. Inilah tingkat yang memang dibuat untuk kemajuan.
         content.interruptionLevel = .passive
@@ -153,6 +187,7 @@ final class BackupNotifier: NSObject {
     /// sistem menghentikan tugas latarnya. Kemajuan yang membeku di "12 of 40"
     /// selamanya lebih membingungkan daripada tidak ada apa-apa.
     func clearProgress() {
+        lastQueuePresentationKey = nil
         let center = UNUserNotificationCenter.current()
         center.removeDeliveredNotifications(withIdentifiers: [Self.progressID])
         center.removePendingNotificationRequests(withIdentifiers: [Self.progressID])
@@ -161,6 +196,7 @@ final class BackupNotifier: NSObject {
     /// Trigger `nil` berarti SEKARANG. Identifier yang sama menimpa yang lama,
     /// jadi yang tersisa di pusat pemberitahuan selalu satu baris, bukan riwayat.
     private func add(_ content: UNMutableNotificationContent, id: String) {
+        content.userInfo = ["destination": "backup"]
         let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }

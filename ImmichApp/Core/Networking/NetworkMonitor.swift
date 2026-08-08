@@ -33,6 +33,12 @@ final class NetworkMonitor {
     private let monitor = NWPathMonitor()
     private var hasReceivedPath = false
     private var readinessWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Dipakai backup queue untuk melepas item yang menunggu ketika koneksi
+    /// kembali atau saat perangkat berpindah dari jaringan mahal ke Wi-Fi.
+    /// Callback berada di main actor dan hanya hidup selama proses aplikasi
+    /// aktif; ketika proses mati, BGTask dan background URLSession mengambil
+    /// alih perannya.
+    var onPathChange: ((_ isOnline: Bool, _ isExpensive: Bool) -> Void)?
 
     private init() {
         // `[weak self]` ada di Task DALAM, bukan di handler luar.
@@ -46,6 +52,8 @@ final class NetworkMonitor {
             let expensive = path.isExpensive || path.isConstrained
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                let didChange = self.isOnline != online
+                    || self.isExpensive != expensive
                 if self.isOnline != online { self.isOnline = online }
                 if self.isExpensive != expensive { self.isExpensive = expensive }
                 if !self.hasReceivedPath {
@@ -54,6 +62,7 @@ final class NetworkMonitor {
                     self.readinessWaiters.removeAll()
                     waiters.forEach { $0.resume() }
                 }
+                if didChange { self.onPathChange?(online, expensive) }
             }
         }
         monitor.start(queue: DispatchQueue(label: "network-monitor"))

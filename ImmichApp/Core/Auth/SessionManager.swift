@@ -27,6 +27,11 @@ class SessionManager {
         (baseURL, authHeaders)
     }
 
+    var backupQueueOwner: BackupQueueOwner? {
+        guard let baseURL, let userID = currentUser?.id else { return nil }
+        return BackupQueueOwner(server: baseURL.absoluteString, userID: userID)
+    }
+
     /// Cuplikan yang bisa dibaca dari thread mana pun.
     ///
     /// Diperbarui hanya saat server atau token berubah — kejadian yang bisa
@@ -191,6 +196,9 @@ class SessionManager {
     /// kali sinyal hilang jelas bukan yang diinginkan.
     func restore() async {
         guard isLoggedIn else { return }
+        defer {
+            if isLoggedIn { BackupService.shared.configure(session: self) }
+        }
         do {
             try await checkServerCompatibility()
             try await validate()
@@ -203,13 +211,33 @@ class SessionManager {
             await logout()
             compatibilityIssue = error
         } catch APIError.unauthorized {
-            await logout()
+            await expireSessionForReauthentication()
         } catch {
             // Offline: sesi tersimpan tetap dipakai.
         }
     }
 
     private func validate() async throws { try await api.sendVoid(.init(path: "/auth/validateToken", method: .post)) }
+
+    /// Token sesi Immich tidak memiliki endpoint refresh pada kontrak API.
+    /// Karena itu 401 membutuhkan login ulang, tetapi bukan alasan untuk
+    /// membuang queue, pilihan album, atau mapping aset yang sudah diunggah.
+    /// Setelah login berhasil, `BackupService.configure` melepas state
+    /// `waitingForAuthentication` secara otomatis.
+    private func expireSessionForReauthentication() async {
+        ["token", "mode"].forEach(KeychainStore.delete)
+        AppLaunchState.shared.reset()
+        token = nil
+        isLoggedIn = false
+        refreshSnapshot()
+        BackupService.shared.pauseForAuthentication()
+        await BackupUploader.shared.cancelAll()
+    }
+
+    func expireForBackgroundUpload() async {
+        guard isLoggedIn else { return }
+        await expireSessionForReauthentication()
+    }
 
     /// Mengambil ulang data pengguna dari server, diam-diam.
     ///

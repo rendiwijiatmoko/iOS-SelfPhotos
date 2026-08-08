@@ -659,6 +659,13 @@ final class SwiftDataManager {
         return try? modelContext.fetch(descriptor).first
     }
 
+    func getBackupRecord(localIdentifier: String) -> BackupRecord? {
+        var descriptor = FetchDescriptor<BackupRecord>(
+            predicate: #Predicate { $0.localIdentifier == localIdentifier })
+        descriptor.fetchLimit = 1
+        return try? modelContext.fetch(descriptor).first
+    }
+
     /// Semua `localIdentifier` yang pernah diunggah lewat aplikasi ini.
     ///
     /// Inilah satu-satunya cara murah menjawab "foto di perangkat ini sudah ada
@@ -774,6 +781,34 @@ final class SwiftDataManager {
             throw LocalDatabaseMaintenanceError.persistentStoreUnavailable
         }
         modelContext.insert(record)
+        try modelContext.save()
+        refreshBackupRecordJournal()
+    }
+
+    /// Menulis hasil upload secara idempotent. Background URLSession dapat
+    /// menyampaikan ulang completion setelah reconnect, dan server dapat sudah
+    /// menerima byte sebelum koneksi putus. Satu localIdentifier tetap harus
+    /// menghasilkan satu mapping, bukan satu record setiap callback.
+    func upsertBackupRecord(
+        assetID: String,
+        checksum: String,
+        localIdentifier: String
+    ) throws {
+        guard startupState.isPersistentStoreAvailable else {
+            throw LocalDatabaseMaintenanceError.persistentStoreUnavailable
+        }
+        let descriptor = FetchDescriptor<BackupRecord>(
+            predicate: #Predicate { $0.localIdentifier == localIdentifier })
+        if let existing = try modelContext.fetch(descriptor).first {
+            existing.assetId = assetID
+            existing.deviceAssetId = checksum
+        } else {
+            modelContext.insert(BackupRecord(
+                id: UUID().uuidString,
+                assetId: assetID,
+                deviceAssetId: checksum,
+                localIdentifier: localIdentifier))
+        }
         try modelContext.save()
         refreshBackupRecordJournal()
     }

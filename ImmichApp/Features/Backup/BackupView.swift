@@ -154,6 +154,26 @@ struct BackupView: View {
                 value: backup.remainder,
                 tint: backup.remainder == 0 ? .secondary : .orange)
 
+            if let title = backup.queueStatusTitle,
+               let body = backup.queueStatusBody,
+               backup.pendingThisRun > 0 {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                        Text(body)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: queueStatusSymbol)
+                        .foregroundStyle(backup.isUploading ? Color.accentColor : .orange)
+                }
+            }
+
+            if !backup.failures.isEmpty {
+                Button("Retry Failed Uploads") { backup.retryFailedUploads() }
+            }
+
             // Baris rincian HANYA saat ada yang bisa dirinci. Layar kosong yang
             // bisa dibuka adalah janji yang tidak ditepati.
             if backup.remainder > 0 {
@@ -212,6 +232,15 @@ struct BackupView: View {
         .padding(.top, 6)
     }
 
+    private var queueStatusSymbol: String {
+        if backup.waitingForAuthentication > 0 { return "person.crop.circle.badge.exclamationmark" }
+        if backup.waitingForICloud > 0 { return "icloud.and.arrow.down" }
+        if backup.waitingForNetwork > 0 { return "wifi.exclamationmark" }
+        if backup.scheduledForRetry > 0 { return "arrow.clockwise" }
+        if backup.isUploading { return "arrow.up.circle" }
+        return "tray.full"
+    }
+
     // MARK: - Setelan
 
     private var settingsSection: some View {
@@ -241,6 +270,15 @@ struct BackupView: View {
         }
         if !NetworkMonitor.shared.isOnline {
             return "Waiting for a network connection."
+        }
+        if backup.waitingForAuthentication > 0 {
+            return "Sign in again to resume the background upload queue."
+        }
+        if backup.waitingForICloud > 0 {
+            return "Waiting for original files to become available from iCloud."
+        }
+        if backup.scheduledForRetry > 0 {
+            return "Some uploads are scheduled to retry automatically."
         }
         if NetworkMonitor.shared.isExpensive && !backup.canUploadNow {
             return "Waiting for Wi-Fi. Allow cellular data in Backup Options to continue now."

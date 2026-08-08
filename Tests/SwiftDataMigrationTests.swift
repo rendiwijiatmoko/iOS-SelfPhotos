@@ -127,6 +127,29 @@ final class SwiftDataMigrationTests: XCTestCase {
         XCTAssertEqual((journalJSON?["records"] as? [Any])?.count, 0)
     }
 
+    func testBackgroundCompletionIsIdempotentForSameLocalAsset() throws {
+        let fixture = try StoreFixture()
+        defer { fixture.cleanup() }
+        let manager = SwiftDataManager(
+            storeURL: fixture.storeURL,
+            backupJournalURL: fixture.journalURL)
+
+        try manager.upsertBackupRecord(
+            assetID: "server-first",
+            checksum: "checksum-first",
+            localIdentifier: "local-repeat")
+        try manager.upsertBackupRecord(
+            assetID: "server-final",
+            checksum: "checksum-final",
+            localIdentifier: "local-repeat")
+
+        XCTAssertEqual(manager.uploadedLocalIdentifiers(), ["local-repeat"])
+        XCTAssertEqual(
+            manager.serverAssetIDsByLocalIdentifier()["local-repeat"],
+            "server-final")
+        XCTAssertEqual(manager.getBackupRecord(deviceAssetId: "checksum-final")?.assetId, "server-final")
+    }
+
     private func createV1Store(at url: URL) throws {
         let schema = Schema(versionedSchema: LocalStoreSchemaV1.self)
         let configuration = ModelConfiguration(

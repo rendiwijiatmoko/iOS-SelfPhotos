@@ -17,7 +17,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // notifikasi cold-start tidak hilang sebelum SwiftUI sempat dibangun.
         let notifier = BackupNotifier.shared
         BackupUploader.shared.reconnect()
-        Task { await notifier.ensureAuthorization(prompt: false) }
+        Task { @MainActor in
+            await notifier.ensureAuthorization(prompt: false)
+            await BackupService.shared.restoreBackgroundLifecycle()
+        }
         return true
     }
 
@@ -74,6 +77,7 @@ struct ImmichApp: App {
                         guard BackupService.shared.isEnabled else { return }
                         BackupScheduler.schedule()
                         Task {
+                            await BackupService.shared.restoreBackgroundLifecycle()
                             await BackupService.shared.prepare()
                             BackupService.shared.start()
                         }

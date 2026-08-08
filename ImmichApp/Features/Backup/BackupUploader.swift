@@ -40,6 +40,52 @@ struct BackupUploadTaskContext: Codable, Equatable, Sendable {
     }
 }
 
+enum BackupUploadFailureDisposition: Equatable, Sendable {
+    case retryNetwork
+    case retryServer
+    case authenticationRequired
+    case permanent
+}
+
+extension BackupUploadFailureDisposition {
+    static func classify(_ error: Error) -> Self {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .notConnectedToInternet, .networkConnectionLost,
+                 .cannotConnectToHost, .cannotFindHost, .timedOut,
+                 .dataNotAllowed, .internationalRoamingOff, .dnsLookupFailed,
+                 .resourceUnavailable, .backgroundSessionWasDisconnected,
+                 .cancelled, .fileDoesNotExist:
+                return .retryNetwork
+            case .userAuthenticationRequired, .userCancelledAuthentication:
+                return .authenticationRequired
+            default:
+                return .retryServer
+            }
+        }
+
+        if let apiError = error as? APIError {
+            switch apiError {
+            case .unauthorized:
+                return .authenticationRequired
+            case .notConnected:
+                return .retryNetwork
+            case .server(let status, _):
+                if status == 401 { return .authenticationRequired }
+                if status == 408 || status == 425 || status == 429 || status >= 500 {
+                    return .retryServer
+                }
+                return .permanent
+            case .invalidURL, .decoding:
+                return .permanent
+            case .unknown:
+                return .retryServer
+            }
+        }
+        return .retryServer
+    }
+}
+
 /// Unggahan yang berjalan terus setelah aplikasinya ditutup.
 ///
 /// **Kenapa BUKAN Background App Refresh.** `BGProcessingTask` — yang sudah ada
@@ -109,13 +155,17 @@ final class BackupUploader: NSObject {
     ///   aplikasi. Saat jawabannya datang di proses yang baru diluncurkan, itulah
     ///   satu-satunya cara mengetahui foto mana yang barusan naik — tanpa perlu
     ///   tabel tambahan yang harus dijaga tetap sinkron.
-    func enqueue(
+    /// Membuat task dalam keadaan suspended. Pemanggil WAJIB menulis
+    /// taskIdentifier ke queue persisten sebelum memanggil `resume()`. Urutan
+    /// itu menutup celah terminasi di antara "URLSession sudah bekerja" dan
+    /// "aplikasi belum sempat mencatat siapa pemilik task".
+    func makeUploadTask(
         _ prepared: BackupRepository.PreparedUpload,
         localIdentifier: String,
         checksum: String,
         allowsCellular: Bool,
         phase: BackupUploadPhase = .primaryAsset
-    ) {
+    ) -> URLSessionUploadTask {
         var request = prepared.request
         // Ditegakkan PER PERMINTAAN, bukan per sesi: satu sesi latar melayani
         // foto dan video sekaligus, sedangkan aturannya berbeda untuk keduanya.
@@ -131,7 +181,7 @@ final class BackupUploader: NSObject {
             localIdentifier: localIdentifier,
             checksum: checksum,
             bodyPath: prepared.bodyFile.path).encoded
-        task.resume()
+        return task
     }
 
     /// Melanjutkan sesi yang mungkin masih punya transfer berjalan.
@@ -150,6 +200,35 @@ final class BackupUploader: NSObject {
     func activeLocalIdentifiers() async -> Set<String> {
         let tasks = await session.allTasks
         return Set(tasks.compactMap(Self.localIdentifier(from:)))
+    }
+
+    func activeTasks() async -> [BackupActiveTask] {
+        let tasks = await session.allTasks
+        var result: [BackupActiveTask] = []
+        for task in tasks {
+            guard let context = BackupUploadTaskContext.decode(task.taskDescription) else {
+                // Task tanpa identitas tidak mungkin diselesaikan dengan aman
+                // dan task suspended semacam ini akan menahan session finish
+                // event selamanya. Batalkan; scan PhotoKit akan menemukan aset
+                // aslinya kembali jika memang masih perlu diunggah.
+                task.cancel()
+                continue
+            }
+            result.append(BackupActiveTask(
+                taskIdentifier: task.taskIdentifier,
+                context: context,
+                isSuspended: task.state == .suspended))
+        }
+        return result
+    }
+
+    func resumeTasks(identifiers: Set<Int>) async {
+        guard !identifiers.isEmpty else { return }
+        let tasks = await session.allTasks
+        for task in tasks
+        where identifiers.contains(task.taskIdentifier) && task.state == .suspended {
+            task.resume()
+        }
     }
 
     private static func localIdentifier(from task: URLSessionTask) -> String? {
