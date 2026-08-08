@@ -69,6 +69,10 @@ struct AssetDetailView: View {
     /// Posisi scroll daftar di dalam panel, dipakai recognizer untuk memutuskan
     /// kapan harus mengalah ke daftar.
     @State private var panelScrollOffset: CGFloat = 0
+    /// Kotak card terakhir saat chrome masih utuh. Navigation bar menghilang
+    /// ketika panel dibuka; memakai GeometryReader live pada saat itu mengubah
+    /// titik awal interpolasi di tengah gesture dan membuat foto tersentak.
+    @State private var cardViewport: AssetCardViewport?
 
     @State private var descriptionDraft = ""
     @FocusState private var descriptionFocused: Bool
@@ -121,7 +125,15 @@ struct AssetDetailView: View {
     private var isPanelDragging: Bool { panelDragStart != nil }
     private var isPanelAtMax: Bool { panelHeight >= panelMaxHeight - 1 }
 
-    private var showInfo: Bool { panelHeight > 0 }
+    /// Chrome mengikuti umur panel, bukan nilai target animasinya.
+    ///
+    /// Saat `panelHeight` dianimasikan ke 0, SwiftUI langsung menyimpan nilai
+    /// target 0 walaupun panel masih tampak bergerak selama beberapa frame.
+    /// Kalau chrome membaca `panelHeight > 0`, navigation bar dan filmstrip
+    /// muncul di frame pertama penutupan lalu bertabrakan dengan panel yang
+    /// belum selesai turun. `isPanelMounted` baru false di completion, sehingga
+    /// seluruh chrome berpindah tepat setelah transisi selesai.
+    private var showInfo: Bool { isPanelMounted }
 
     // Body sengaja dipecah berlapis. Sebagai satu rantai modifier utuh,
     // ekspresinya terlalu besar untuk type-checker Swift ("unable to
@@ -378,9 +390,12 @@ struct AssetDetailView: View {
 
     @ViewBuilder
     private var bottomAccessory: some View {
-        // Indicator ikut toolbar hanya saat tidak zoom — dalam mode zoom
-        // pindah halaman dikunci, jadi indicator tidak ditampilkan.
-        if !showInfo && showToolbar && !isZoomed && !visibleAssets.isEmpty {
+        if !visibleAssets.isEmpty {
+            // Slot safe-area sengaja selalu terpasang. Melepas dan memasangnya
+            // bersamaan dengan panel mengubah tinggi GeometryReader secara
+            // mendadak, sehingga foto melakukan layout kedua di tengah animasi.
+            // Yang berubah selama transisi hanya opacity dan hit testing.
+            let isVisible = !showInfo && showToolbar && !isZoomed
             VStack(spacing: 10) {
                 // Bar kontrol hanya untuk video, dan letaknya DI ATAS strip —
                 // strip tetap dipakai untuk berpindah aset.
@@ -398,6 +413,12 @@ struct AssetDetailView: View {
                     session: session)
                     .frame(height: 54)
             }
+            .opacity(isVisible ? 1 : 0)
+            .allowsHitTesting(isVisible)
+            .accessibilityHidden(!isVisible)
+            .animation(
+                .easeInOut(duration: PhotoPagerLayout.chromeTransitionDuration),
+                value: isVisible)
         }
     }
 
@@ -616,7 +637,12 @@ struct AssetDetailView: View {
         }
         if target > 0 { isPanelMounted = true }
 
-        withAnimation(.interpolatingSpring(stiffness: 300, damping: 30)) {
+        // Panel SwiftUI dan refit foto UIKit memakai durasi + kurva yang sama.
+        // Animator berbeda sebelumnya membuat foto mengejar panel, sehingga
+        // pergerakan yang sebenarnya lancar tetap tampak tersendat.
+        withAnimation(
+            .easeInOut(duration: PhotoPagerLayout.panelTransitionDuration)
+        ) {
             panelHeight = target
             // Panel terbuka → toolbar atas dan strip thumbnail ikut hilang.
             if target > 0 { showToolbar = true }
@@ -711,6 +737,10 @@ struct AssetDetailView: View {
             // atas titik tengah layar — kalau konten dipusatkan ke tengah layar
             // penuh, bagian bawahnya menabrak strip.
             let box = geo.frame(in: .global)
+            let liveViewport = AssetCardViewport(
+                height: max(1, box.height - 16),
+                centerY: box.midY)
+            let stableViewport = cardViewport ?? liveViewport
 
             PhotoPagerView(
                 // `assets` dipakai sampai salinan kerjanya terisi.
@@ -730,7 +760,9 @@ struct AssetDetailView: View {
                 localLivePhotoHint: currentLivePhotoContextAssetID == currentAsset.id
                     ? currentLivePhotoHint
                     : nil,
-                layout: pagerLayout(available: max(1, box.height - 16), centerY: box.midY),
+                layout: pagerLayout(
+                    available: stableViewport.height,
+                    centerY: stableViewport.centerY),
                 // Zoom yang belum menghasilkan ruang pan horizontal tetap boleh
                 // memakai swipe untuk pindah halaman. Penguncian zoom dihitung
                 // langsung oleh controller dari lebar konten aktual.
@@ -748,6 +780,13 @@ struct AssetDetailView: View {
                 onScrollProgress: { filmstripController?.track(page: $0) },
                 onControllerReady: { pagerController = $0 },
                 session: session)
+                // Simpan hanya ketika panel benar-benar tertutup. Saat panel
+                // bergerak, perubahan safe area dari toolbar tidak boleh
+                // mengganti titik awal interpolasi foto.
+                .onChange(of: liveViewport, initial: true) { _, newViewport in
+                    guard !showInfo, showToolbar, !isZoomed else { return }
+                    cardViewport = newViewport
+                }
                 // Yang mengabaikan safe area HANYA pagernya, bukan
                 // `GeometryReader`-nya.
                 //
@@ -1303,6 +1342,11 @@ struct AssetDetailView: View {
         downloadedFileURL = nil
         sharePreviewImage = nil
     }
+}
+
+private struct AssetCardViewport: Equatable {
+    let height: CGFloat
+    let centerY: CGFloat
 }
 
 /// Empat modifier visibilitas/latar toolbar dibungkus jadi satu, supaya tidak

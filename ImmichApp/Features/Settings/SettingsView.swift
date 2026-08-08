@@ -1,5 +1,41 @@
 import SwiftUI
 
+private struct SettingsSheetDismissActionKey: EnvironmentKey {
+    static let defaultValue: (() -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    fileprivate var settingsSheetDismissAction: (() -> Void)? {
+        get { self[SettingsSheetDismissActionKey.self] }
+        set { self[SettingsSheetDismissActionKey.self] = newValue }
+    }
+}
+
+private struct SettingsSheetCloseButton: ViewModifier {
+    @Environment(\.settingsSheetDismissAction) private var dismissSheet
+
+    func body(content: Content) -> some View {
+        content.toolbar {
+            if let dismissSheet {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: dismissSheet) {
+                        Image(systemName: "xmark")
+                    }
+                    .accessibilityLabel("Close Settings")
+                }
+            }
+        }
+    }
+}
+
+extension View {
+    /// Keeps the sheet close action on the currently visible navigation page.
+    /// A toolbar attached only to the root page disappears after a push.
+    func settingsSheetCloseButton() -> some View {
+        modifier(SettingsSheetCloseButton())
+    }
+}
+
 /// Sheet profil & pengaturan, bergaya sheet profil di Photos: kepala besar
 /// berisi identitas, lalu daftar pengaturan berkelompok di bawahnya.
 ///
@@ -51,13 +87,15 @@ struct SettingsView: View {
     @State private var vm: SettingsViewModel
     @State private var backup = BackupService.shared
     @State private var showLogoutAlert = false
+    @Binding private var isSettingsRootVisible: Bool
 
     /// VM dibuat oleh pemanggilnya, bukan menyusul di `task` layar ini.
     ///
     /// Isinya yang lokal — tema, jumlah kolom — sudah ada sejak frame pertama,
     /// dan membuatnya baru setelah view muncul berarti sheet-nya sempat tampil
     /// kosong setiap kali dibuka.
-    init(session: SessionManager) {
+    init(session: SessionManager, isSettingsRootVisible: Binding<Bool>) {
+        _isSettingsRootVisible = isSettingsRootVisible
         _vm = State(initialValue: SettingsViewModel(
             repo: SettingsRepository(api: APIClient(session: session))))
     }
@@ -66,6 +104,9 @@ struct SettingsView: View {
         settingsList
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
+            .settingsSheetCloseButton()
+            .onAppear { isSettingsRootVisible = true }
+            .onDisappear { isSettingsRootVisible = false }
             // Bar dibuat transparan supaya kepalanya terlihat sampai ke belakang
             // tombol tutup, seperti di referensi.
             .toolbarBackground(.hidden, for: .navigationBar)
@@ -408,28 +449,20 @@ struct SettingsView: View {
     }
 }
 
-/// Pemilik `NavigationStack` sekaligus tombol penutup sheet.
-///
-/// Tombol sengaja ditempel ke stack, bukan ke halaman Settings pertama. Dengan
-/// begitu toolbar ini tetap hidup ketika pengguna mendorong Backup, Device
-/// Albums, atau halaman turunannya ke dalam stack yang sama.
+/// Pemilik `NavigationStack` dan aksi penutup untuk seluruh alur Settings.
 struct SettingsSheetView: View {
     @Environment(\.dismiss) private var dismiss
+    @State private var isSettingsRootVisible = true
     let session: SessionManager
 
     var body: some View {
         NavigationStack {
-            SettingsView(session: session)
+            SettingsView(
+                session: session,
+                isSettingsRootVisible: $isSettingsRootVisible)
         }
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .accessibilityLabel("Close Settings")
-            }
-        }
+        .environment(\.settingsSheetDismissAction, { dismiss() })
+        .interactiveDismissDisabled(!isSettingsRootVisible)
+        .presentationDragIndicator(isSettingsRootVisible ? .visible : .hidden)
     }
 }

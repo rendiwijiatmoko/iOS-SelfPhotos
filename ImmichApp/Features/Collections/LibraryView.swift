@@ -30,7 +30,6 @@ struct LibraryView: View {
     @Namespace private var albumNamespace
     @Namespace private var assetNamespace
     @Namespace private var personNamespace
-    @Namespace private var namespace
 
     enum Row: String, CaseIterable, Hashable {
         // `utilities` sudah dihapus. Nilai lama yang masih tersimpan di
@@ -343,7 +342,6 @@ struct LibraryView: View {
                 ProfileAvatar(style: .toolbar, showsBackupState: true)
             }
             .buttonStyle(.plain)
-            .matchedTransitionSource(id: "profile", in: namespace)
         }
         // Avatarnya sudah bulat penuh; kapsul kaca bawaan toolbar hanya
         // menambah lingkaran kedua yang lebih besar di belakangnya.
@@ -352,7 +350,6 @@ struct LibraryView: View {
 
     private var settingsSheet: some View {
         SettingsSheetView(session: session)
-        .navigationTransition(.zoom(sourceID: "profile", in: namespace))
     }
 
     // MARK: - Baris yang bisa dilipat

@@ -51,7 +51,6 @@ struct TimelineView: View {
     /// Pegangan ke controller grid, untuk perintah yang datang dari luar —
     /// ketukan kedua tab Photos, misalnya.
     @State private var gridController: PhotoGridController?
-    @Namespace private var namespace
 
     var body: some View {
         NavigationStack {
@@ -367,7 +366,6 @@ struct TimelineView: View {
     
     private var settingsSheet: some View {
         SettingsSheetView(session: session)
-        .navigationTransition(.zoom(sourceID: "profile", in: namespace))
     }
 
     // MARK: - Sel grid
@@ -432,7 +430,6 @@ struct TimelineView: View {
                     ProfileAvatar(style: .toolbar, showsBackupState: true)
                 }
                 .buttonStyle(.plain)
-                .matchedTransitionSource(id: "profile", in: namespace)
             }
             // Avatarnya sudah bulat penuh; kapsul kaca bawaan toolbar hanya
             // menambah lingkaran kedua yang lebih besar di belakangnya.

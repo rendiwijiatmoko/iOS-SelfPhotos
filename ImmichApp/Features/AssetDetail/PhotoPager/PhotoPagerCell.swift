@@ -7,6 +7,10 @@ import UIKit
 /// Nilainya berubah saat panel info ditarik, jadi ia harus bisa diteruskan ke
 /// semua sel yang sedang terlihat tanpa menyusun ulang apa pun.
 struct PhotoPagerLayout: Equatable {
+    /// Satu sumber timing untuk panel SwiftUI dan refit konten UIKit.
+    static let panelTransitionDuration: TimeInterval = 0.38
+    static let chromeTransitionDuration: TimeInterval = 0.2
+
     /// Batas tinggi konten dalam poin (tinggi area aman). 0 = tanpa batas.
     var maxContentHeight: CGFloat = 0
     /// Titik pusat vertikal konten dalam koordinat layar. 0 = pusat bounds.
@@ -113,6 +117,13 @@ final class PhotoPagerCell: UICollectionViewCell {
     /// Ukuran konten hasil perhitungan terakhir, untuk tahu kapan frame benar-
     /// benar perlu ditulis ulang.
     private var fittedSize: CGSize = .zero
+    /// Cache inset mencegah setter UIScrollView dipanggil kembali oleh layout
+    /// pass yang dipicu setter itu sendiri.
+    private var fittedInsets = UIEdgeInsets(
+        top: .greatestFiniteMagnitude,
+        left: .greatestFiniteMagnitude,
+        bottom: .greatestFiniteMagnitude,
+        right: .greatestFiniteMagnitude)
     private var isZoomed = false
     private var isPagingLockedForZoom = false
     /// true selama refit mengubah `zoomScale` secara programatik; laporan zoom
@@ -308,6 +319,11 @@ final class PhotoPagerCell: UICollectionViewCell {
         playButton.isHidden = true
         imageView.image = nil
         fittedSize = .zero
+        fittedInsets = UIEdgeInsets(
+            top: .greatestFiniteMagnitude,
+            left: .greatestFiniteMagnitude,
+            bottom: .greatestFiniteMagnitude,
+            right: .greatestFiniteMagnitude)
         hasFitted = false
         animateNextFit = false
         isZoomed = false
@@ -569,7 +585,7 @@ final class PhotoPagerCell: UICollectionViewCell {
 
         if shouldAnimate {
             UIView.animate(
-                withDuration: 0.3,
+                withDuration: PhotoPagerLayout.panelTransitionDuration,
                 delay: 0,
                 options: [.curveEaseInOut, .beginFromCurrentState],
                 animations: apply)
@@ -596,8 +612,12 @@ final class PhotoPagerCell: UICollectionViewCell {
         let insetTop = max(0, centerY - content.height / 2)
         let insetBottom = max(0, bounds.height - centerY - content.height / 2)
 
-        scrollView.contentInset = UIEdgeInsets(
+        let newInsets = UIEdgeInsets(
             top: insetTop, left: insetX, bottom: insetBottom, right: insetX)
+        if !fittedInsets.isApproximatelyEqual(to: newInsets) {
+            fittedInsets = newInsets
+            scrollView.contentInset = newInsets
+        }
 
         // Menyetel offset di setiap layout pass memicu layoutSubviews lagi →
         // fitContent → setel offset → berulang. Umpan balik itulah getarannya,
@@ -1250,6 +1270,18 @@ extension PhotoPagerCell: UIGestureRecognizerDelegate {
         // Long press harus boleh hidup bersama pan recognizer milik pager dan
         // panel info. Swipe nyata tetap membatalkannya lewat allowableMovement.
         true
+    }
+}
+
+private extension UIEdgeInsets {
+    func isApproximatelyEqual(
+        to other: UIEdgeInsets,
+        tolerance: CGFloat = 0.25
+    ) -> Bool {
+        abs(top - other.top) <= tolerance
+            && abs(left - other.left) <= tolerance
+            && abs(bottom - other.bottom) <= tolerance
+            && abs(right - other.right) <= tolerance
     }
 }
 
