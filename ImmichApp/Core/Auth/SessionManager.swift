@@ -309,6 +309,7 @@ class SessionManager {
         LocalSnapshot.clearAll()
         AssistiveAccessPreferences.clearSelectedAlbum()
         try? SwiftDataManager.shared.clearAllAccountData()
+        DeletedServerAssetRegistry.shared.clear()
         LocalPhotoLibrary.shared.resetForLogout()
         RemovedAssets.shared.clear()
         UnreadableAssets.shared.clear()

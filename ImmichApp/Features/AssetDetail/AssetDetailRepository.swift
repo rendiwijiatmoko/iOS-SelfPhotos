@@ -123,6 +123,10 @@ class AssetDetailRepository {
     func delete(_ ids: [String], force: Bool = false) async throws {
         struct Body: Encodable { let ids: [String]; let force: Bool }
         try await api.sendVoid(.json("/assets", method: .delete, body: Body(ids: ids, force: force)))
+        // Mapping backup tetap diperlukan agar foto lokal tidak di-upload ulang.
+        // Penanda terpisah ini mencegah mapping tersebut membuat foto yang baru
+        // dihapus muncul kembali sebagai petak lokal setelah app restart.
+        await DeletedServerAssetRegistry.shared.record(ids, permanently: force)
     }
 
     func downloadOriginal(_ id: String) async throws -> Data {

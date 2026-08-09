@@ -266,10 +266,15 @@ final class TimelineViewModel {
     /// - Parameter existingServerIDs: id aset yang SUDAH ada di cache linimasa.
     private func localRows(existingServerIDs: Set<String>) -> [TimelineRow] {
         let links = dataManager?.serverAssetIDsByLocalIdentifier() ?? [:]
+        let deletedServerIDs = DeletedServerAssetRegistry.shared.suppressedIDs
 
         return LocalPhotoLibrary.shared.photos.compactMap { photo -> TimelineRow? in
             var origin = AssetOrigin.device
             if let serverID = links[photo.id] {
+                // Mapping backup sengaja bertahan setelah delete supaya file
+                // lokal tidak naik lagi. Ia tidak berarti foto tersebut masih
+                // boleh kembali ke timeline sebagai fallback lokal.
+                guard !deletedServerIDs.contains(serverID) else { return nil }
                 // Petak servernya sudah berdiri sendiri; dua petak untuk satu
                 // foto yang sama adalah persis yang ingin dihindari.
                 guard !existingServerIDs.contains(serverID) else { return nil }

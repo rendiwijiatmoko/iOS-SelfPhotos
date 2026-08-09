@@ -240,6 +240,7 @@ final class AssetGridViewModel {
         let restoredAssets = assets.filter { ids.contains($0.id) }
         do {
             try await repo.restore(ids)
+            DeletedServerAssetRegistry.shared.restore(ids)
             let restored = Set(ids)
             assets.removeAll { restored.contains($0.id) }
             persist()
@@ -255,6 +256,7 @@ final class AssetGridViewModel {
     func restoreAll(using repo: TrashRepository) async {
         do {
             try await repo.restoreAll()
+            DeletedServerAssetRegistry.shared.restoreAllFromTrash()
             assets.removeAll()
             persist()
         } catch {
@@ -266,6 +268,7 @@ final class AssetGridViewModel {
     func emptyTrash(using repo: TrashRepository) async {
         do {
             try await repo.empty()
+            DeletedServerAssetRegistry.shared.emptyTrash()
             assets.removeAll()
             persist()
         } catch {

@@ -88,13 +88,22 @@ class SyncRepository {
                 let asset = try JSONDecoder.immich.decode(
                     SyncLineDataDTO<SyncAssetV1DTO>.self, from: data).data
                 if asset.deletedAt != nil {
+                    // Delete dari web/perangkat lain juga harus menekan fallback
+                    // PhotoKit. Full sync sekaligus memperbaiki state versi app
+                    // lama yang belum sempat mencatat delete secara lokal.
+                    DeletedServerAssetRegistry.shared.record(
+                        [asset.id], permanently: false)
                     deletes.append(asset.id)
                 } else {
+                    // Restore dari klien lain datang lagi sebagai AssetV1 aktif.
+                    DeletedServerAssetRegistry.shared.restore([asset.id])
                     upserts.append(asset)
                 }
             case "AssetDeleteV1":
                 let payload = try JSONDecoder.immich.decode(
                     SyncLineDataDTO<SyncAssetDeleteV1DTO>.self, from: data).data
+                DeletedServerAssetRegistry.shared.record(
+                    [payload.assetId], permanently: true)
                 deletes.append(payload.assetId)
             case "SyncResetV1":
                 outcome.serverRequestedReset = true
