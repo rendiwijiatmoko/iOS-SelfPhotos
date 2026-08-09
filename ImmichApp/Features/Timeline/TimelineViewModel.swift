@@ -463,12 +463,28 @@ final class TimelineViewModel {
 
     @discardableResult
     func delete(_ asset: AssetLite) async -> Bool {
-        guard let assetRepo else { return false }
-        do {
-            try await assetRepo.delete(asset.id)
+        // Foto yang belum ada di server bukan kegagalan API: tempatnya memang
+        // hanya di PhotoKit, jadi penghapusannya harus lewat Photos.
+        if asset.origin == .device {
+            guard await LocalPhotoLibrary.shared.delete([asset.id]) else { return false }
             removeAsset(asset.id)
+            return true
+        }
+
+        guard let assetRepo,
+              let target = serverDeleteTargets(for: [asset]).first
+        else {
+            actionError = String(localized: "Failed to find this photo on the server")
+            return false
+        }
+
+        do {
+            // Petak `.both` yang baru selesai diunggah masih dapat memakai id
+            // `device:…`. Endpoint DELETE /assets hanya menerima UUID server.
+            try await assetRepo.delete(target.serverID)
+            removeAsset(target.displayID)
             // Dihapus berarti BUANG dari cache, bukan disembunyikan.
-            try? dataManager?.purgeAssets([asset.id])
+            try? dataManager?.purgeAssets([target.serverID])
             return true
         } catch {
             actionError = Self.describe(error)
@@ -532,15 +548,120 @@ final class TimelineViewModel {
     @discardableResult
     func deleteSelected(_ ids: [String]) async -> Bool {
         guard let assetRepo, !ids.isEmpty else { return false }
-        do {
-            try await assetRepo.delete(ids)
-            removeAssets(Set(ids))
-            try? dataManager?.purgeAssets(ids)
-            return true
-        } catch {
-            actionError = Self.describe(error)
+
+        let selected = ids.compactMap(asset(for:))
+        guard !selected.isEmpty else { return false }
+
+        // Satu seleksi dapat berisi tiga bentuk sekaligus:
+        // - server: id-nya sudah UUID server;
+        // - both dengan petak lokal: id tampilannya `device:…`, tetapi request
+        //   harus memakai pasangan UUID server;
+        // - device: belum ada di server dan harus dihapus lewat PhotoKit.
+        let localOnly = selected.filter { $0.origin == .device }
+        let serverTargets = serverDeleteTargets(
+            for: selected.filter { $0.origin != .device })
+        let unresolvedServerCount = selected.count - localOnly.count - serverTargets.count
+
+        var removedDisplayIDs = Set<String>()
+        var removedServerIDs = Set<String>()
+        var failedCount = unresolvedServerCount
+        var lastServerError: Error?
+
+        if !localOnly.isEmpty,
+           await LocalPhotoLibrary.shared.delete(localOnly.map(\.id)) {
+            removedDisplayIDs.formUnion(localOnly.map(\.id))
+        } else if !localOnly.isEmpty {
+            // PhotoKit menampilkan dialog sistem. Membatalkannya bukan error
+            // server dan tidak perlu memunculkan alert "Action Failed".
+            failedCount += localOnly.count
+        }
+
+        if !serverTargets.isEmpty {
+            let result = await deleteServerTargets(serverTargets, using: assetRepo)
+            removedDisplayIDs.formUnion(result.succeeded.map(\.displayID))
+            removedServerIDs.formUnion(result.succeeded.map(\.serverID))
+            failedCount += result.failedCount
+            lastServerError = result.lastError
+        }
+
+        removeAssets(removedDisplayIDs)
+        try? dataManager?.purgeAssets(Array(removedServerIDs))
+
+        guard failedCount == 0 else {
+            // Kalau semuanya gagal, pesan asli server paling berguna. Pada
+            // keberhasilan parsial, jumlahnya harus jujur supaya item yang sudah
+            // hilang tidak ikut dilaporkan gagal.
+            if removedDisplayIDs.isEmpty, let lastServerError {
+                actionError = Self.describe(lastServerError)
+            } else if lastServerError != nil || unresolvedServerCount > 0 {
+                actionError = failedCount == 1
+                    ? String(localized: "Failed to delete 1 item")
+                    : String(localized: "Failed to delete \(failedCount) items")
+            }
             return false
         }
+        return true
+    }
+
+    /// Pasangan id yang dilihat grid dengan UUID yang diterima Immich.
+    ///
+    /// Detail Asset sudah melakukan terjemahan ini sejak awal. Menaruh aturan
+    /// yang sama di view model timeline membuat context menu dan mode Select
+    /// tidak lagi mengirim `PHAsset.localIdentifier` ke endpoint server.
+    private struct ServerDeleteTarget {
+        let displayID: String
+        let serverID: String
+    }
+
+    private func serverDeleteTargets(for assets: [AssetLite]) -> [ServerDeleteTarget] {
+        let links = dataManager?.serverAssetIDsByLocalIdentifier() ?? [:]
+        return assets.compactMap { asset in
+            if LocalPhotoLibrary.isLocal(asset.id) {
+                let localID = LocalPhotoLibrary.localIdentifier(from: asset.id)
+                guard let serverID = links[localID] else { return nil }
+                return ServerDeleteTarget(displayID: asset.id, serverID: serverID)
+            }
+            return ServerDeleteTarget(displayID: asset.id, serverID: asset.id)
+        }
+    }
+
+    /// Coba batch resmi lebih dahulu. Jika server menolak batch karena satu id
+    /// stale/tidak dimiliki, pecah per id agar foto lain yang valid tetap
+    /// terhapus. Error jaringan/auth tidak diulang N kali.
+    private func deleteServerTargets(
+        _ targets: [ServerDeleteTarget],
+        using repo: AssetDetailRepository
+    ) async -> (succeeded: [ServerDeleteTarget], failedCount: Int, lastError: Error?) {
+        let uniqueServerIDs = Array(Set(targets.map(\.serverID)))
+        do {
+            try await repo.delete(uniqueServerIDs)
+            return (targets, 0, nil)
+        } catch {
+            guard Self.shouldRetryDeleteIndividually(error) else {
+                return ([], targets.count, error)
+            }
+
+            var succeededServerIDs = Set<String>()
+            var lastError: Error?
+            for serverID in uniqueServerIDs {
+                do {
+                    try await repo.delete(serverID)
+                    succeededServerIDs.insert(serverID)
+                } catch {
+                    lastError = error
+                }
+            }
+
+            let succeeded = targets.filter { succeededServerIDs.contains($0.serverID) }
+            return (succeeded, targets.count - succeeded.count, lastError)
+        }
+    }
+
+    private static func shouldRetryDeleteIndividually(_ error: Error) -> Bool {
+        guard let apiError = error as? APIError,
+              case .server(let status, _) = apiError
+        else { return false }
+        return status == 400 || status == 403 || status == 404
     }
 
     /// Unduh beberapa file asli sekaligus untuk share sheet. Yang gagal dilewati,
