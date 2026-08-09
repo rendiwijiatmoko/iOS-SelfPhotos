@@ -307,6 +307,7 @@ class SessionManager {
         // perpustakaan orang lain yang akan tergambar di layar akun berikutnya
         // sebelum server sempat membantahnya.
         LocalSnapshot.clearAll()
+        AssistiveAccessPreferences.clearSelectedAlbum()
         try? SwiftDataManager.shared.clearAllAccountData()
         LocalPhotoLibrary.shared.resetForLogout()
         RemovedAssets.shared.clear()

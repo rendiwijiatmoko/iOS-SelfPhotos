@@ -130,5 +130,14 @@ struct ImmichApp: App {
                     }
                 }
         }
+
+        // Hierarchy khusus yang hanya dibuat ketika sistem menjalankan app di
+        // Assistive Access. Control SwiftUI native di dalam scene ini mendapat
+        // style Row/Grid, ukuran tombol, dan navigation chrome dari iOS.
+        AssistiveAccess {
+            AssistiveAccessRouter()
+                .environment(session)
+                .task { await session.restore() }
+        }
     }
 }

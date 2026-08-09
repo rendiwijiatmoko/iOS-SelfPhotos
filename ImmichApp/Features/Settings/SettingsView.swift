@@ -234,6 +234,7 @@ struct SettingsView: View {
             storageSection
             cacheSection
             appearanceSection
+            accessibilitySection
             aboutSection
             accountSection
         }
@@ -376,6 +377,16 @@ struct SettingsView: View {
                 Text("5 Columns").tag(5)
             } label: {
                 Label("Grid Columns", systemImage: "square.grid.3x3")
+            }
+        }
+    }
+
+    private var accessibilitySection: some View {
+        Section("Accessibility") {
+            NavigationLink {
+                AssistiveAccessSettingsView(session: session)
+            } label: {
+                Label("Assistive Access", systemImage: "accessibility")
             }
         }
     }
