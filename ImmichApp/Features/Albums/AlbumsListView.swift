@@ -1,6 +1,9 @@
 import SwiftUI
 
 struct AlbumsListView: View {
+    /// Pemilik layar (Library, misalnya) dapat ikut menambal snapshot albumnya.
+    var onAlbumUpdated: ((AlbumResponseDTO) -> Void)?
+
     @Environment(SessionManager.self) private var session
     @State private var vm: AlbumListViewModel?
     @State private var scope: Scope = .all
@@ -34,8 +37,12 @@ struct AlbumsListView: View {
 
     /// Sidebar iPad dan layar All Albums berbagi instance yang sama agar hasil
     /// membuat/menghapus album langsung terlihat di kedua tempat.
-    init(viewModel: AlbumListViewModel? = nil) {
+    init(
+        viewModel: AlbumListViewModel? = nil,
+        onAlbumUpdated: ((AlbumResponseDTO) -> Void)? = nil
+    ) {
         _vm = State(initialValue: viewModel)
+        self.onAlbumUpdated = onAlbumUpdated
     }
 
     var body: some View {
@@ -60,14 +67,17 @@ struct AlbumsListView: View {
             .toolbar { toolbar }
             .sheet(isPresented: createSheetBinding) {
                 NewAlbumSheet { name, description, assetIds in
-                    await vm?.createAlbum(
+                    guard let vm else {
+                        return String(localized: "Failed to create album")
+                    }
+                    return await vm.createAlbum(
                         name: name, description: description, assetIds: assetIds)
-                        ?? String(localized: "Failed to create album")
                 }
             }
             .sheet(item: $editTarget) { album in
-                AlbumEditSheet(album: album) { name, description in
-                    Task { await vm?.update(album.id, name: name, description: description) }
+                AlbumEditSheet(album: album) { updated in
+                    vm?.applyAlbumUpdate(updated)
+                    onAlbumUpdated?(updated)
                 }
             }
             .sheet(item: $addUserTarget) { album in
@@ -77,16 +87,6 @@ struct AlbumsListView: View {
             }
             .sheet(item: $sharedLink) { link in
                 ShareSheet(url: link.url)
-            }
-            .confirmationDialog(
-                "Delete “\(deleteTarget?.albumName ?? "")”?",
-                isPresented: deleteBinding,
-                titleVisibility: .visible
-            ) {
-                Button("Delete Album", role: .destructive) { commitDelete() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("The photos will stay in your library.")
             }
             .task { await start() }
     }
@@ -157,14 +157,6 @@ struct AlbumsListView: View {
         Binding(
             get: { vm?.showCreateSheet ?? false },
             set: { vm?.showCreateSheet = $0 })
-    }
-
-    // confirmationDialog memakai binding Bool, sementara sasarannya perlu
-    // disimpan sebagai nilai — jembatannya di sini.
-    private var deleteBinding: Binding<Bool> {
-        Binding(
-            get: { deleteTarget != nil },
-            set: { if !$0 { deleteTarget = nil } })
     }
 
     // MARK: - Isi
@@ -243,7 +235,12 @@ struct AlbumsListView: View {
                 LazyVGrid(columns: gridColumns(for: proxy.size.width), spacing: 16) {
                     ForEach(albums) { album in
                         NavigationLink {
-                            AlbumDetailView(album: album)
+                            AlbumDetailView(
+                                album: album,
+                                onAlbumChanged: {
+                                    vm?.applyAlbumUpdate($0)
+                                    onAlbumUpdated?($0)
+                                })
                                 .navigationTransition(
                                     .zoom(sourceID: album.id, in: albumNamespace))
                         } label: {
@@ -255,6 +252,19 @@ struct AlbumsListView: View {
                             contextMenu(for: album)
                         } preview: {
                             AlbumCoverPreview(album: album, session: session)
+                        }
+                        .confirmationDialog(
+                            "Delete “\(album.albumName)”?",
+                            isPresented: deleteBinding(for: album),
+                            titleVisibility: .visible
+                        ) {
+                            Button("Delete Album", role: .destructive) {
+                                deleteTarget = nil
+                                Task { await vm?.deleteAlbum(album.id) }
+                            }
+                            Button("Cancel", role: .cancel) {}
+                        } message: {
+                            Text("The photos will stay in your library.")
                         }
                     }
                 }
@@ -295,7 +305,12 @@ struct AlbumsListView: View {
         List {
             ForEach(albums) { album in
                 NavigationLink {
-                    AlbumDetailView(album: album)
+                    AlbumDetailView(
+                        album: album,
+                        onAlbumChanged: {
+                            vm.applyAlbumUpdate($0)
+                            onAlbumUpdated?($0)
+                        })
                         .navigationTransition(
                             .zoom(sourceID: album.id, in: albumNamespace))
                 } label: {
@@ -312,6 +327,19 @@ struct AlbumsListView: View {
                     contextMenu(for: album)
                 } preview: {
                     AlbumCoverPreview(album: album, session: session)
+                }
+                .confirmationDialog(
+                    "Delete “\(album.albumName)”?",
+                    isPresented: deleteBinding(for: album),
+                    titleVisibility: .visible
+                ) {
+                    Button("Delete Album", role: .destructive) {
+                        deleteTarget = nil
+                        Task { await vm.deleteAlbum(album.id) }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("The photos will stay in your library.")
                 }
             }
             .onDelete { indices in
@@ -337,9 +365,14 @@ struct AlbumsListView: View {
             onDelete: { deleteTarget = album })
     }
 
-    private func commitDelete() {
-        guard let album = deleteTarget else { return }
-        Task { await vm?.deleteAlbum(album.id) }
+    private func deleteBinding(for album: AlbumResponseDTO) -> Binding<Bool> {
+        Binding(
+            get: { deleteTarget?.id == album.id },
+            set: { isPresented in
+                if !isPresented, deleteTarget?.id == album.id {
+                    deleteTarget = nil
+                }
+            })
     }
 
     private func createLink(for album: AlbumResponseDTO) {

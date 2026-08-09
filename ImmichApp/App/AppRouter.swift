@@ -248,6 +248,9 @@ struct MainTabView: View {
                                     onContentsChanged: { assets in
                                         sidebarAlbumsVM.applyContents(assets, to: album.id)
                                     },
+                                    onAlbumChanged: {
+                                        sidebarAlbumsVM.applyAlbumUpdate($0)
+                                    },
                                     onDeleted: {
                                         sidebarAlbumsVM.removeDeletedAlbum(album.id)
                                         select(.allAlbums)
@@ -282,11 +285,13 @@ struct MainTabView: View {
         .tabViewStyle(.sidebarAdaptable)
         .sheet(isPresented: $showNewAlbum) {
             NewAlbumSheet { name, description, assetIDs in
-                await sidebarAlbumsVM?.createAlbum(
+                guard let sidebarAlbumsVM else {
+                    return String(localized: "Failed to create album")
+                }
+                return await sidebarAlbumsVM.createAlbum(
                     name: name,
                     description: description,
                     assetIds: assetIDs)
-                    ?? String(localized: "Failed to create album")
             }
         }
         .task {

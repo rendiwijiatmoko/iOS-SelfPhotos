@@ -11,6 +11,9 @@ struct AlbumDetailView: View {
     /// Library memakai daftar aset yang sudah benar di layar ini untuk menambal
     /// count dan cover tanpa menunggu halaman induk dimuat ulang.
     var onContentsChanged: (([AssetLite]) -> Void)? = nil
+    /// Metadata album yang berhasil disimpan dikirim kembali ke list/grid yang
+    /// membuka detail ini.
+    var onAlbumChanged: ((AlbumResponseDTO) -> Void)? = nil
     /// Sidebar memakai callback ini untuk menghapus tab album yang baru saja
     /// dihapus dan kembali ke All Albums.
     var onDeleted: (() -> Void)? = nil
@@ -45,16 +48,6 @@ struct AlbumDetailView: View {
                 albumPicker(for: selection.ids)
             }
             .errorToast($actionMessage)
-            .confirmationDialog(
-                "Delete Album",
-                isPresented: $showDeleteConfirm,
-                titleVisibility: .visible
-            ) {
-                Button("Delete", role: .destructive) { deleteAlbum() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("The photos will stay in your library.")
-            }
             .task { await start() }
             .onChange(of: assets.count) { _, _ in reportContents() }
             .onDisappear { reportContents() }
@@ -81,6 +74,14 @@ struct AlbumDetailView: View {
             onShareLink: { createAssetLink(for: $0) },
             keepsTabBarVisibleOnRegularWidth: true,
             selectionMenu: selectionMenu,
+            optionsConfirmation: SelectionConfirmation(
+                title: String(localized: "Delete “\(currentAlbum.albumName)”?"),
+                message: String(localized: "The photos will stay in your library."),
+                options: [SelectionConfirmationOption(
+                    title: String(localized: "Delete Album"),
+                    isDestructive: true,
+                    handler: deleteAlbum)]),
+            optionsConfirmationPresented: $showDeleteConfirm,
             options: {
                 // Isinya sama persis dengan context menu di daftar album —
                 // lihat AlbumActionsMenu.
@@ -121,12 +122,9 @@ struct AlbumDetailView: View {
     // MARK: - Sheet khas album
 
     private var editSheet: some View {
-        AlbumEditSheet(album: currentAlbum) { name, description in
-            var updated = currentAlbum
-            updated.albumName = name.trimmingCharacters(in: .whitespaces)
-            updated.description = description
+        AlbumEditSheet(album: currentAlbum) { updated in
             editedAlbum = updated
-            Task { await vm?.updateAlbum(album.id, name: name, description: description) }
+            onAlbumChanged?(updated)
         }
     }
 
@@ -227,12 +225,17 @@ final class AlbumDetailViewModel {
         self.assetRepo = assetRepo
     }
 
-    func updateAlbum(_ id: String, name: String, description: String) async {
-        let trimmedDescription = description.trimmingCharacters(in: .whitespaces)
-        try? await albumRepo.update(
-            id,
-            name: name.trimmingCharacters(in: .whitespaces),
-            description: .some(trimmedDescription.isEmpty ? nil : trimmedDescription))
+    func updateAlbum(_ id: String, name: String, description: String) async -> String? {
+        do {
+            try await albumRepo.update(
+                id,
+                name: name,
+                description: .some(description.isEmpty ? nil : description))
+            return nil
+        } catch {
+            return (error as? APIError)?.errorDescription
+                ?? String(localized: "Failed to update album")
+        }
     }
 
     func addUsers(_ userIDs: [String], to albumId: String) async {

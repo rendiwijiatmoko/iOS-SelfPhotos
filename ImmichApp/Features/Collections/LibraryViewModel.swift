@@ -131,23 +131,41 @@ final class LibraryViewModel {
 
     // MARK: - Aksi album
 
-    func updateAlbum(_ id: String, name: String, description: String) async {
+    /// - Returns: pesan kesalahan; nil berarti perubahan sudah dikonfirmasi.
+    func updateAlbum(_ id: String, name: String, description: String) async -> String? {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return }
+        let trimmedDescription = description.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
 
         do {
-            try await albumRepo.update(id, name: trimmed, description: description)
+            try await albumRepo.update(
+                id,
+                name: trimmed,
+                description: .some(trimmedDescription.isEmpty ? nil : trimmedDescription))
             // Kartu diperbarui di tempat, bukan lewat muat ulang: sampul album
             // tidak berubah karena namanya berubah, dan memuat ulang seluruh
             // baris hanya membuatnya berkedip.
             if let index = albums.firstIndex(where: { $0.id == id }) {
-                albums[index].albumName = trimmed
-                LocalSnapshot.save(albums, for: LocalSnapshot.Key.libraryAlbums)
+                var updated = albums[index]
+                updated.albumName = trimmed
+                updated.description = trimmedDescription.isEmpty ? nil : trimmedDescription
+                updated.updatedAt = Date()
+                applyAlbumUpdate(updated)
             }
+            return nil
         } catch {
-            actionError = (error as? APIError)?.errorDescription
+            return (error as? APIError)?.errorDescription
                 ?? String(localized: "Failed to update album")
         }
+    }
+
+    /// Detail/daftar album hidup dengan view model sendiri. Metadata hasil edit
+    /// dikirim kembali lewat metode ini supaya kartu Library tidak menunggu
+    /// refresh jaringan berikutnya.
+    func applyAlbumUpdate(_ updated: AlbumResponseDTO) {
+        guard let index = albums.firstIndex(where: { $0.id == updated.id }) else { return }
+        albums[index] = updated
+        LocalSnapshot.save(albums, for: LocalSnapshot.Key.libraryAlbums)
     }
 
     func addUsers(_ userIDs: [String], to albumId: String) async {

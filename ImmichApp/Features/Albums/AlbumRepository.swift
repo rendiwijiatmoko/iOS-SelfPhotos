@@ -52,10 +52,24 @@ class AlbumRepository {
             let description: String?
             let assetIds: [String]
         }
-        return try await api.send(.json(
+        let data = try await api.rawData(.json(
             "/albums",
             method: .post,
             body: Body(albumName: name, description: description, assetIds: assetIds)))
+
+        do {
+            return try JSONDecoder.immich.decode(AlbumResponseDTO.self, from: data)
+        } catch {
+            // Respons 2xx berarti server sudah membuat albumnya. Kalau bentuk
+            // ringkasnya setidaknya membawa id, ambil representasi kanonis lewat
+            // endpoint detail alih-alih mengubah keberhasilan menjadi alert
+            // "Failed to Create Album".
+            struct CreatedAlbumIdentity: Decodable { let id: String }
+            guard let identity = try? JSONDecoder().decode(
+                CreatedAlbumIdentity.self, from: data)
+            else { throw APIError.decoding(error) }
+            return try await detail(identity.id)
+        }
     }
 
     func rename(_ id: String, to name: String) async throws {

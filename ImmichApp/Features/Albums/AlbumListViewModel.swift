@@ -89,10 +89,11 @@ final class AlbumListViewModel {
         }
     }
 
-    func update(_ id: String, name: String, description: String) async {
+    /// - Returns: pesan kesalahan; nil berarti perubahan sudah dikonfirmasi.
+    func update(_ id: String, name: String, description: String) async -> String? {
         let trimmedName = name.trimmingCharacters(in: .whitespaces)
         let trimmedDescription = description.trimmingCharacters(in: .whitespaces)
-        guard !trimmedName.isEmpty else { return }
+        guard !trimmedName.isEmpty else { return nil }
 
         do {
             try await repo.update(
@@ -100,16 +101,28 @@ final class AlbumListViewModel {
                 name: trimmedName,
                 description: .some(trimmedDescription.isEmpty ? nil : trimmedDescription))
             if let index = albums.firstIndex(where: { $0.id == id }) {
-                albums[index].albumName = trimmedName
-                albums[index].description = trimmedDescription.isEmpty ? nil : trimmedDescription
-                persist()
+                // Ganti NILAI elemennya secara utuh. Mutasi field bersarang
+                // tidak selalu memicu registrar Observation milik array,
+                // sehingga List/LazyVGrid dapat tetap menampilkan nama lama.
+                var updated = albums[index]
+                updated.albumName = trimmedName
+                updated.description = trimmedDescription.isEmpty ? nil : trimmedDescription
+                updated.updatedAt = Date()
+                applyAlbumUpdate(updated)
             }
+            return nil
         } catch {
-            // Gagal menyunting bukan alasan mengubah `phase` — daftar albumnya
-            // sendiri masih baik-baik saja.
-            actionError = (error as? APIError)?.errorDescription
+            return (error as? APIError)?.errorDescription
                 ?? String(localized: "Failed to update album")
         }
+    }
+
+    /// Dipakai detail album untuk mengirim metadata yang baru disimpan kembali
+    /// ke list/grid/sidebar yang membukanya.
+    func applyAlbumUpdate(_ updated: AlbumResponseDTO) {
+        guard let index = albums.firstIndex(where: { $0.id == updated.id }) else { return }
+        albums[index] = updated
+        persist()
     }
 
     func addUsers(_ userIDs: [String], to albumId: String) async {

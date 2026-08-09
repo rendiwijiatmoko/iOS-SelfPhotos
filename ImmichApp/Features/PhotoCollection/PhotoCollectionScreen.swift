@@ -100,6 +100,10 @@ struct PhotoCollectionScreen<Options: View>: View {
     var keepsTabBarVisibleOnRegularWidth = false
     /// Aksi tambahan di menu elipsis, dirakit dari id yang sedang terpilih.
     var selectionMenu: ((Set<String>) -> [SelectionMenuAction])? = nil
+    /// Confirmation milik menu opsi. Binding-nya berasal dari pemanggil, tetapi
+    /// modifier dipasang pada `Menu` persisten di toolbar agar anchor benar.
+    var optionsConfirmation: SelectionConfirmation? = nil
+    var optionsConfirmationPresented: Binding<Bool>? = nil
 
     /// Isi menu elipsis di kanan atas; `EmptyView` kalau layarnya tidak punya.
     @ViewBuilder var options: () -> Options
@@ -764,6 +768,23 @@ struct PhotoCollectionScreen<Options: View>: View {
                 options()
             } label: {
                 Image(systemName: "ellipsis")
+            }
+            .confirmationDialog(
+                optionsConfirmation?.title ?? "",
+                isPresented: optionsConfirmationPresented ?? .constant(false),
+                titleVisibility: .visible
+            ) {
+                ForEach(optionsConfirmation?.options ?? []) { option in
+                    Button(
+                        option.title,
+                        role: option.isDestructive ? .destructive : nil,
+                        action: option.handler)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                if let message = optionsConfirmation?.message {
+                    Text(message)
+                }
             }
         }
     }

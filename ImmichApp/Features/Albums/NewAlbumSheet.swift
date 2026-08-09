@@ -20,6 +20,7 @@ struct NewAlbumSheet: View {
     @State private var isCreating = false
     @State private var errorMessage: String?
     @State private var showPhotoPicker = false
+    @State private var successFeedback = 0
     @FocusState private var isNameFocused: Bool
 
     var body: some View {
@@ -59,6 +60,7 @@ struct NewAlbumSheet: View {
                 isPresented: errorBinding,
                 actions: { Button("OK", role: .cancel) {} },
                 message: { Text(errorMessage ?? "") })
+            .sensoryFeedback(.success, trigger: successFeedback)
             .onAppear { isNameFocused = true }
         }
     }
@@ -98,7 +100,12 @@ struct NewAlbumSheet: View {
                 description.trimmingCharacters(in: .whitespaces),
                 assetIDs)
             isCreating = false
-            if errorMessage == nil { dismiss() }
+            guard errorMessage == nil else { return }
+            successFeedback += 1
+            // Beri SwiftUI satu frame untuk mengirim sensory feedback sebelum
+            // seluruh hierarchy sheet dilepas oleh dismiss.
+            try? await Task.sleep(for: .milliseconds(50))
+            dismiss()
         }
     }
 }

@@ -10,8 +10,8 @@ struct LibraryView: View {
 
     @Environment(SessionManager.self) private var session
     @State private var vm: LibraryViewModel?
-    /// Baris yang sedang terbuka. Semua terbuka pada pemakaian pertama, seperti
-    /// di Photos; sesudah itu mengikuti pilihan terakhir pengguna.
+    /// Baris yang sedang terbuka. Pada pemakaian pertama semuanya tertutup;
+    /// sesudah itu mengikuti pilihan terakhir pengguna.
     @State private var expanded: Set<Row>
     @State private var showSettings = false
     @State private var showBackup = false
@@ -60,10 +60,10 @@ struct LibraryView: View {
     /// setiap kali tab ini dibuka.
     init(isActive: Bool = true) {
         self.isActive = isActive
-        // Nil berarti belum pernah disimpan (semua terbuka); string kosong
+        // Nil berarti belum pernah disimpan (semua tertutup); string kosong
         // berarti pengguna memang menutup semuanya. Keduanya harus dibedakan.
         guard let stored = UserDefaults.standard.string(forKey: Self.expandedKey) else {
-            _expanded = State(initialValue: Set(Row.allCases))
+            _expanded = State(initialValue: [])
             return
         }
         var rows = Set(stored.split(separator: ",").compactMap { Row(rawValue: String($0)) })
@@ -151,7 +151,8 @@ struct LibraryView: View {
                     guard vm?.applyAlbumContents(assets, to: id) == true
                     else { return }
                     Task { await vm?.refreshAlbums(invalidatingCoverFor: id) }
-                })
+                },
+                onAlbumChanged: { vm?.applyAlbumUpdate($0) })
         }
     }
 
@@ -183,11 +184,8 @@ struct LibraryView: View {
     private var albumActionPresentations: some View {
         rows
             .sheet(item: $editTarget) { album in
-                AlbumEditSheet(album: album) { name, description in
-                    Task {
-                        await vm?.updateAlbum(
-                            album.id, name: name, description: description)
-                    }
+                AlbumEditSheet(album: album) { updated in
+                    vm?.applyAlbumUpdate(updated)
                 }
             }
             .sheet(item: $addUserTarget) { album in
@@ -197,16 +195,6 @@ struct LibraryView: View {
             }
             .sheet(item: $sharedLink) { link in
                 ShareSheet(url: link.url)
-            }
-            .confirmationDialog(
-                "Delete “\(deleteTarget?.albumName ?? "")”?",
-                isPresented: deleteBinding,
-                titleVisibility: .visible
-            ) {
-                Button("Delete Album", role: .destructive) { commitDelete() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("The photos will stay in your library.")
             }
     }
 
@@ -307,6 +295,16 @@ struct LibraryView: View {
             onDelete: { deleteTarget = album })
     }
 
+    private func deleteBinding(for album: AlbumResponseDTO) -> Binding<Bool> {
+        Binding(
+            get: { deleteTarget?.id == album.id },
+            set: { isPresented in
+                if !isPresented, deleteTarget?.id == album.id {
+                    deleteTarget = nil
+                }
+            })
+    }
+
     // confirmationDialog memakai binding Bool, sementara sasarannya perlu
     // disimpan sebagai nilai — jembatannya di sini.
     /// `isPresented`, bukan `item`: id-nya sekadar `String`, dan membungkusnya
@@ -316,17 +314,6 @@ struct LibraryView: View {
         Binding(
             get: { openedStoryID != nil },
             set: { if !$0 { openedStoryID = nil } })
-    }
-
-    private var deleteBinding: Binding<Bool> {
-        Binding(
-            get: { deleteTarget != nil },
-            set: { if !$0 { deleteTarget = nil } })
-    }
-
-    private func commitDelete() {
-        guard let album = deleteTarget else { return }
-        Task { await vm?.deleteAlbum(album.id) }
     }
 
     private func createLink(for album: AlbumResponseDTO) {
@@ -488,7 +475,9 @@ struct LibraryView: View {
             isExpanded: expansion(for: .albums, hasContent: !albums.isEmpty),
             isEmpty: hasLoaded && albums.isEmpty,
             contentHeight: 200,
-            destination: { AlbumsListView() }
+            destination: {
+                AlbumsListView(onAlbumUpdated: { vm?.applyAlbumUpdate($0) })
+            }
         ) {
             ForEach(albums) { album in
                 NavigationLink {
@@ -501,7 +490,8 @@ struct LibraryView: View {
                                 await vm?.refreshAlbums(
                                     invalidatingCoverFor: album.id)
                             }
-                        })
+                        },
+                        onAlbumChanged: { vm?.applyAlbumUpdate($0) })
                         .navigationTransition(
                             .zoom(sourceID: album.id, in: albumNamespace))
                 } label: {
@@ -517,6 +507,19 @@ struct LibraryView: View {
                     albumMenu(for: album)
                 } preview: {
                     AlbumCoverPreview(album: album, session: session)
+                }
+                .confirmationDialog(
+                    "Delete “\(album.albumName)”?",
+                    isPresented: deleteBinding(for: album),
+                    titleVisibility: .visible
+                ) {
+                    Button("Delete Album", role: .destructive) {
+                        deleteTarget = nil
+                        Task { await vm?.deleteAlbum(album.id) }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("The photos will stay in your library.")
                 }
             }
         }
@@ -693,6 +696,7 @@ private struct RoutedAlbumView: View {
     let albumID: String
     let cachedAlbum: AlbumResponseDTO?
     let onContentsChanged: ([AssetLite]) -> Void
+    let onAlbumChanged: (AlbumResponseDTO) -> Void
 
     @Environment(SessionManager.self) private var session
     @State private var album: AlbumResponseDTO?
@@ -703,7 +707,8 @@ private struct RoutedAlbumView: View {
             if let album = album ?? cachedAlbum {
                 AlbumDetailView(
                     album: album,
-                    onContentsChanged: onContentsChanged)
+                    onContentsChanged: onContentsChanged,
+                    onAlbumChanged: onAlbumChanged)
             } else if didFail {
                 ContentUnavailableView(
                     "Album Unavailable",

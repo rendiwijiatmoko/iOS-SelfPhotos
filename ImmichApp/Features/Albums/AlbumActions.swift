@@ -89,16 +89,25 @@ struct AlbumCoverPreview: View {
 /// Sheet ubah nama & deskripsi album.
 struct AlbumEditSheet: View {
     let album: AlbumResponseDTO
-    var onSave: (String, String) -> Void
+    /// Callback sinkron sesudah PATCH berhasil. Kerja async sengaja dimiliki
+    /// sheet agar tidak melewati escaping async closure milik value-view.
+    var onSaved: (AlbumResponseDTO) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(SessionManager.self) private var session
     @State private var name: String
     @State private var description: String
+    @State private var isSaving = false
+    @State private var errorMessage: String?
+    @State private var successFeedback = 0
     @FocusState private var isNameFocused: Bool
 
-    init(album: AlbumResponseDTO, onSave: @escaping (String, String) -> Void) {
+    init(
+        album: AlbumResponseDTO,
+        onSaved: @escaping (AlbumResponseDTO) -> Void
+    ) {
         self.album = album
-        self.onSave = onSave
+        self.onSaved = onSaved
         _name = State(initialValue: album.albumName)
         _description = State(initialValue: album.description ?? "")
     }
@@ -123,14 +132,68 @@ struct AlbumEditSheet: View {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        onSave(name, description)
-                        dismiss()
-                    }
-                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                    Button("Save") { save() }
+                        .disabled(trimmedName.isEmpty || isSaving)
                 }
             }
+            .alert(
+                "Failed to Update Album",
+                isPresented: Binding(
+                    get: { errorMessage != nil },
+                    set: { if !$0 { errorMessage = nil } }),
+                actions: { Button("OK", role: .cancel) {} },
+                message: { Text(errorMessage ?? "") })
+            .sensoryFeedback(.success, trigger: successFeedback)
             .onAppear { isNameFocused = true }
+        }
+    }
+
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespaces)
+    }
+
+    @MainActor
+    private func save() {
+        // Jangan membaca DynamicProperty milik View dari dalam task. SwiftUI
+        // bebas mengganti value `AlbumEditSheet` setelah tombol ditekan; pada
+        // build teroptimasi capture itu pernah meninggalkan backing String yang
+        // sudah tidak sah (terlihat sebagai nama acak lalu EXC_BAD_ACCESS di
+        // `trimmingCharacters`). Decode UTF-8 membuat storage milik sendiri,
+        // bukan sekadar copy-on-write yang masih berbagi buffer lama.
+        let submittedName = String(decoding: name.utf8, as: UTF8.self)
+            .trimmingCharacters(in: .whitespaces)
+        let submittedDescription = String(decoding: description.utf8, as: UTF8.self)
+            .trimmingCharacters(in: .whitespaces)
+        let originalAlbum = album
+        let savedAction = onSaved
+        let repository = AlbumRepository(api: APIClient(session: session))
+
+        isSaving = true
+        Task { @MainActor in
+            do {
+                try await repository.update(
+                    originalAlbum.id,
+                    name: submittedName,
+                    description: .some(
+                        submittedDescription.isEmpty ? nil : submittedDescription))
+
+                var updated = originalAlbum
+                updated.albumName = submittedName
+                updated.description = submittedDescription.isEmpty
+                    ? nil
+                    : submittedDescription
+                updated.updatedAt = Date()
+                savedAction(updated)
+
+                isSaving = false
+                successFeedback += 1
+                try? await Task.sleep(for: .milliseconds(50))
+                dismiss()
+            } catch {
+                isSaving = false
+                errorMessage = (error as? APIError)?.errorDescription
+                    ?? String(localized: "Failed to update album")
+            }
         }
     }
 }

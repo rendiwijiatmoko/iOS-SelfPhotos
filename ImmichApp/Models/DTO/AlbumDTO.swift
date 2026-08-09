@@ -40,6 +40,43 @@ struct AlbumResponseDTO: Decodable, Identifiable, Hashable {
     }
 }
 
+extension AlbumResponseDTO {
+    private enum CodingKeys: String, CodingKey {
+        case id, albumName, description, assetCount, albumThumbnailAssetId
+        case shared, createdAt, assets, updatedAt, startDate, endDate
+    }
+
+    /// Respons daftar dan detail album memuat seluruh field, tetapi beberapa
+    /// versi server mengembalikan representasi yang lebih ringkas tepat setelah
+    /// `POST /albums`. Album sudah tersimpan pada saat respons 2xx diterima;
+    /// mewajibkan field presentasional seperti `shared` dan `assetCount` membuat
+    /// client melaporkan "gagal" untuk operasi yang sebenarnya berhasil.
+    ///
+    /// Identitas dan nama tetap wajib. Field lain mendapat nilai aman sampai
+    /// refresh/detail berikutnya membawa representasi lengkap dari server.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        albumName = try container.decode(String.self, forKey: .albumName)
+        description = try container.decodeIfPresent(String.self, forKey: .description)
+        assetCount = try container.decodeIfPresent(Int.self, forKey: .assetCount) ?? 0
+        albumThumbnailAssetId = try container.decodeIfPresent(
+            String.self, forKey: .albumThumbnailAssetId)
+        shared = try container.decodeIfPresent(Bool.self, forKey: .shared) ?? false
+
+        updatedAt = try? container.decode(Date.self, forKey: .updatedAt)
+        createdAt = (try? container.decode(Date.self, forKey: .createdAt))
+            ?? updatedAt
+            ?? Date()
+        startDate = try? container.decode(Date.self, forKey: .startDate)
+        endDate = try? container.decode(Date.self, forKey: .endDate)
+        // Daftar album tidak membutuhkan aset tertanam. Kalau satu server lama
+        // mengirim bentuk aset yang sudah berubah, metadata albumnya tetap sah
+        // dan detail aset akan dimuat lewat jalurnya sendiri.
+        assets = try? container.decode([AssetResponseDTO].self, forKey: .assets)
+    }
+}
+
 /// PATCH /albums/{id}. Optional berlapis pada description mengikuti kontrak
 /// nullable v3: nil berarti field tidak dikirim, `.some(nil)` berarti dihapus.
 struct AlbumUpdateDTO: Encodable {
