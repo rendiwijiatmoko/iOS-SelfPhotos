@@ -4,12 +4,6 @@ struct AppRouter: View {
     @Environment(SessionManager.self) private var session
     @AppStorage(SettingsViewModel.themeKey) private var theme = "system"
     @State private var launch = AppLaunchState.shared
-    /// Waktu tunggu maksimum splash.
-    ///
-    /// Linimasa yang menyalakan tanda "siap", dan tab terakhir yang dipakai bisa
-    /// saja bukan Photos — layar itu lalu tidak pernah dibangun dan tandanya
-    /// tidak pernah menyala. Batas ini yang memastikan splash selalu berakhir.
-    @State private var didTimeOut = false
 
     var body: some View {
         Group {
@@ -29,14 +23,10 @@ struct AppRouter: View {
             }
         }
         .animation(.easeOut(duration: 0.25), value: isReady)
-        .task {
-            try? await Task.sleep(for: .seconds(2))
-            didTimeOut = true
-        }
     }
 
     private var isReady: Bool {
-        launch.isReady || didTimeOut
+        launch.isReady
     }
 
     private var colorScheme: ColorScheme? {
@@ -170,10 +160,8 @@ struct MainTabView: View {
             }
             backupSetupJourney.refreshForAlbumSelection()
             if backupNotifier.shouldSelectLibrary { openBackupTab() }
-            // Splash hanya menutupi pembacaan linimasa. Kalau yang terbuka bukan
-            // Photos, layar itu tidak pernah dibangun dan tidak ada yang perlu
-            // ditunggu — tanpa baris ini splash-nya menggantung sampai batas
-            // waktunya habis.
+            // Kalau yang terbuka bukan Photos, tidak ada grid pembuka yang akan
+            // mengirim callback siap. Tutup splash langsung untuk tab tersebut.
             if selectedDestination != .photos { AppLaunchState.shared.markReady() }
 
             if syncVM == nil {

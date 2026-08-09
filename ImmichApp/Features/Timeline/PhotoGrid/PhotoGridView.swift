@@ -106,6 +106,13 @@ struct PhotoGridView: UIViewControllerRepresentable {
     /// Ujung daftar sudah terlihat — pemanggil boleh mengambil halaman
     /// berikutnya. Hanya berarti untuk isi yang dipaginasi (hasil pencarian).
     var onReachEnd: (() -> Void)? = nil
+    /// Snapshot pembuka sudah final dan boleh diperlihatkan.
+    ///
+    /// Hanya timeline yang menahannya sampai sync pembuka selesai. Grid lain
+    /// memakai nilai bawaan dan tetap tampil seketika.
+    var initialContentReady = true
+    /// Dipanggil setelah snapshot final benar-benar terlihat di posisi newest.
+    var onInitialContentDisplayed: (() -> Void)? = nil
     /// Menyerahkan controller-nya ke pemanggil, untuk perintah yang datang dari
     /// luar (mis. "kembali ke foto terbaru" saat tab ditekan ulang).
     var onControllerReady: ((PhotoGridController) -> Void)? = nil
@@ -145,6 +152,8 @@ struct PhotoGridView: UIViewControllerRepresentable {
         controller.onTitleDockedChanged = onTitleDockedChanged
         controller.menuActions = menuActions
         controller.onReachEnd = onReachEnd
+        controller.onInitialContentDisplayed = onInitialContentDisplayed
+        controller.setInitialContentReady(initialContentReady)
         controller.onSelectionChanged = { selectedIDs = $0 }
         controller.onSelectingChanged = { isSelecting = $0 }
     }
@@ -274,6 +283,18 @@ final class PhotoGridController: UIViewController {
     ///
     /// Sebagai jangkar, ia bertahan sampai penggunanya sendiri yang menggulir.
     private var isAnchoredToNewest = true
+    /// Snapshot pertama dapat terpasang sebelum collection view mempunyai tinggi
+    /// final. Dalam keadaan itu offset masih nol dan bagian lama sempat terlihat
+    /// satu frame sebelum `viewDidLayoutSubviews` memindahkannya ke bawah.
+    /// Grid tetap dilayout, tetapi baru diperlihatkan setelah pin pertama sukses.
+    private var isWaitingForInitialNewestPosition = false
+    /// Nilai dari pemilik grid. Timeline menahannya selama snapshot cache masih
+    /// mungkin segera diganti hasil sync pembuka.
+    private var initialContentReady = true
+    /// Revisi snapshot yang sedang dipasang. Verifikasi tampilan awal hanya sah
+    /// kalau tidak ada snapshot lebih baru yang masuk di sela dua layout pass.
+    private var contentRevision = 0
+    private var applyingSnapshotRevision: Int?
     /// Bulan terakhir yang dilaporkan, supaya tidak melapor berulang tiap frame.
     private var lastReportedSection: String?
     /// Snapshot yang sudah disusun tapi belum bisa dipasang.
@@ -331,6 +352,7 @@ final class PhotoGridController: UIViewController {
     var onSelectingChanged: ((Bool) -> Void)?
     var menuActions: ((String) -> [PhotoGridMenuAction])?
     var onReachEnd: (() -> Void)?
+    var onInitialContentDisplayed: (() -> Void)?
     /// Pembangun layar detail. Kalau nil, ketukan hanya diteruskan ke `onOpen`.
     var makeDetail: ((String) -> UIViewController)?
 
@@ -409,6 +431,10 @@ final class PhotoGridController: UIViewController {
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         collectionView.backgroundColor = .systemBackground
         collectionView.alwaysBounceVertical = true
+        view.backgroundColor = .systemBackground
+
+        isWaitingForInitialNewestPosition = configuration.startsAtNewest
+        collectionView.alpha = isWaitingForInitialNewestPosition ? 0 : 1
 
         collectionView.register(
             PhotoGridCell.self, forCellWithReuseIdentifier: PhotoGridCell.reuseID)
@@ -729,8 +755,13 @@ final class PhotoGridController: UIViewController {
         var snapshot = pending.snapshot
         reconfigureChangedItems(in: &snapshot)
 
+        contentRevision &+= 1
+        let revision = contentRevision
+        applyingSnapshotRevision = revision
         dataSource.apply(snapshot, animatingDifferences: animates) { [weak self] in
             guard let self else { return }
+            guard self.contentRevision == revision else { return }
+            self.applyingSnapshotRevision = nil
             if let anchor {
                 self.restorePosition(anchor)
             } else if self.isAnchoredToNewest {
@@ -968,7 +999,70 @@ final class PhotoGridController: UIViewController {
         else { return false }
 
         pinToNewestOffset()
+        scheduleInitialNewestRevealIfNeeded()
         return true
+    }
+
+    /// Menentukan kapan snapshot pembuka boleh terlihat.
+    ///
+    /// Satu `layoutIfNeeded` belum cukup: diffable data source dapat selesai,
+    /// kemudian safe-area/tab bar mengubah tinggi efektif pada run loop
+    /// berikutnya. Karena itu posisi dan ukuran diverifikasi dua kali. Snapshot
+    /// baru membatalkan verifikasi lama lewat `contentRevision`.
+    private func scheduleInitialNewestRevealIfNeeded() {
+        guard isWaitingForInitialNewestPosition, initialContentReady,
+              pending == nil, applyingSnapshotRevision == nil
+        else { return }
+
+        let revision = contentRevision
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.isWaitingForInitialNewestPosition,
+                  self.initialContentReady,
+                  self.contentRevision == revision,
+                  self.pending == nil,
+                  self.applyingSnapshotRevision == nil
+            else { return }
+
+            self.pinToNewestOffset()
+            let stableContentSize = self.collectionView.contentSize
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.isWaitingForInitialNewestPosition,
+                      self.initialContentReady,
+                      self.contentRevision == revision,
+                      self.pending == nil,
+                      self.applyingSnapshotRevision == nil
+                else { return }
+
+                self.collectionView.layoutIfNeeded()
+                let destination = self.maxContentOffsetY()
+                let isAtNewest = abs(self.collectionView.contentOffset.y - destination) < 1.5
+                guard self.collectionView.contentSize == stableContentSize, isAtNewest
+                else {
+                    _ = self.scrollToNewestIfNeeded()
+                    return
+                }
+
+                self.isWaitingForInitialNewestPosition = false
+                UIView.performWithoutAnimation {
+                    self.collectionView.alpha = 1
+                }
+                self.onInitialContentDisplayed?()
+            }
+        }
+    }
+
+    /// Dipanggil representable setiap pembaruan. Ketika gerbang dibuka,
+    /// snapshot yang saat itu sedang dipasang tetap harus selesai lebih dulu;
+    /// completion `flushPendingSnapshot` akan mencoba lagi.
+    func setInitialContentReady(_ isReady: Bool) {
+        initialContentReady = isReady
+        guard isReady else { return }
+        DispatchQueue.main.async { [weak self] in
+            _ = self?.scrollToNewestIfNeeded()
+        }
     }
 
     /// Menetapkan offset maksimum secara eksplisit. `scrollToItem(.bottom)`

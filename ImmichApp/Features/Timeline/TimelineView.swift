@@ -55,6 +55,10 @@ struct TimelineView: View {
     /// Pegangan ke controller grid, untuk perintah yang datang dari luar —
     /// ketukan kedua tab Photos, misalnya.
     @State private var gridController: PhotoGridController?
+    /// Grid pembuka tidak boleh memperlihatkan cache lama sesaat sebelum sync
+    /// menambahkan aset terbaru dan memindahkannya lagi ke bawah.
+    @State private var initialNewestContentReady = false
+    @State private var isFinishingInitialTimelineLoad = false
     @State private var backupSetupJourney = BackupSetupJourney.shared
 
     var body: some View {
@@ -181,11 +185,30 @@ struct TimelineView: View {
             // dulu.
             await vm?.loadDevicePhotos()
             await vm?.loadAlbumsIfNeeded()
+
+            // Bisa saja sync selesai sebelum Timeline sempat mengamati
+            // perubahannya (misalnya cache kecil atau perangkat offline).
+            if (syncVM?.backgroundSyncCompletionCount ?? 0) > 0 {
+                await finishInitialTimelineLoad()
+            }
         }
         // Sync pertama biasanya selesai SETELAH layar ini muncul; tanpa ini
         // grid-nya tetap kosong sampai tab dibuka ulang.
         .onChange(of: syncVM?.lastSyncTime) { _, _ in
-            Task { await vm?.loadTimeline() }
+            Task {
+                if initialNewestContentReady {
+                    await vm?.loadTimeline()
+                } else {
+                    await finishInitialTimelineLoad()
+                }
+            }
+        }
+        // Snapshot cache memang cepat, tetapi belum tentu yang terbaru. Tunggu
+        // percobaan sync pembuka selesai, baca cache hasilnya, baru buka gerbang
+        // render milik UICollectionView.
+        .onChange(of: syncVM?.backgroundSyncCompletionCount) { _, count in
+            guard let count, count > 0 else { return }
+            Task { await finishInitialTimelineLoad() }
         }
         // Ketukan kedua pada tab Photos. Dikirim AppRouter sebagai penghitung
         // yang naik, bukan Bool, supaya ketukan beruntun tetap terbaca.
@@ -213,7 +236,12 @@ struct TimelineView: View {
                 }
 
             case .loaded:
-                if vm.sections.isEmpty {
+                if vm.sections.isEmpty, !initialNewestContentReady {
+                    // Cache kosong belum tentu benar-benar kosong: sync pembuka
+                    // mungkin sedang mengisinya. Hindari empty state berkedip
+                    // lalu mendadak berubah menjadi ribuan foto.
+                    Color.clear
+                } else if vm.sections.isEmpty {
                     emptyState
                 } else {
                     timelineGrid(vm)
@@ -252,6 +280,10 @@ struct TimelineView: View {
             detailScreen: { id in detailScreen(for: id, vm) },
             onVisibleSectionChanged: { monthTracker.show($0) },
             menuActions: { id in menuActions(for: id, vm) },
+            initialContentReady: initialNewestContentReady,
+            onInitialContentDisplayed: {
+                AppLaunchState.shared.markReady()
+            },
             onControllerReady: { gridController = $0 },
             session: session)
         // Grid menembus sampai ke BELAKANG nav bar, bukan berhenti di bawahnya.
@@ -265,6 +297,22 @@ struct TimelineView: View {
         // menahan baris pertama di bawah bar, jadi tidak ada foto yang tertutup —
         // yang berubah cuma: sekarang foto lewat di belakangnya saat digulir.
         .ignoresSafeArea(edges: [.top, .bottom])
+    }
+
+    /// Membaca hasil sync sekali lagi sebelum grid pembuka ditampilkan. Aman
+    /// dipanggil dari dua jalur (task dan onChange): signature view model
+    /// membuang rebuild yang isinya sama.
+    private func finishInitialTimelineLoad() async {
+        guard !initialNewestContentReady, !isFinishingInitialTimelineLoad else { return }
+        isFinishingInitialTimelineLoad = true
+        defer { isFinishingInitialTimelineLoad = false }
+        await vm?.loadTimeline()
+        initialNewestContentReady = true
+        // Tidak ada controller grid yang akan memberi callback kalau hasil
+        // akhirnya memang kosong. Dalam kasus itu empty state-lah frame final.
+        if vm?.sections.isEmpty != false {
+            AppLaunchState.shared.markReady()
+        }
     }
 
     /// Isi context menu, dibangun SAAT foto ditekan lama.

@@ -3,9 +3,10 @@ import Observation
 
 /// Penanda "aplikasi siap ditampilkan".
 ///
-/// Yang ditunggu bukan jaringan, melainkan pembacaan cache lokal dan
-/// pengelompokannya jadi linimasa — sepersekian detik yang, tanpa penutup apa
-/// pun, terlihat sebagai layar kosong berkedip tepat setelah aplikasi dibuka.
+/// Untuk tab Photos, tanda ini baru menyala setelah sync pembuka selesai,
+/// snapshot final terpasang, dan collection view sudah benar-benar berada di
+/// foto terbaru. Dengan begitu splash tidak menghilang ke snapshot cache lama
+/// yang sesaat kemudian melompat lagi.
 ///
 /// Dipisah dari view model mana pun karena yang memakainya adalah akar aplikasi,
 /// sementara yang menyalakannya ada jauh di dalam linimasa.

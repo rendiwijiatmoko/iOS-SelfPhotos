@@ -14,6 +14,14 @@ final class SyncViewModel {
     var isSyncing: Bool = false
     var lastSyncTime: Date?
     var syncProgress: String = ""
+    /// Naik setiap percobaan sync pembuka selesai, termasuk ketika perangkat
+    /// offline atau server tidak dapat dijangkau.
+    ///
+    /// Timeline membutuhkannya untuk membedakan snapshot cache sementara dari
+    /// snapshot pembuka yang sudah final. `lastSyncTime` tidak cukup karena ia
+    /// hanya berubah saat sync berhasil; pada kegagalan grid akan tersembunyi
+    /// selamanya kalau memakai nilai itu sebagai gerbang.
+    private(set) var backgroundSyncCompletionCount = 0
 
     private let repo: SyncRepository
     private let dataManager: SwiftDataManager
@@ -78,9 +86,16 @@ final class SyncViewModel {
     /// kosong yang tidak menjelaskan apa-apa selama sync pertama berjalan
     /// terlihat persis seperti aplikasi yang menggantung.
     func performBackgroundSync() async {
-        guard isOnline, !isSyncing else { return }
+        guard isOnline else {
+            backgroundSyncCompletionCount &+= 1
+            return
+        }
+        guard !isSyncing else { return }
         isSyncing = true
-        defer { isSyncing = false }
+        defer {
+            isSyncing = false
+            backgroundSyncCompletionCount &+= 1
+        }
 
         do {
             let state = dataManager.getSyncState()

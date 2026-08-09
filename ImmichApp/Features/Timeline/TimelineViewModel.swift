@@ -170,9 +170,6 @@ final class TimelineViewModel {
             allAssets = []
             signature = nil
             phase = .loaded(())
-            // Kosong pun tetap "siap": splash-nya menutupi pembacaan cache, dan
-            // cache yang memang kosong sudah selesai dibaca.
-            AppLaunchState.shared.markReady()
             return
         }
 
@@ -186,7 +183,6 @@ final class TimelineViewModel {
         guard newSignature != signature else {
             hasLoaded = true
             phase = .loaded(())
-            AppLaunchState.shared.markReady()
             return
         }
 
@@ -202,7 +198,6 @@ final class TimelineViewModel {
         allAssets = built.assets
         hasLoaded = true
         phase = .loaded(())
-        AppLaunchState.shared.markReady()
     }
 
     /// Foto server dan foto perangkat, digabung dalam satu deret terurut.
