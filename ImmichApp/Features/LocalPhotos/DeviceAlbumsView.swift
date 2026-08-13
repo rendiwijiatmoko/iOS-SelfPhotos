@@ -57,7 +57,7 @@ struct DeviceAlbumsView: View {
                 ContentUnavailableView {
                     Label("No Access to Photos", systemImage: "lock")
                 } description: {
-                    Text("Immich needs access to your photos to show what is on this device.")
+                    Text("SelfPhotos needs access to your photos to show what is on this device.")
                 } actions: {
                     Button("Open Settings") { openSettings() }
                         .buttonStyle(.borderedProminent)
@@ -96,7 +96,7 @@ struct DeviceAlbumsView: View {
                 // Ongkosnya disebutkan DI MUKA, bukan setelah baterainya habis.
                 Text("""
                     Photos in these albums appear in your timeline, marked as \
-                    on-device. Immich reads each one once to check whether it is \
+                    on-device. SelfPhotos reads each one once to check whether it is \
                     already on the server — photos stored only in iCloud are \
                     downloaded to do that.
                     """)

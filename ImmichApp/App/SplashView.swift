@@ -3,7 +3,7 @@ import SwiftUI
 /// Identitas visual yang sama untuk splash dan login. Palette memberi lapisan
 /// SF Symbol warna berbeda; masing-masing lapisan memakai linear gradient agar
 /// tetap hidup di light maupun dark mode tanpa aset bitmap terpisah.
-struct ImmichTortoiseLogo: View {
+struct SelfPhotosTortoiseLogo: View {
     let size: CGFloat
 
     var body: some View {
@@ -40,7 +40,7 @@ struct SplashView: View {
             Color(.systemBackground)
                 .ignoresSafeArea()
 
-            ImmichTortoiseLogo(size: 64)
+            SelfPhotosTortoiseLogo(size: 64)
                 .symbolEffect(.pulse)
                 .accessibilityHidden(true)
         }

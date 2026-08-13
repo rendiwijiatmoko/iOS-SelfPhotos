@@ -107,7 +107,7 @@ private struct AssistiveAccessContentView: View {
                 }
             }
         }
-        .navigationTitle("Immich")
+        .navigationTitle("SelfPhotos")
         .assistiveAccessNavigationIcon(systemImage: "photo.stack.fill")
     }
 

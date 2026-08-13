@@ -45,6 +45,9 @@
 			<string>xyz.0xmwehehe.ImmichApp.navigation</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
+				<string>selfphotos</string>
+				<!-- Scheme lama dipertahankan agar widget/deep link dari versi
+				     sebelum rebrand tetap berfungsi setelah aplikasi diperbarui. -->
 				<string>immiches</string>
 			</array>
 		</dict>

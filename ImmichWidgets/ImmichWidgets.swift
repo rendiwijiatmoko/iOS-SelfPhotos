@@ -232,7 +232,7 @@ private struct AlbumWidgetView: View {
                     .font(.caption2.weight(.semibold))
                     .textCase(.uppercase)
                     .opacity(0.82)
-                Text(entry.album?.name ?? "Open Immiches")
+                Text(entry.album?.name ?? "Open SelfPhotos")
                     .font(family == .systemSmall ? .headline : .title3.bold())
                     .lineLimit(2)
                 if let count = entry.album?.assetCount {
@@ -249,9 +249,9 @@ private struct AlbumWidgetView: View {
     }
 
     private var albumURL: URL? {
-        guard let id = entry.album?.id else { return URL(string: "immiches://favorites") }
-        if id == widgetFavoritesID { return URL(string: "immiches://favorites") }
-        return URL(string: "immiches://album/\(id)")
+        guard let id = entry.album?.id else { return URL(string: "selfphotos://favorites") }
+        if id == widgetFavoritesID { return URL(string: "selfphotos://favorites") }
+        return URL(string: "selfphotos://album/\(id)")
     }
 }
 
@@ -319,7 +319,7 @@ private struct MemoriesWidgetView: View {
             .padding()
         }
         .containerBackground(.black, for: .widget)
-        .widgetURL(URL(string: "immiches://memories"))
+        .widgetURL(URL(string: "selfphotos://memories"))
     }
 }
 

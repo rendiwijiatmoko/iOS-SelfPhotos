@@ -448,14 +448,14 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = ImmichApp/ImmichApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 13;
 				DEVELOPMENT_TEAM = 5KQGTJX2K7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ImmichApp/Resources/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Immiches;
+				INFOPLIST_KEY_CFBundleDisplayName = SelfPhotos;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Immich shows the photos on this device alongside the ones on your server, so you can see what is not backed up yet and upload it.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "SelfPhotos shows the photos on this device alongside the ones on your Immich server, so you can see what is not backed up yet and upload it.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIBackgroundModes = "fetch processing";
@@ -487,14 +487,14 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = ImmichApp/ImmichApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 13;
 				DEVELOPMENT_TEAM = 5KQGTJX2K7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ImmichApp/Resources/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Immiches;
+				INFOPLIST_KEY_CFBundleDisplayName = SelfPhotos;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Immich shows the photos on this device alongside the ones on your server, so you can see what is not backed up yet and upload it.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "SelfPhotos shows the photos on this device alongside the ones on your Immich server, so you can see what is not backed up yet and upload it.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIBackgroundModes = "fetch processing";
@@ -569,11 +569,11 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = ImmichWidgets/ImmichWidgets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 13;
 				DEVELOPMENT_TEAM = 5KQGTJX2K7;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ImmichWidgets/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Immiches;
+				INFOPLIST_KEY_CFBundleDisplayName = "SelfPhotos Widgets";
 				IPHONEOS_DEPLOYMENT_TARGET = 26;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -600,11 +600,11 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = ImmichWidgets/ImmichWidgets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 13;
 				DEVELOPMENT_TEAM = 5KQGTJX2K7;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ImmichWidgets/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Immiches;
+				INFOPLIST_KEY_CFBundleDisplayName = "SelfPhotos Widgets";
 				IPHONEOS_DEPLOYMENT_TARGET = 26;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

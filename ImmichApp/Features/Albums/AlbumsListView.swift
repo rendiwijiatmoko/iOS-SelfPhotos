@@ -7,6 +7,7 @@ struct AlbumsListView: View {
     @Environment(SessionManager.self) private var session
     @State private var vm: AlbumListViewModel?
     @State private var scope: Scope = .all
+    @State private var searchText = ""
     @Namespace private var albumNamespace
     @State private var editTarget: AlbumResponseDTO?
     @State private var addUserTarget: AlbumResponseDTO?
@@ -64,6 +65,15 @@ struct AlbumsListView: View {
             // baliknya; `safeAreaInset` cuma ruang kosong, sehingga isi yang
             // lewat di bawahnya terlihat menembus segmented apa adanya.
             .safeAreaBar(edge: .top, spacing: 0) { scopePicker }
+            // Search dipasang SETELAH safe-area bar dan selalu terbuka di
+            // navigation drawer. Dengan urutan/default otomatis sebelumnya,
+            // search mencoba collapse saat scroll pada saat segmented juga
+            // menghitung ulang safe area. Dua perubahan top inset itu dapat
+            // saling menahan dan membuat kolom search sesekali tidak responsif.
+            .searchable(
+                text: $searchText,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: "Search Albums")
             .toolbar { toolbar }
             .sheet(isPresented: createSheetBinding) {
                 NewAlbumSheet { name, description, assetIds in
@@ -193,7 +203,11 @@ struct AlbumsListView: View {
         let albums = visibleAlbums(vm)
 
         if albums.isEmpty {
-            emptyState(vm)
+            if normalizedSearchText.isEmpty {
+                emptyState(vm)
+            } else {
+                ContentUnavailableView.search(text: normalizedSearchText)
+            }
         } else {
             albumsContainer(albums, vm)
         }
@@ -385,13 +399,26 @@ struct AlbumsListView: View {
     // MARK: - Filter & urutan
 
     private func visibleAlbums(_ vm: AlbumListViewModel) -> [AlbumResponseDTO] {
-        let filtered: [AlbumResponseDTO]
+        var filtered: [AlbumResponseDTO]
         switch scope {
         case .all: filtered = vm.albums
         case .shared: filtered = vm.albums.filter(\.shared)
         case .personal: filtered = vm.albums.filter { !$0.shared }
         }
+
+        let query = normalizedSearchText
+        if !query.isEmpty {
+            filtered = filtered.filter { album in
+                album.albumName.localizedStandardContains(query)
+                    || album.description?.localizedStandardContains(query) == true
+            }
+        }
+
         return filtered.sorted(by: sort)
+    }
+
+    private var normalizedSearchText: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
 

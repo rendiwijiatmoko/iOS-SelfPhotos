@@ -38,8 +38,8 @@ struct OnboardingView: View {
 
         return loginScroll {
             masthead(
-                title: "Connect to Immich",
-                subtitle: "Enter the address of your Immich server.")
+                title: "SelfPhotos",
+                subtitle: "Connect to your Immich server.")
 
             field("Server") {
                 TextField("http://your-server-ip:port", text: $vm.serverText)
@@ -175,7 +175,7 @@ struct OnboardingView: View {
         logoSize: CGFloat = 58
     ) -> some View {
         VStack(spacing: 10) {
-            ImmichTortoiseLogo(size: logoSize)
+            SelfPhotosTortoiseLogo(size: logoSize)
                 .accessibilityHidden(true)
 
             Text(title)

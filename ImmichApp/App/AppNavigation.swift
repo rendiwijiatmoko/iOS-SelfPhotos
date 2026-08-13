@@ -28,7 +28,12 @@ final class AppNavigation {
     }
 
     func handle(_ url: URL) {
-        guard url.scheme?.lowercased() == "immiches" else { return }
+        // `immiches` adalah scheme versi sebelum rebrand. Tetap diterima agar
+        // widget dan deep link yang sudah tersimpan tidak putus saat update.
+        let acceptedSchemes = ["selfphotos", "immiches"]
+        guard let scheme = url.scheme?.lowercased(),
+              acceptedSchemes.contains(scheme)
+        else { return }
 
         switch url.host?.lowercased() {
         case "favorites":

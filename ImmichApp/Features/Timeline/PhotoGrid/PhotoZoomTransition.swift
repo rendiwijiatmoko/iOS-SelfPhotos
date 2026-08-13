@@ -352,6 +352,9 @@ final class PhotoZoomDismissGesture: NSObject, UIGestureRecognizerDelegate {
 
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         pan.delegate = self
+        // Dismiss hanya membutuhkan satu jari. Membatasinya di sini mencegah
+        // recognizer ikut masuk ke kompetisi ketika pengguna sedang pinch.
+        pan.maximumNumberOfTouches = 1
         presented.view.addGestureRecognizer(pan)
     }
 
@@ -500,13 +503,29 @@ final class PhotoZoomDismissGesture: NSObject, UIGestureRecognizerDelegate {
         // Hanya tarikan ke BAWAH, dan yang jelas-jelas vertikal — usapan
         // menyamping itu milik pager antar foto.
         let velocity = pan.velocity(in: root)
-        return velocity.y > 0 && abs(velocity.y) > abs(velocity.x)
+        // Pada sentuhan yang mulai pelan, UIKit kadang menanyakan delegate saat
+        // velocity masih nyaris nol. Translation sudah tersedia pada saat pan
+        // melewati ambang geraknya, jadi ia menjadi fallback yang stabil.
+        let translation = pan.translation(in: root)
+        let direction = max(abs(velocity.x), abs(velocity.y)) > 1
+            ? velocity
+            : translation
+        return direction.y > 0 && abs(direction.y) > abs(direction.x)
     }
 
     func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
     ) -> Bool {
-        false
+        // Foto aktif berada di dalam scroll view zoom, yang lalu berada di
+        // dalam collection view pager. Keduanya memiliki pan recognizer sendiri.
+        // Menuntut eksklusivitas membuat recognizer yang kebetulan menang lebih
+        // dulu menelan swipe vertikal, sehingga layar sesekali tidak bereaksi.
+        //
+        // Berbagi hanya dengan sesama pan aman: pager menolak gerak vertikal,
+        // panel menolak gerak turun ketika tertutup, dan zoom sudah ditolak oleh
+        // `photoZoomDismissAllowed`. Tap, hold Live Photo, dan pinch tetap punya
+        // kompetisinya sendiri.
+        other is UIPanGestureRecognizer
     }
 }
