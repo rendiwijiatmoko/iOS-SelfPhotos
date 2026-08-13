@@ -15,15 +15,5 @@ import Foundation
 /// identitas yang berganti diam-diam. UUID yang kita buat sendiri tidak punya
 /// dua masalah itu.
 enum DeviceIdentity {
-    private static let key = "device.identity"
-
-    static let current: String = {
-        let defaults = UserDefaults.standard
-        if let existing = defaults.string(forKey: key), !existing.isEmpty {
-            return existing
-        }
-        let fresh = UUID().uuidString
-        defaults.set(fresh, forKey: key)
-        return fresh
-    }()
+    static let current = SharedDeviceIdentity.current
 }

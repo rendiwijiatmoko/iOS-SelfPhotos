@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		BB0000000000000000000002 /* ImmichWidgets.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000001 /* ImmichWidgets.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		CC0000000000000000000002 /* SelfPhotosShareExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = CC0000000000000000000001 /* SelfPhotosShareExtension.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -25,6 +26,13 @@
 			remoteGlobalIDString = BB000000000000000000000B;
 			remoteInfo = ImmichWidgets;
 		};
+		CC0000000000000000000009 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 242E7F0630206D79000F50F4 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CC000000000000000000000B;
+			remoteInfo = SelfPhotosShareExtension;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -35,6 +43,7 @@
 			dstSubfolderSpec = 13;
 			files = (
 				BB0000000000000000000002 /* ImmichWidgets.appex in Embed App Extensions */,
+				CC0000000000000000000002 /* SelfPhotosShareExtension.appex in Embed App Extensions */,
 			);
 			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -45,6 +54,7 @@
 		242E7F0E30206D79000F50F4 /* ImmichApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ImmichApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA000000000000000000000E /* ImmichAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ImmichAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB0000000000000000000001 /* ImmichWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ImmichWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		CC0000000000000000000001 /* SelfPhotosShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SelfPhotosShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -61,6 +71,13 @@
 				Info.plist,
 			);
 			target = BB000000000000000000000B /* ImmichWidgets */;
+		};
+		CC0000000000000000000003 /* Exceptions for "SelfPhotosShareExtension" folder in "SelfPhotosShareExtension" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = CC000000000000000000000B /* SelfPhotosShareExtension */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -84,6 +101,19 @@
 				BB0000000000000000000003 /* Exceptions for "ImmichWidgets" folder in "ImmichWidgets" target */,
 			);
 			path = ImmichWidgets;
+			sourceTree = "<group>";
+		};
+		CC0000000000000000000004 /* SelfPhotosShareExtension */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				CC0000000000000000000003 /* Exceptions for "SelfPhotosShareExtension" folder in "SelfPhotosShareExtension" target */,
+			);
+			path = SelfPhotosShareExtension;
+			sourceTree = "<group>";
+		};
+		DD0000000000000000000004 /* SharedUpload */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = SharedUpload;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -110,6 +140,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CC0000000000000000000005 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -118,6 +155,8 @@
 			children = (
 				242E7F1030206D79000F50F4 /* ImmichApp */,
 				BB0000000000000000000004 /* ImmichWidgets */,
+				CC0000000000000000000004 /* SelfPhotosShareExtension */,
+				DD0000000000000000000004 /* SharedUpload */,
 				AA0000000000000000000010 /* Tests */,
 				242E7F0F30206D79000F50F4 /* Products */,
 			);
@@ -128,6 +167,7 @@
 			children = (
 				242E7F0E30206D79000F50F4 /* ImmichApp.app */,
 				BB0000000000000000000001 /* ImmichWidgets.appex */,
+				CC0000000000000000000001 /* SelfPhotosShareExtension.appex */,
 				AA000000000000000000000E /* ImmichAppTests.xctest */,
 			);
 			name = Products;
@@ -149,9 +189,11 @@
 			);
 			dependencies = (
 				BB000000000000000000000A /* PBXTargetDependency */,
+				CC000000000000000000000A /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				242E7F1030206D79000F50F4 /* ImmichApp */,
+				DD0000000000000000000004 /* SharedUpload */,
 			);
 			name = ImmichApp;
 			packageProductDependencies = (
@@ -205,6 +247,29 @@
 			productReference = BB0000000000000000000001 /* ImmichWidgets.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		CC000000000000000000000B /* SelfPhotosShareExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC000000000000000000000C /* Build configuration list for PBXNativeTarget "SelfPhotosShareExtension" */;
+			buildPhases = (
+				CC0000000000000000000007 /* Sources */,
+				CC0000000000000000000005 /* Frameworks */,
+				CC0000000000000000000006 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				CC0000000000000000000004 /* SelfPhotosShareExtension */,
+				DD0000000000000000000004 /* SharedUpload */,
+			);
+			name = SelfPhotosShareExtension;
+			packageProductDependencies = (
+			);
+			productName = SelfPhotosShareExtension;
+			productReference = CC0000000000000000000001 /* SelfPhotosShareExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -221,6 +286,9 @@
 							com.apple.ApplicationGroups.iOS = {
 								enabled = 1;
 							};
+							com.apple.Keychain = {
+								enabled = 1;
+							};
 						};
 					};
 					AA000000000000000000000D = {
@@ -231,6 +299,17 @@
 						CreatedOnToolsVersion = 26.2;
 						SystemCapabilities = {
 							com.apple.ApplicationGroups.iOS = {
+								enabled = 1;
+							};
+						};
+					};
+					CC000000000000000000000B = {
+						CreatedOnToolsVersion = 26.2;
+						SystemCapabilities = {
+							com.apple.ApplicationGroups.iOS = {
+								enabled = 1;
+							};
+							com.apple.Keychain = {
 								enabled = 1;
 							};
 						};
@@ -253,6 +332,7 @@
 			targets = (
 				242E7F0D30206D79000F50F4 /* ImmichApp */,
 				BB000000000000000000000B /* ImmichWidgets */,
+				CC000000000000000000000B /* SelfPhotosShareExtension */,
 				AA000000000000000000000D /* ImmichAppTests */,
 			);
 		};
@@ -274,6 +354,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		BB0000000000000000000006 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC0000000000000000000006 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -304,6 +391,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CC0000000000000000000007 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -316,6 +410,11 @@
 			isa = PBXTargetDependency;
 			target = BB000000000000000000000B /* ImmichWidgets */;
 			targetProxy = BB0000000000000000000009 /* PBXContainerItemProxy */;
+		};
+		CC000000000000000000000A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CC000000000000000000000B /* SelfPhotosShareExtension */;
+			targetProxy = CC0000000000000000000009 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -625,6 +724,68 @@
 			};
 			name = Release;
 		};
+		CC000000000000000000000D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = SelfPhotosShareExtension/SelfPhotosShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 13;
+				DEVELOPMENT_TEAM = 5KQGTJX2K7;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = SelfPhotosShareExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = SelfPhotos;
+				IPHONEOS_DEPLOYMENT_TARGET = 26;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = xyz.0xmwehehe.ImmichApp.ShareExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		CC000000000000000000000E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = SelfPhotosShareExtension/SelfPhotosShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 13;
+				DEVELOPMENT_TEAM = 5KQGTJX2K7;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = SelfPhotosShareExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = SelfPhotos;
+				IPHONEOS_DEPLOYMENT_TARGET = 26;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = xyz.0xmwehehe.ImmichApp.ShareExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -660,6 +821,15 @@
 			buildConfigurations = (
 				BB000000000000000000000D /* Debug */,
 				BB000000000000000000000E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CC000000000000000000000C /* Build configuration list for PBXNativeTarget "SelfPhotosShareExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC000000000000000000000D /* Debug */,
+				CC000000000000000000000E /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

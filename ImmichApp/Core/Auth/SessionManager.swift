@@ -80,6 +80,7 @@ class SessionManager {
         // Profil ikut dipulihkan di sini, dengan alasan yang sama seperti
         // sesinya: supaya avatar tidak memulai sebagai "?" tiap peluncuran.
         loadStoredUser()
+        persistSharedSessionIfPossible()
     }
 
     func setServer(_ raw: String) throws {
@@ -180,6 +181,7 @@ class SessionManager {
     private func storeUser(_ user: UserResponseDTO) {
         guard let data = try? JSONEncoder().encode(user) else { return }
         UserDefaults.standard.set(data, forKey: Self.userKey)
+        persistSharedSessionIfPossible()
     }
 
     private func loadStoredUser() {
@@ -282,6 +284,7 @@ class SessionManager {
         OnboardingViewModel.clearStoredServer()
         UserDefaults.standard.removeObject(forKey: Self.userKey)
         ["serverURL", "token", "mode"].forEach(KeychainStore.delete)
+        SharedSessionStore.clear()
         AppLaunchState.shared.reset()
 
         token = nil
@@ -295,6 +298,7 @@ class SessionManager {
 
         // Berhenti mengantre dan menerima hasil upload SEBELUM database dibuang.
         BackupService.shared.resetForLogout()
+        SharedUploadService.shared.cancel()
         await BackupUploader.shared.cancelAll()
 
         // Sampul album yang sudah diselesaikan menyimpan id aset milik akun
@@ -328,5 +332,16 @@ class SessionManager {
         if let serverInput { KeychainStore.save(serverInput, for: "serverURL") }
         if let token { KeychainStore.save(token, for: "token") }
         KeychainStore.save(mode.rawValue, for: "mode")
+        persistSharedSessionIfPossible()
+    }
+
+    /// Extension hanya menerima URL API, id pemilik antrean, dan jenis header
+    /// lewat App Group. Token tetap berada di shared Keychain.
+    private func persistSharedSessionIfPossible() {
+        guard let baseURL, let userID = currentUser?.id else { return }
+        SharedSessionStore.save(
+            apiURL: baseURL,
+            userID: userID,
+            authMode: mode.rawValue)
     }
 }

@@ -103,7 +103,10 @@ struct ImmichApp: App {
         WindowGroup {
             AppRouter()
                 .environment(session)
-                .task { await session.restore() }
+                .task {
+                    await session.restore()
+                    SharedUploadService.shared.processPending(session: session)
+                }
                 .onOpenURL { AppNavigation.shared.handle($0) }
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
@@ -112,6 +115,7 @@ struct ImmichApp: App {
                         // latarnya. Yang benar-benar bisa diandalkan adalah saat
                         // pengguna membuka aplikasinya sendiri; sisanya bonus.
                         BackupService.shared.configure(session: session)
+                        SharedUploadService.shared.processPending(session: session)
                         // Menyambung kembali ke transfer yang mungkin masih
                         // berjalan sejak sesi sebelumnya — sistem menyimpannya,
                         // dan tanpa ini hasilnya tidak pernah terbaca.
