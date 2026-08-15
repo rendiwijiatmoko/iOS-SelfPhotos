@@ -281,6 +281,11 @@ struct PhotoCollectionScreen<Options: View>: View {
             menuActions: { menuActions(for: $0) },
             onControllerReady: { gridController = $0 },
             session: session)
+        // Album, Favorites, dan koleksi hero lain menempel langsung pada safe
+        // area sidebar iPad. Perluas seluruh bidang grid agar sampul dan foto
+        // tetap berlanjut di bawah kaca sidebar seperti pada tab Photos.
+        .backgroundExtensionEffect(
+            isEnabled: horizontalSizeClass == .regular && layout == .hero)
         // Menembus sampai ke belakang nav bar di kedua mode — lihat catatan yang
         // sama di `TimelineView`. Mode sampul butuh itu supaya gambarnya terlihat
         // penuh; mode bulanan butuh itu supaya kaca bar-nya punya foto untuk

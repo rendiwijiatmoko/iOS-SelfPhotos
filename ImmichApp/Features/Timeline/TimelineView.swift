@@ -19,6 +19,7 @@ struct TimelineView: View {
 
     @Environment(SessionManager.self) private var session
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     /// Linimasa merender dari hasil sync, jadi ia perlu tahu kapan sync selesai.
     @Environment(SyncViewModel.self) private var syncVM: SyncViewModel?
     @State private var vm: TimelineViewModel?
@@ -286,6 +287,11 @@ struct TimelineView: View {
             },
             onControllerReady: { gridController = $0 },
             session: session)
+        // Grid adalah bidang visual yang benar-benar menempel pada safe area
+        // sidebar iPad. Efek dipasang di sini agar sistem dapat mencerminkan dan
+        // memburamkan tepi foto ke bawah sidebar, bukan pada hero koleksi lain.
+        .backgroundExtensionEffect(
+            isEnabled: horizontalSizeClass == .regular)
         // Grid menembus sampai ke BELAKANG nav bar, bukan berhenti di bawahnya.
         //
         // Inilah sebab toolbar-nya terlihat berlatar warna polos: bar-nya sendiri
