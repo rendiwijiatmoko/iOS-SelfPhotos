@@ -232,7 +232,7 @@ private struct AlbumWidgetView: View {
                     .font(.caption2.weight(.semibold))
                     .textCase(.uppercase)
                     .opacity(0.82)
-                Text(entry.album?.name ?? "Open SelfPhotos")
+                Text(entry.album?.name ?? String(localized: "Open SelfPhotos"))
                     .font(family == .systemSmall ? .headline : .title3.bold())
                     .lineLimit(2)
                 if let count = entry.album?.assetCount {
@@ -306,7 +306,7 @@ private struct MemoriesWidgetView: View {
                     .font(.caption2.weight(.semibold))
                     .textCase(.uppercase)
                     .opacity(0.9)
-                Text(entry.memory?.title ?? "No memories today")
+                Text(entry.memory?.title ?? String(localized: "No memories today"))
                     .font(family == .systemSmall ? .headline : .title2.bold())
                     .lineLimit(2)
                 if let subtitle = entry.memory?.subtitle {

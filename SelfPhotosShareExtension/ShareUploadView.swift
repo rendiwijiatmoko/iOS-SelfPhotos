@@ -80,15 +80,15 @@ struct ShareUploadView: View {
 
     private var toolbarActionAccessibilityLabel: String {
         if model.phase == .loading {
-            return "Preparing images"
+            return String(localized: "Preparing images")
         }
         if case .uploading(let current, let total) = model.phase {
-            return "Uploading \(current) of \(total)"
+            return String(localized: "Uploading \(current) of \(total)")
         }
         if case .queued = model.phase {
-            return "Done"
+            return String(localized: "Done")
         }
-        return "Upload"
+        return String(localized: "Upload")
     }
 
     private func itemRow(_ item: SharePreviewItem) -> some View {

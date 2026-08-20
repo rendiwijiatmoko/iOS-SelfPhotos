@@ -7,6 +7,7 @@ build/
 *.xcworkspace
 xcuserdata/
 DerivedData/
+Scripts/
 .DS_Store
 *.swiftpm
 *.xcodeproj/xcuserdata/
