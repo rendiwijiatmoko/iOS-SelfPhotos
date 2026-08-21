@@ -50,18 +50,20 @@ final class ShareExtensionModel: ObservableObject {
             let directory = try await SharedUploadStore.shared.makeBatchDirectory(id: batchID)
             let providers = (shareContext?.inputItems as? [NSExtensionItem] ?? [])
                 .flatMap { $0.attachments ?? [] }
-                .filter { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }
                 .prefix(30)
 
             for provider in providers {
+                guard let typeIdentifier = Self.supportedTypeIdentifier(for: provider)
+                else { continue }
                 let materialized = try await Self.materialize(
                     provider: provider,
+                    typeIdentifier: typeIdentifier,
                     directory: directory)
                 items.append(materialized)
             }
 
             phase = items.isEmpty
-                ? .failed(String(localized: "No supported images were shared."))
+                ? .failed(String(localized: "No supported photos or videos were shared."))
                 : .ready
         } catch {
             phase = .failed(error.localizedDescription)
@@ -159,12 +161,13 @@ final class ShareExtensionModel: ObservableObject {
 
     private nonisolated static func materialize(
         provider: NSItemProvider,
+        typeIdentifier: String,
         directory: URL
     ) async throws -> SharePreviewItem {
         let providerSuggestedName = provider.suggestedName
         return try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<SharePreviewItem, Error>) in
-            provider.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) {
+            provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) {
                 sourceURL, error in
                 if let error {
                     continuation.resume(throwing: error)
@@ -176,14 +179,18 @@ final class ShareExtensionModel: ObservableObject {
                 }
 
                 do {
-                    let type = UTType(filenameExtension: sourceURL.pathExtension) ?? .image
-                    let fallbackExtension = type.preferredFilenameExtension ?? "jpg"
+                    let sharedType = UTType(typeIdentifier) ?? .data
+                    let type = UTType(filenameExtension: sourceURL.pathExtension) ?? sharedType
+                    let fallbackExtension = type.preferredFilenameExtension
+                        ?? (sharedType.conforms(to: .movie) ? "mov" : "jpg")
+                    let fallbackName = sharedType.conforms(to: .movie)
+                        ? "Shared Video" : "Shared Image"
                     var suggested = providerSuggestedName?.trimmingCharacters(in: .whitespacesAndNewlines)
                     if suggested?.isEmpty != false { suggested = sourceURL.deletingPathExtension().lastPathComponent }
                     if (suggested as NSString?)?.pathExtension.isEmpty != false {
-                        suggested = "\(suggested ?? "Shared Image").\(fallbackExtension)"
+                        suggested = "\(suggested ?? fallbackName).\(fallbackExtension)"
                     }
-                    let safeName = sanitize(suggested ?? "Shared Image.\(fallbackExtension)")
+                    let safeName = sanitize(suggested ?? "\(fallbackName).\(fallbackExtension)")
                     let id = UUID()
                     let storedName = "\(id.uuidString)-\(safeName)"
                     let destination = directory.appendingPathComponent(storedName)
@@ -214,6 +221,21 @@ final class ShareExtensionModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private nonisolated static func supportedTypeIdentifier(
+        for provider: NSItemProvider
+    ) -> String? {
+        // Movie diperiksa lebih dulu agar provider video yang juga menawarkan
+        // thumbnail gambar tidak kehilangan file aslinya dan hanya mengunggah
+        // satu frame diam.
+        if provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
+            return UTType.movie.identifier
+        }
+        if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+            return UTType.image.identifier
+        }
+        return nil
     }
 
     private nonisolated static func sanitize(_ filename: String) -> String {

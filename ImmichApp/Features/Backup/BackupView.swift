@@ -15,7 +15,7 @@ struct BackupView: View {
     @State private var isExpanded = false
     @State private var showOptions = false
     @State private var showPicker = false
-    @State private var showRemainder = false
+    @State private var showUploadDetails = false
 
     /// Berapa album yang terlihat sebelum daftarnya harus dibentangkan sendiri.
     ///
@@ -44,7 +44,7 @@ struct BackupView: View {
         }
         .navigationDestination(isPresented: $showOptions) { BackupOptionsView() }
         .navigationDestination(isPresented: $showPicker) { DeviceAlbumsView() }
-        .navigationDestination(isPresented: $showRemainder) { BackupRemainderView() }
+        .navigationDestination(isPresented: $showUploadDetails) { UploadDetailsView() }
         .task {
             backup.configure(session: session)
             albums = await library.albums()
@@ -174,29 +174,18 @@ struct BackupView: View {
                 Button("Retry Failed Uploads") { backup.retryFailedUploads() }
             }
 
-            // Baris rincian HANYA saat ada yang bisa dirinci. Layar kosong yang
-            // bisa dibuka adalah janji yang tidak ditepati.
-            if backup.remainder > 0 {
-                Button {
-                    showRemainder = true
-                } label: {
-                    LabeledContent("View Details") {
-                        Image(systemName: "chevron.right")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                .buttonStyle(.plain)
-            }
         } footer: {
-            if backup.isUploading {
-                uploadProgress
-            } else if let error = backup.lastError {
-                // Alasan kegagalan ditulis apa adanya, bukan diringkas jadi
-                // "terjadi kesalahan". Yang bisa diperbaiki pengguna hanya yang
-                // bisa dibacanya.
-                Label(error, systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 10) {
+                if backup.isUploading {
+                    uploadProgress
+                } else if let error = backup.lastError {
+                    // Alasan kegagalan ditulis apa adanya, bukan diringkas jadi
+                    // "terjadi kesalahan". Yang bisa diperbaiki pengguna hanya yang
+                    // bisa dibacanya.
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                }
+
             }
         }
     }
@@ -247,7 +236,28 @@ struct BackupView: View {
         Section {
             Toggle("Enable Backup", isOn: Bindable(backup).isEnabled)
         } footer: {
-            Text(statusText)
+            VStack(alignment: .leading, spacing: 12) {
+                Text(statusText)
+
+                // Rincian antrean sengaja menjadi aksi paling bawah di layar,
+                // mengikuti penempatan footer aplikasi Immich resmi.
+                if backup.remainder > 0 || !backup.uploadItems.isEmpty {
+                    Button {
+                        showUploadDetails = true
+                    } label: {
+                        HStack {
+                            Text("View Details")
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.footnote.weight(.semibold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+                }
+            }
         }
     }
 

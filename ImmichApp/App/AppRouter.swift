@@ -42,7 +42,7 @@ struct MainTabView: View {
     @Environment(SessionManager.self) private var session
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var syncVM: SyncViewModel?
-    @State private var selectedDestination: Destination
+    @State private var selectedDestination: Destination = .photos
     @State private var sidebarAlbumsVM: AlbumListViewModel?
     @State private var showNewAlbum = false
     @State private var backupNotifier = BackupNotifier.shared
@@ -56,11 +56,9 @@ struct MainTabView: View {
     /// Singleton, bukan environment — lihat `OfflineBannerSuppression`.
     private var suppression: OfflineBannerSuppression { .shared }
 
-    private static let tabKey = "mainTab.selected"
-
     /// Sengaja BUKAN bernama `Tab` — nama itu sudah dipakai tipe `Tab` milik
     /// SwiftUI yang dipakai di bawah, dan enum bersarang akan menaunginya.
-    private enum TabID: String, Hashable {
+    private enum TabID: Hashable {
         case photos, library, search
     }
 
@@ -69,17 +67,6 @@ struct MainTabView: View {
     /// dianggap sebagai tujuan navigasi yang sama sekali baru.
     private enum Destination: Hashable {
         case photos, library, search, allAlbums, album(String), newAlbum
-    }
-
-    /// Tab terakhir dibaca LANGSUNG di init, bukan lewat `onAppear`.
-    ///
-    /// Menyetelnya setelah view muncul membuat tab Photos sempat tampil lalu
-    /// melompat ke tab tersimpan — terlihat seperti kedipan setiap kali aplikasi
-    /// dibuka.
-    init() {
-        let stored = UserDefaults.standard.string(forKey: Self.tabKey) ?? ""
-        let tab = TabID(rawValue: stored) ?? .photos
-        _selectedDestination = State(initialValue: Self.destination(for: tab))
     }
 
     /// Binding perantara untuk menangkap penekanan tab yang SUDAH aktif.
@@ -104,7 +91,7 @@ struct MainTabView: View {
             })
     }
 
-    /// Binding sidebar juga menjadi satu pintu untuk menyimpan tujuan utama.
+    /// Binding sidebar juga menjadi satu pintu untuk memilih tujuan utama.
     /// Album individual diperlakukan sebagai bagian Library saat aplikasi
     /// kembali ke tata letak compact.
     private var sidebarSelection: Binding<Destination> {
@@ -321,19 +308,6 @@ struct MainTabView: View {
         }
 
         selectedDestination = destination
-
-        // Search sengaja TIDAK ikut disimpan: membuka aplikasi langsung di
-        // kolom pencarian kosong bukan tempat yang berguna untuk memulai.
-        switch destination {
-        case .photos:
-            UserDefaults.standard.set(TabID.photos.rawValue, forKey: Self.tabKey)
-        case .library, .allAlbums, .album:
-            UserDefaults.standard.set(TabID.library.rawValue, forKey: Self.tabKey)
-        case .search:
-            break
-        case .newAlbum:
-            break
-        }
     }
 
     private func openBackupTab() {

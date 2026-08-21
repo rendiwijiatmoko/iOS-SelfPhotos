@@ -121,6 +121,12 @@ final class BackupService {
     private(set) var scheduledForRetry = 0
     private(set) var queueStatusTitle: String?
     private(set) var queueStatusBody: String?
+    /// Item persisten yang sedang menunggu, aktif, atau gagal. Layar detail
+    /// membaca daftar yang sama dengan scheduler dan notifikasi.
+    private(set) var uploadItems: [BackupQueueItem] = []
+    /// Progress byte hanya relevan selama proses hidup; lifecycle item sendiri
+    /// tetap disimpan di `BackupQueueStore`.
+    private(set) var uploadProgressByID: [String: Double] = [:]
 
     private static let enabledKey = "backup.enabled"
     private static let cellularPhotosKey = "backup.cellularPhotos"
@@ -239,8 +245,14 @@ final class BackupService {
         do {
             let activeTasks = await BackupUploader.shared.activeTasks()
             try queue.reconcile(activeTasks: activeTasks)
+            for item in queue.items where item.state == .cancelling {
+                await BackupUploader.shared.cancel(localIdentifier: item.id)
+            }
             await BackupUploader.shared.resumeTasks(identifiers: Set(
-                activeTasks.filter(\.isSuspended).map(\.taskIdentifier)))
+                activeTasks.filter {
+                    $0.isSuspended
+                        && queue.item(id: $0.context.localIdentifier)?.state != .cancelling
+                }.map(\.taskIdentifier)))
         } catch {
             lastError = error.localizedDescription
             acceptsUploadResults = false
@@ -373,8 +385,14 @@ final class BackupService {
         do {
             let activeTasks = await BackupUploader.shared.activeTasks()
             try queue.reconcile(activeTasks: activeTasks)
+            for item in queue.items where item.state == .cancelling {
+                await BackupUploader.shared.cancel(localIdentifier: item.id)
+            }
             await BackupUploader.shared.resumeTasks(identifiers: Set(
-                activeTasks.filter(\.isSuspended).map(\.taskIdentifier)))
+                activeTasks.filter {
+                    $0.isSuspended
+                        && queue.item(id: $0.context.localIdentifier)?.state != .cancelling
+                }.map(\.taskIdentifier)))
         } catch {
             lastError = error.localizedDescription
             acceptsUploadResults = false
@@ -471,6 +489,8 @@ final class BackupService {
         scheduledForRetry = 0
         queueStatusTitle = nil
         queueStatusBody = nil
+        uploadItems = []
+        uploadProgressByID = [:]
         hasAuthenticatedSession = false
         try? queue.clear()
 
@@ -509,6 +529,89 @@ final class BackupService {
             start()
         } catch {
             lastError = error.localizedDescription
+        }
+    }
+
+    func retryUpload(_ localIdentifier: String) {
+        do {
+            try queue.retryFailed(localIdentifier)
+            uploadProgressByID[localIdentifier] = nil
+            applyQueueSnapshot()
+            start()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Menghapus pekerjaan yang belum aktif dari queue persisten. Transfer yang
+    /// sedang menyiapkan atau mengirim file harus melewati `cancelUpload(_:)`
+    /// agar callback URLSession tetap punya record untuk diselesaikan.
+    func removeUpload(_ localIdentifier: String) {
+        guard let item = queue.item(id: localIdentifier),
+              !item.state.isActive
+        else { return }
+
+        do {
+            try queue.discard(localIdentifier)
+            pendingPhotos[localIdentifier] = nil
+            uploadProgressByID[localIdentifier] = nil
+            applyQueueSnapshot()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Cancel memindahkan item ke state terminal yang dapat di-Retry. Transfer
+    /// aktif menunggu callback URLSession agar tidak balapan dengan completion;
+    /// item yang masih menyiapkan file bisa langsung ditandai gagal.
+    func cancelUpload(_ localIdentifier: String) {
+        guard let item = queue.item(id: localIdentifier), item.state.isActive else { return }
+        let canceledMessage = String(localized: "Upload canceled.")
+
+        do {
+            if item.state == .uploading {
+                try queue.markCancelling(localIdentifier)
+                applyQueueSnapshot()
+                Task { [weak self] in
+                    let found = await BackupUploader.shared.cancel(
+                        localIdentifier: localIdentifier)
+                    guard let self, !found,
+                          self.queue.item(id: localIdentifier)?.state == .cancelling
+                    else { return }
+                    try? self.queue.markFailed(localIdentifier, error: canceledMessage)
+                    self.uploadProgressByID[localIdentifier] = nil
+                    self.applyQueueSnapshot()
+                }
+            } else if item.state == .preparing {
+                try queue.markFailed(localIdentifier, error: canceledMessage)
+                pendingPhotos[localIdentifier] = nil
+                uploadProgressByID[localIdentifier] = nil
+                applyQueueSnapshot()
+            }
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Dipanggil URLSession delegate selama badan multipart dikirim.
+    func reportUploadProgress(
+        localIdentifier: String,
+        phase: BackupUploadPhase,
+        bytesSent: Int64,
+        totalBytesExpected: Int64
+    ) {
+        guard totalBytesExpected > 0,
+              let item = queue.item(id: localIdentifier),
+              item.state == .uploading
+        else { return }
+
+        let fraction = min(1, max(0, Double(bytesSent) / Double(totalBytesExpected)))
+        if phase == .livePhotoMotion {
+            uploadProgressByID[localIdentifier] = fraction * 0.5
+        } else if item.motionAssetID != nil {
+            uploadProgressByID[localIdentifier] = 0.5 + fraction * 0.5
+        } else {
+            uploadProgressByID[localIdentifier] = fraction
         }
     }
 
@@ -830,6 +933,18 @@ final class BackupService {
             pendingPhotos[localIdentifier] = nil
             return
         }
+        if queue.item(id: localIdentifier)?.state == .cancelling {
+            try? queue.markFailed(
+                localIdentifier,
+                error: String(localized: "Upload canceled."))
+            pendingPhotos[localIdentifier] = nil
+            uploadProgressByID[localIdentifier] = nil
+            applyQueueSnapshot()
+            if remainingBackgroundTasks == 0 && enqueueDepth == 0 {
+                finishRunIfSettled()
+            }
+            return
+        }
         switch outcome {
         case .failure(let error):
             finishUpload(
@@ -959,6 +1074,19 @@ final class BackupService {
             applyQueueSnapshot()
             return
         }
+        if queue.item(id: localIdentifier)?.state == .cancelling,
+           case .failure = outcome {
+            try? queue.markFailed(
+                localIdentifier,
+                error: String(localized: "Upload canceled."))
+            pendingPhotos[localIdentifier] = nil
+            uploadProgressByID[localIdentifier] = nil
+            applyQueueSnapshot()
+            if remainingBackgroundTasks == 0 && enqueueDepth == 0 {
+                finishRunIfSettled()
+            }
+            return
+        }
         // Task dari versi lama mungkin selesai tepat setelah aplikasi di-update.
         // Adopsi dulu supaya hasilnya tetap masuk sumber kebenaran yang sama.
         if queue.item(id: localIdentifier) == nil {
@@ -1032,6 +1160,10 @@ final class BackupService {
         error: Error,
         waitingForICloud: Bool
     ) {
+        if let state = queue.item(id: localIdentifier)?.state,
+           state == .failed || state == .cancelling {
+            return
+        }
         lastError = error.localizedDescription
         if error is BackupQueueStoreError {
             acceptsUploadResults = false
@@ -1085,6 +1217,14 @@ final class BackupService {
     /// putaran dari RAM yang bisa berbeda setelah cold launch.
     private func applyQueueSnapshot(notify: Bool = true) {
         let state = queue.snapshot
+        uploadItems = queue.items.sorted { lhs, rhs in
+            if lhs.state.isActive != rhs.state.isActive {
+                return lhs.state.isActive
+            }
+            return lhs.createdAt < rhs.createdAt
+        }
+        let activeIDs = Set(uploadItems.filter { $0.state.isActive }.map(\.id))
+        uploadProgressByID = uploadProgressByID.filter { activeIDs.contains($0.key) }
         uploadedThisRun = state.completed
         pendingThisRun = state.total
         failures = queue.failedIDs

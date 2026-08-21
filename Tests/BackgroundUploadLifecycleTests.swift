@@ -71,6 +71,63 @@ final class BackgroundUploadQueueTests: XCTestCase {
         XCTAssertEqual(queue.snapshot.failed, 1)
     }
 
+    func testCancellingTransferBecomesRetryableFailureWhenTaskIsGone() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let queue = BackupQueueStore(fileURL: fixture.queueURL)
+        try queue.enqueue(["cancel-me"])
+        try queue.markPreparing("cancel-me", phase: .primaryAsset)
+        try queue.markUploading(
+            "cancel-me",
+            phase: .primaryAsset,
+            checksum: "sha1",
+            taskIdentifier: 9)
+        try queue.markCancelling("cancel-me")
+
+        XCTAssertEqual(queue.item(id: "cancel-me")?.state, .cancelling)
+        XCTAssertEqual(queue.snapshot.active, 1)
+
+        try queue.reconcile(activeTasks: [])
+
+        XCTAssertEqual(queue.item(id: "cancel-me")?.state, .failed)
+        XCTAssertEqual(queue.item(id: "cancel-me")?.lastError, "Upload canceled.")
+        XCTAssertEqual(queue.snapshot.failed, 1)
+        XCTAssertEqual(queue.snapshot.active, 0)
+    }
+
+    func testRetrySingleFailureLeavesOtherFailuresUntouched() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let queue = BackupQueueStore(fileURL: fixture.queueURL)
+        try queue.enqueue(["retry-me", "leave-me"])
+        try queue.markFailed("retry-me", error: "first")
+        try queue.markFailed("leave-me", error: "second")
+
+        try queue.retryFailed("retry-me")
+
+        XCTAssertEqual(queue.item(id: "retry-me")?.state, .queued)
+        XCTAssertNil(queue.item(id: "retry-me")?.lastError)
+        XCTAssertEqual(queue.item(id: "leave-me")?.state, .failed)
+        XCTAssertEqual(queue.snapshot.queued, 1)
+        XCTAssertEqual(queue.snapshot.failed, 1)
+    }
+
+    func testDiscardedFailureStaysRemovedAfterRelaunch() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let queue = BackupQueueStore(fileURL: fixture.queueURL)
+        try queue.enqueue(["remove-me", "keep-me"])
+        try queue.markFailed("remove-me", error: "missing local asset")
+
+        try queue.discard("remove-me")
+
+        let restored = BackupQueueStore(fileURL: fixture.queueURL)
+        XCTAssertNil(restored.item(id: "remove-me"))
+        XCTAssertEqual(restored.item(id: "keep-me")?.state, .queued)
+        XCTAssertEqual(restored.snapshot.failed, 0)
+        XCTAssertEqual(restored.snapshot.queued, 1)
+    }
+
     func testStalePreparingItemBecomesRetryInsteadOfHangingForever() throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }

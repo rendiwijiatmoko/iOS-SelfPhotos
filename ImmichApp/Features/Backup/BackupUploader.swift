@@ -231,6 +231,19 @@ final class BackupUploader: NSObject {
         }
     }
 
+    /// Membatalkan transfer untuk satu aset tanpa menyentuh item lain di sesi
+    /// latar yang sama. Hasil akhirnya tetap datang lewat delegate, sehingga
+    /// queue dapat menyelesaikan state `cancelling` secara konsisten.
+    @discardableResult
+    func cancel(localIdentifier: String) async -> Bool {
+        let tasks = await session.allTasks
+        let matching = tasks.filter {
+            Self.localIdentifier(from: $0) == localIdentifier
+        }
+        matching.forEach { $0.cancel() }
+        return !matching.isEmpty
+    }
+
     private static func localIdentifier(from task: URLSessionTask) -> String? {
         BackupUploadTaskContext.decode(task.taskDescription)?.localIdentifier
     }
@@ -250,6 +263,25 @@ final class BackupUploader: NSObject {
 // MARK: - Delegate
 
 extension BackupUploader: URLSessionDataDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        guard totalBytesExpectedToSend > 0,
+              let context = BackupUploadTaskContext.decode(task.taskDescription)
+        else { return }
+        Task { @MainActor in
+            BackupService.shared.reportUploadProgress(
+                localIdentifier: context.localIdentifier,
+                phase: context.phase,
+                bytesSent: totalBytesSent,
+                totalBytesExpected: totalBytesExpectedToSend)
+        }
+    }
+
     func urlSession(
         _ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data
     ) {

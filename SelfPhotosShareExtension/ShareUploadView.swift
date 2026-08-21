@@ -100,7 +100,8 @@ struct ShareUploadView: View {
                             .resizable()
                             .scaledToFill()
                     } else {
-                        Image(systemName: "photo")
+                        Image(systemName: item.uploadItem.contentType.hasPrefix("video/")
+                              ? "video" : "photo")
                             .font(.title)
                             .foregroundStyle(.secondary)
                     }

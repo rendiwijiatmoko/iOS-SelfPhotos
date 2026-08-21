@@ -60,7 +60,11 @@ struct CollectionSection<Destination: View, Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            contentArea
+            // Section kosong tetap menjadi pintu ke layar lengkapnya, tetapi
+            // tidak menawarkan aksi lipat untuk isi yang memang tidak ada.
+            if !isEmpty {
+                contentArea
+            }
         }
     }
 
@@ -73,51 +77,45 @@ struct CollectionSection<Destination: View, Content: View>: View {
     /// yang pasti membuat semuanya bergerak serempak — dan itulah sebabnya
     /// tingginya perlu diketahui di muka, bukan diserahkan ke layout.
     private var contentArea: some View {
-        Group {
-            if isEmpty {
-                emptyHint
-            } else {
-                // Isi baris digulung mendatar; scroll indicator dimatikan
-                // supaya tidak menumpuk dengan baris di bawahnya.
-                ScrollView(.horizontal, showsIndicators: false) {
-                    // `HStack`, BUKAN `LazyHStack`.
-                    //
-                    // Versi lazy pernah dipakai di sini untuk satu tujuan yang
-                    // benar: baris yang terlipat tidak boleh ikut mengunduh dan
-                    // mendecode belasan thumbnail untuk sesuatu yang tidak
-                    // terlihat sama sekali.
-                    //
-                    // Tapi cara kerjanya salah untuk baris ini. Lazy stack hanya
-                    // membangun apa yang masuk kotak terlihat, dan kotak itu ia
-                    // hitung dari ukuran scroll view-nya. Di sini ukuran itu
-                    // datang dari `frame` yang sedang DIANIMASIKAN — baris ini
-                    // muncul bertahap lalu tingginya tumbuh dari nol — jadi saat
-                    // isinya dibangun kotaknya masih belum berarti apa-apa.
-                    // Hasilnya cuma satu-dua kartu yang pernah dibangun, dan
-                    // sisanya tidak pernah menyusul. Itulah kenapa sampul album
-                    // muncul di layar Albums tapi tidak di baris ini: di sana
-                    // gridnya ada di scroll view biasa yang ukurannya pasti.
-                    //
-                    // Yang mau dihindari sebenarnya bukan "kartu di luar layar",
-                    // melainkan "baris yang tertutup". Jadi itu yang dijadikan
-                    // syarat — lihat `buildsContent`.
-                    HStack(alignment: .top, spacing: 12) {
-                        if buildsContent {
-                            content()
-                        }
-                    }
-                    .padding(.horizontal, 20)
+        // Isi baris digulung mendatar; scroll indicator dimatikan supaya tidak
+        // menumpuk dengan baris di bawahnya.
+        ScrollView(.horizontal, showsIndicators: false) {
+            // `HStack`, BUKAN `LazyHStack`.
+            //
+            // Versi lazy pernah dipakai di sini untuk satu tujuan yang
+            // benar: baris yang terlipat tidak boleh ikut mengunduh dan
+            // mendecode belasan thumbnail untuk sesuatu yang tidak
+            // terlihat sama sekali.
+            //
+            // Tapi cara kerjanya salah untuk baris ini. Lazy stack hanya
+            // membangun apa yang masuk kotak terlihat, dan kotak itu ia
+            // hitung dari ukuran scroll view-nya. Di sini ukuran itu
+            // datang dari `frame` yang sedang DIANIMASIKAN — baris ini
+            // muncul bertahap lalu tingginya tumbuh dari nol — jadi saat
+            // isinya dibangun kotaknya masih belum berarti apa-apa.
+            // Hasilnya cuma satu-dua kartu yang pernah dibangun, dan
+            // sisanya tidak pernah menyusul. Itulah kenapa sampul album
+            // muncul di layar Albums tapi tidak di baris ini: di sana
+            // gridnya ada di scroll view biasa yang ukurannya pasti.
+            //
+            // Yang mau dihindari sebenarnya bukan "kartu di luar layar",
+            // melainkan "baris yang tertutup". Jadi itu yang dijadikan
+            // syarat — lihat `buildsContent`.
+            HStack(alignment: .top, spacing: 12) {
+                if buildsContent {
+                    content()
                 }
-                // ScrollView SELALU memotong isinya, dan itulah yang memangkas
-                // pratinjau context menu saat kartu ditekan lama — pratinjaunya
-                // membesar melewati tepi baris lalu terpotong rata.
-                //
-                // Mematikan klipnya aman di sini: isinya setinggi baris, jadi
-                // yang bisa meluber hanya ke samping — dan di sana sudah ada
-                // tepi layar.
-                .scrollClipDisabled()
             }
+            .padding(.horizontal, 20)
         }
+        // ScrollView SELALU memotong isinya, dan itulah yang memangkas
+        // pratinjau context menu saat kartu ditekan lama — pratinjaunya
+        // membesar melewati tepi baris lalu terpotong rata.
+        //
+        // Mematikan klipnya aman di sini: isinya setinggi baris, jadi
+        // yang bisa meluber hanya ke samping — dan di sana sudah ada
+        // tepi layar.
+        .scrollClipDisabled()
         .frame(height: isExpanded ? contentHeight : 0, alignment: .top)
         .opacity(isExpanded ? 1 : 0)
         // Satu modifier yang selalu terpasang, hanya bentuknya yang berubah —
@@ -175,7 +173,7 @@ struct CollectionSection<Destination: View, Content: View>: View {
                     // Hanya tampil saat barisnya terbuka — sewaktu tertutup
                     // tidak ada isi yang bisa "dilihat selengkapnya", jadi
                     // panah itu cuma mengundang salah tekan.
-                    if isExpanded {
+                    if !isEmpty && isExpanded {
                         Image(systemName: "chevron.right")
                             .font(.subheadline.weight(.bold))
                             .foregroundStyle(.secondary)
@@ -185,36 +183,37 @@ struct CollectionSection<Destination: View, Content: View>: View {
                     // begitu seluruh sisa lebar baris ikut jadi area tekan,
                     // bukan hanya seluas tulisannya.
                     Spacer(minLength: 8)
+
+                    if isEmpty {
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.bold))
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
-            Button {
-                // `.smooth` meredam sisa gerakan di ujung animasi, jadi baris
-                // di bawahnya tidak berhenti mendadak seperti pada easeInOut.
-                withAnimation(.smooth(duration: collectionSectionCollapseDuration)) {
-                    isExpanded.toggle()
+            if !isEmpty {
+                Button {
+                    // `.smooth` meredam sisa gerakan di ujung animasi, jadi baris
+                    // di bawahnya tidak berhenti mendadak seperti pada easeInOut.
+                    withAnimation(.smooth(duration: collectionSectionCollapseDuration)) {
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.footnote.weight(.bold))
+                        // Ikon yang sama diputar, bukan diganti: perputarannya bisa
+                        // dianimasikan, sedangkan pergantian simbol akan berkedip.
+                        .rotationEffect(.degrees(isExpanded ? 0 : -90))
+                        .frame(width: 28, height: 28)
+                        .background(.fill.tertiary, in: .circle)
                 }
-            } label: {
-                Image(systemName: "chevron.down")
-                    .font(.footnote.weight(.bold))
-                    // Ikon yang sama diputar, bukan diganti: perputarannya bisa
-                    // dianimasikan, sedangkan pergantian simbol akan berkedip.
-                    .rotationEffect(.degrees(isExpanded ? 0 : -90))
-                    .frame(width: 28, height: 28)
-                    .background(.fill.tertiary, in: .circle)
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, 20)
-    }
-
-    private var emptyHint: some View {
-        Text("Nothing here yet")
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 20)
     }
 }
 
@@ -333,4 +332,3 @@ struct PersonCard: View {
         }
     }
 }
-

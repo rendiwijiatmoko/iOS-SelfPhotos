@@ -5,6 +5,7 @@ enum BackupQueueItemState: String, Codable, Sendable {
     case queued
     case preparing
     case uploading
+    case cancelling
     case waitingForNetwork
     case waitingForICloud
     case waitingForAuthentication
@@ -22,7 +23,7 @@ enum BackupQueueItemState: String, Codable, Sendable {
     }
 
     var isActive: Bool {
-        self == .preparing || self == .uploading
+        self == .preparing || self == .uploading || self == .cancelling
     }
 }
 
@@ -136,11 +137,14 @@ struct BackupQueuePresentation: Equatable, Sendable {
 
 enum BackupQueueStoreError: LocalizedError {
     case unavailable(String)
+    case invalidTransition
 
     var errorDescription: String? {
         switch self {
         case .unavailable(let reason):
             String(localized: "The background backup queue could not be saved: \(reason)")
+        case .invalidTransition:
+            String(localized: "The upload changed state before this action could finish.")
         }
     }
 }
@@ -210,6 +214,7 @@ final class BackupQueueStore {
     }
 
     var owner: BackupQueueOwner? { ledger.owner }
+    var items: [BackupQueueItem] { ledger.items }
     var failedIDs: [String] {
         ledger.items.filter { $0.state == .failed }.map(\.id)
     }
@@ -280,6 +285,9 @@ final class BackupQueueStore {
         motionAssetID: String? = nil,
         now: Date = .now
     ) throws {
+        guard let state = ledger.items.first(where: { $0.id == id })?.state,
+              state != .failed, state != .cancelling
+        else { throw BackupQueueStoreError.invalidTransition }
         try update(id) { item in
             item.phase = phase
             item.state = .preparing
@@ -298,6 +306,9 @@ final class BackupQueueStore {
         taskIdentifier: Int,
         now: Date = .now
     ) throws {
+        guard ledger.items.first(where: { $0.id == id })?.state == .preparing else {
+            throw BackupQueueStoreError.invalidTransition
+        }
         try update(id) { item in
             item.phase = phase
             item.state = .uploading
@@ -310,6 +321,16 @@ final class BackupQueueStore {
         }
     }
 
+    func markCancelling(_ id: String, now: Date = .now) throws {
+        guard ledger.items.first(where: { $0.id == id })?.state == .uploading else {
+            throw BackupQueueStoreError.invalidTransition
+        }
+        try update(id) { item in
+            item.state = .cancelling
+            item.updatedAt = now
+        }
+    }
+
     func markRetry(
         _ id: String,
         state: BackupQueueItemState,
@@ -318,6 +339,9 @@ final class BackupQueueStore {
         now: Date = .now
     ) throws {
         precondition(state.isWaiting)
+        guard let current = ledger.items.first(where: { $0.id == id })?.state,
+              current != .failed, current != .cancelling
+        else { throw BackupQueueStoreError.invalidTransition }
         try update(id) { item in
             item.state = state
             item.lastError = error
@@ -393,7 +417,8 @@ final class BackupQueueStore {
     ) throws {
         var changed = false
         for index in ledger.items.indices
-        where ledger.items[index].state != .failed {
+        where ledger.items[index].state != .failed
+            && ledger.items[index].state != .cancelling {
             ledger.items[index].state = .waitingForAuthentication
             ledger.items[index].lastError = error
             ledger.items[index].nextAttemptAt = nil
@@ -419,6 +444,20 @@ final class BackupQueueStore {
         }
     }
 
+    func retryFailed(_ id: String, now: Date = .now) throws {
+        guard ledger.items.first(where: { $0.id == id })?.state == .failed else {
+            throw BackupQueueStoreError.invalidTransition
+        }
+        try update(id) { item in
+            item.state = .queued
+            item.lastError = nil
+            item.nextAttemptAt = nil
+            item.updatedAt = now
+        }
+        ledger.completionNotificationPending = true
+        try persist()
+    }
+
     /// Memadankan queue dengan task yang benar-benar masih dimiliki
     /// `nsurlsessiond`. State preparation/upload yang kehilangan task lebih dari
     /// batas stale dilepas kembali ke retry; task lawas tanpa record diadopsi.
@@ -434,8 +473,9 @@ final class BackupQueueStore {
 
         for task in activeTasks {
             if let index = ledger.items.firstIndex(where: { $0.id == task.context.localIdentifier }) {
-                if ledger.items[index].taskIdentifier != task.taskIdentifier
-                    || ledger.items[index].state != .uploading {
+                if ledger.items[index].state != .cancelling
+                    && (ledger.items[index].taskIdentifier != task.taskIdentifier
+                    || ledger.items[index].state != .uploading) {
                     ledger.items[index].state = .uploading
                     ledger.items[index].phase = task.context.phase
                     ledger.items[index].checksum = task.context.checksum
@@ -464,6 +504,15 @@ final class BackupQueueStore {
 
         for index in ledger.items.indices {
             let item = ledger.items[index]
+            if item.state == .cancelling, activeByID[item.id] == nil {
+                ledger.items[index].state = .failed
+                ledger.items[index].taskIdentifier = nil
+                ledger.items[index].nextAttemptAt = nil
+                ledger.items[index].lastError = String(localized: "Upload canceled.")
+                ledger.items[index].updatedAt = now
+                changed = true
+                continue
+            }
             guard (item.state == .uploading || item.state == .preparing),
                   activeByID[item.id] == nil,
                   now.timeIntervalSince(item.updatedAt) >= staleAfter
@@ -531,7 +580,7 @@ final class BackupQueueStore {
             total: ledger.completed + ledger.items.count,
             completed: ledger.completed,
             queued: count(.queued),
-            active: count(.preparing) + count(.uploading),
+            active: count(.preparing) + count(.uploading) + count(.cancelling),
             waitingForNetwork: count(.waitingForNetwork),
             waitingForICloud: count(.waitingForICloud),
             waitingForAuthentication: count(.waitingForAuthentication),

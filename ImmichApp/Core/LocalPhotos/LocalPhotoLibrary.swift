@@ -81,6 +81,12 @@ struct LocalPhoto: Identifiable, Sendable {
     let ratio: Double
 }
 
+struct LocalPhotoDisplayMetadata: Sendable {
+    let filename: String
+    let isVideo: Bool
+    let createdAt: Date
+}
+
 /// Aset perangkat yang aman ditawarkan oleh halaman Free Up Space.
 ///
 /// Daftar ini sengaja hanya berisi metadata yang dibutuhkan UI. `PHAsset`
@@ -770,6 +776,20 @@ final class LocalPhotoLibrary: NSObject {
                     && asset.mediaSubtypes.contains(.photoLive),
                 duration: asset.mediaType == .video ? asset.duration : nil,
                 ratio: Double(asset.pixelWidth) / Double(height))
+        }.value
+    }
+
+    /// Metadata ringan untuk baris antrean backup. Tidak mengekspor byte aset;
+    /// nama asli dibaca langsung dari resource PhotoKit.
+    nonisolated func displayMetadata(for id: String) async -> LocalPhotoDisplayMetadata? {
+        await Task.detached(priority: .utility) {
+            guard let asset = Self.fetchAsset(id),
+                  let resource = Self.primaryResource(for: asset)
+            else { return nil }
+            return LocalPhotoDisplayMetadata(
+                filename: resource.originalFilename,
+                isVideo: asset.mediaType == .video,
+                createdAt: asset.creationDate ?? asset.modificationDate ?? Date())
         }.value
     }
 

@@ -646,6 +646,9 @@ struct LibraryView: View {
             plainRow("Shared Links", systemImage: "link") {
                 SharedLinksView()
             }
+            plainRow("Duplicates", systemImage: "square.on.square") {
+                DuplicatesView()
+            }
             plainRow("Archived", systemImage: "archivebox") {
                 AssetCollectionView(
                     title: "Archived",
