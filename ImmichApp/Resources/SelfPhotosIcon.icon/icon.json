@@ -12,6 +12,7 @@
   ],
   "groups" : [
     {
+      "blur-material" : null,
       "hidden" : false,
       "layers" : [
         {
@@ -30,7 +31,7 @@
           ],
           "glass" : true,
           "image-name" : "Vector.png",
-          "name" : "shell",
+          "name" : "Vector",
           "position" : {
             "scale" : 1.65,
             "translation-in-points" : [
@@ -53,9 +54,9 @@
               }
             }
           ],
-          "glass" : true,
+          "glass" : false,
           "image-name" : "Vector-1.png",
-          "name" : "body",
+          "name" : "Vector-1",
           "position" : {
             "scale" : 1.65,
             "translation-in-points" : [
@@ -74,10 +75,10 @@
         ]
       },
       "shadow" : {
-        "kind" : "neutral",
+        "kind" : "layer-color",
         "opacity" : 0.5
       },
-      "specular" : true,
+      "specular" : false,
       "translucency" : {
         "enabled" : true,
         "value" : 0.5
