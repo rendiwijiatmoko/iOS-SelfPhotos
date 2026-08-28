@@ -138,7 +138,10 @@ private struct UploadDetailCard: View {
                 Spacer(minLength: 8)
 
                 if item.state == .uploading || item.state == .preparing {
-                    Text("\(percent)%")
+                    Text(
+                        min(1, max(0, progress)),
+                        format: .percent.precision(.fractionLength(0))
+                    )
                         .font(.title3.weight(.semibold))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)

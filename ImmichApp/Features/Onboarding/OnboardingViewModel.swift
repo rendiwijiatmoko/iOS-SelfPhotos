@@ -16,8 +16,6 @@ final class OnboardingViewModel {
     }
     var email = ""
     var password = ""
-    var apiKey = ""
-    var method: Method = .password
     var phase: LoadingPhase<Void> = .idle
 
     /// Kemampuan server, baru diketahui SETELAH alamatnya berhasil dihubungi.
@@ -26,11 +24,6 @@ final class OnboardingViewModel {
     /// OAuth-only yang mematikan login kata sandi.
     var features: ServerFeaturesDTO?
     private(set) var validatedServerText: String?
-
-    enum Method: String, CaseIterable, Identifiable {
-        case password, apiKey
-        var id: Self { self }
-    }
 
     private let session: SessionManager
 
@@ -57,11 +50,7 @@ final class OnboardingViewModel {
     }
 
     var canSubmit: Bool {
-        guard validatedServerText != nil else { return false }
-        switch method {
-        case .password: return !email.isEmpty && !password.isEmpty
-        case .apiKey:   return !apiKey.isEmpty
-        }
+        validatedServerText != nil && !email.isEmpty && !password.isEmpty
     }
 
     /// Tahap pertama hanya menyentuh endpoint publik. Kredensial belum pernah
@@ -74,11 +63,11 @@ final class OnboardingViewModel {
         do {
             try session.setServer(serverText)
             let compatibility = try await session.checkServerCompatibility()
+            guard compatibility.features.passwordLogin else {
+                throw ServerCompatibilityError.passwordLoginUnavailable
+            }
             features = compatibility.features
             validatedServerText = normalized(serverText)
-            if !compatibility.features.passwordLogin {
-                method = .apiKey
-            }
             phase = .loaded(())
             return true
         } catch {
@@ -96,15 +85,10 @@ final class OnboardingViewModel {
         guard canSubmit else { return false }
         phase = .loading
         do {
-            switch method {
-            case .password:
-                guard features?.passwordLogin == true else {
-                    throw ServerCompatibilityError.passwordLoginUnavailable
-                }
-                try await session.loginPassword(email: email, password: password)
-            case .apiKey:
-                try await session.loginApiKey(apiKey)
+            guard features?.passwordLogin == true else {
+                throw ServerCompatibilityError.passwordLoginUnavailable
             }
+            try await session.loginPassword(email: email, password: password)
 
             UserDefaults.standard.set(serverText, forKey: Self.lastServerKey)
             phase = .loaded(())
@@ -131,9 +115,7 @@ final class OnboardingViewModel {
         }
         switch apiError {
         case .unauthorized:
-            return method == .apiKey
-                ? String(localized: "That API key was rejected.")
-                : String(localized: "Wrong email or password.")
+            return String(localized: "Wrong email or password.")
         case .notConnected:
             return String(localized: "No internet connection.")
         case .invalidURL:

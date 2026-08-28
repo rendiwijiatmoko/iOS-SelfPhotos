@@ -70,7 +70,7 @@ enum ServerCompatibilityError: LocalizedError, Equatable {
                 localized: "Server \(found.displayName) is newer than this app supports. Update the app before signing in.")
         case .passwordLoginUnavailable:
             return String(
-                localized: "Password login is disabled on this server. Sign in with an API key instead.")
+                localized: "Password login is disabled on this server. SelfPhotos currently supports email and password sign-in only.")
         }
     }
 

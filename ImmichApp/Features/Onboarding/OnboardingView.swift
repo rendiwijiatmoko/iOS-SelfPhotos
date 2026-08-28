@@ -80,41 +80,23 @@ struct OnboardingView: View {
         return loginScroll {
             masthead(
                 title: "Sign In",
-                subtitle: "Choose how you want to authenticate.",
+                subtitle: "Sign in with your Immich account.",
                 logoSize: 48)
 
-            methodPicker(vm)
+            field("Email") {
+                TextField("you@example.com", text: $vm.email)
+                    .textInputAutocapitalization(.never)
+                    .textContentType(.username)
+                    .keyboardType(.emailAddress)
+                    .autocorrectionDisabled()
+                    .submitLabel(.next)
+            }
 
-            switch vm.method {
-            case .password:
-                field("Email") {
-                    TextField("you@example.com", text: $vm.email)
-                        .textInputAutocapitalization(.never)
-                        .textContentType(.username)
-                        .keyboardType(.emailAddress)
-                        .autocorrectionDisabled()
-                        .submitLabel(.next)
-                }
-
-                field("Password") {
-                    SecureField("Required", text: $vm.password)
-                        .textContentType(.password)
-                        .submitLabel(.go)
-                        .onSubmit { signIn(vm) }
-                }
-
-            case .apiKey:
-                field("API Key") {
-                    SecureField("Required", text: $vm.apiKey)
-                        .textContentType(.password)
-                        .submitLabel(.go)
-                        .onSubmit { signIn(vm) }
-                }
-
-                Text("Generate an API key in your Immich account settings.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            field("Password") {
+                SecureField("Required", text: $vm.password)
+                    .textContentType(.password)
+                    .submitLabel(.go)
+                    .onSubmit { signIn(vm) }
             }
 
             Button { signIn(vm) } label: {
@@ -135,20 +117,6 @@ struct OnboardingView: View {
                 return
             }
         }
-    }
-
-    /// API Key selalu tersedia. Pada server yang mematikan password login,
-    /// hanya pilihan ini yang ditampilkan dan dipilih otomatis oleh view model.
-    private func methodPicker(_ vm: OnboardingViewModel) -> some View {
-        @Bindable var vm = vm
-
-        return Picker("Sign in with", selection: $vm.method) {
-            if vm.features?.passwordLogin != false {
-                Text("Email").tag(OnboardingViewModel.Method.password)
-            }
-            Text("API Key").tag(OnboardingViewModel.Method.apiKey)
-        }
-        .pickerStyle(.segmented)
     }
 
     // MARK: - Komponen
