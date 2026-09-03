@@ -143,6 +143,12 @@ final class LocalPhotoLibrary: NSObject {
 
     private(set) var photos: [LocalPhoto] = []
     private(set) var isAuthorized = false
+    /// Bertambah setiap kali PhotoKit memberi tahu bahwa pustaka berubah.
+    ///
+    /// Tidak semua perubahan mengubah jumlah `photos` (satu foto bisa hilang
+    /// sementara foto lain masuk), jadi jumlah array bukan sinyal yang cukup
+    /// untuk menyegarkan asal aset dan menu yang bergantung padanya.
+    private(set) var revision = 0
 
     /// `localIdentifier` foto → nama album perangkat asalnya.
     ///
@@ -992,6 +998,27 @@ final class LocalPhotoLibrary: NSObject {
         }
     }
 
+    /// Id PhotoKit yang masih dapat diakses aplikasi saat ini.
+    ///
+    /// Sumber kebenaran untuk aksi perangkat harus PhotoKit, bukan catatan
+    /// backup. Catatan itu sengaja bertahan setelah unggahan selesai dan bisa
+    /// menjadi usang ketika foto dihapus lewat Photos atau aplikasi lain.
+    nonisolated static func existingLocalIdentifiers(_ ids: [String]) -> Set<String> {
+        guard !ids.isEmpty else { return [] }
+        let identifiers = ids.map(localIdentifier(from:))
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
+        var existing = Set<String>()
+        existing.reserveCapacity(assets.count)
+        assets.enumerateObjects { asset, _, _ in
+            existing.insert(asset.localIdentifier)
+        }
+        return existing
+    }
+
+    nonisolated static func assetExists(_ id: String) -> Bool {
+        existingLocalIdentifiers([id]).isEmpty == false
+    }
+
     /// `static` dan `nonisolated`: tidak menyentuh state apa pun, dan memaksanya
     /// lewat main actor berarti setiap pembacaan berkas mengantre di belakang
     /// antarmuka. `static` supaya bisa dipanggil dari `Task.detached` tanpa
@@ -1005,6 +1032,7 @@ final class LocalPhotoLibrary: NSObject {
 extension LocalPhotoLibrary: PHPhotoLibraryChangeObserver {
     nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
         Task { @MainActor [weak self] in
+            self?.revision &+= 1
             self?.onLibraryChange?()
         }
     }

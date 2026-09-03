@@ -113,9 +113,14 @@ final class TimelineViewModel {
         guard loadedAlbums != selection else { return }
         loadedAlbums = selection
 
+        await reloadDevicePhotos()
+        matchDevicePhotos()
+    }
+
+    /// Membaca ulang setelah PhotoKit berubah, walaupun pilihan album sama.
+    func reloadDevicePhotos() async {
         await LocalPhotoLibrary.shared.load()
         await rebuild()
-        matchDevicePhotos()
     }
 
     /// Pencocokan menyusul, di latar.
@@ -237,7 +242,9 @@ final class TimelineViewModel {
     /// perangkat, bukan milik server, dan menuliskannya ke `CachedAsset` berarti
     /// sync berikutnya harus menjaganya tetap benar tanpa punya cara tahu.
     private func markDeviceCopies(_ rows: [TimelineRow]) -> [TimelineRow] {
-        let onDevice = dataManager?.uploadedServerAssetIDs() ?? []
+        let links = dataManager?.serverAssetIDsByLocalIdentifier() ?? [:]
+        let existingLocalIDs = LocalPhotoLibrary.existingLocalIdentifiers(Array(links.keys))
+        let onDevice = Set(existingLocalIDs.compactMap { links[$0] })
         guard !onDevice.isEmpty else { return rows }
         return rows.map { row in
             guard onDevice.contains(row.asset.id) else { return row }

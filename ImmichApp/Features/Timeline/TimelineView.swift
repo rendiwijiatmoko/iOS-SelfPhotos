@@ -152,6 +152,12 @@ struct TimelineView: View {
         .onChange(of: LocalPhotoLibrary.shared.photos.count) { _, _ in
             Task { await vm?.refreshOrigins() }
         }
+        // Jumlah foto bisa tetap sama walaupun satu aset dihapus dan aset lain
+        // masuk. Revision berasal langsung dari PhotoKit, jadi status `.both`
+        // dan menu perangkat ikut diperiksa ulang pada setiap perubahan nyata.
+        .onChange(of: LocalPhotoLibrary.shared.revision) { _, _ in
+            Task { await vm?.reloadDevicePhotos() }
+        }
         // Membuka kembali aplikasi selalu kembali ke foto terbaru. Controller
         // sengaja melepas anchor bawah setelah pengguna scroll; tanpa memasangnya
         // lagi di foreground, foto yang ditemukan/diunggah auto-backup bertambah

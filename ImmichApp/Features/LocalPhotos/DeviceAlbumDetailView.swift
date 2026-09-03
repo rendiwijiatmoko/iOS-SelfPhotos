@@ -42,6 +42,11 @@ struct DeviceAlbumDetailView: View {
             // Unggahan yang selesai — dari sini maupun dari pencadangan latar —
             // mengubah lencana dan isi menunya.
             .onChange(of: backup.backedUp) { _, _ in refreshUploaded() }
+            // Penghapusan dari Photos/aplikasi lain harus langsung membuang
+            // petaknya dan pilihan "Delete from Device" yang sudah tidak sah.
+            .onChange(of: LocalPhotoLibrary.shared.revision) { _, _ in
+                Task { await load() }
+            }
     }
 
     private var subtitle: String? {

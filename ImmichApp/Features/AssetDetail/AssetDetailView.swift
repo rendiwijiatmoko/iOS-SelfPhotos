@@ -186,6 +186,14 @@ struct AssetDetailView: View {
             .onAppear { OfflineBannerSuppression.shared.begin() }
             .onDisappear { OfflineBannerSuppression.shared.end() }
             .task { await start() }
+            // Memaksa toolbar mengevaluasi ulang keberadaan salinan lokal saat
+            // PhotoKit berubah. Sekaligus tutup dialog yang keburu terbuka bila
+            // asetnya dihapus dari tempat lain.
+            .onChange(of: LocalPhotoLibrary.shared.revision) { _, _ in
+                if !DeviceCopyDeletion.hasDeviceCopy(for: currentAsset) {
+                    showRemoveDeviceConfirm = false
+                }
+            }
             // Untuk pemanggil yang mendorong lewat navigationDestination
             // (People, Album) — jalur fullScreenCover menolaknya di akar scene
             // yang dipresentasikan, lihat TimelineView dan SearchResultsGrid.
@@ -936,7 +944,10 @@ struct AssetDetailView: View {
                 }
             }
 
-            if currentAsset.isOnDevice {
+            // Jangan percaya `origin` saja. Foto bisa sudah dihapus lewat
+            // Photos/aplikasi lain sementara halaman detail masih memegang
+            // snapshot `.both` yang lama.
+            if DeviceCopyDeletion.hasDeviceCopy(for: currentAsset) {
                 Divider()
                 Button(role: .destructive) {
                     showRemoveDeviceConfirm = true

@@ -7,16 +7,37 @@ import SwiftUI
 /// tempat berarti tiga kesempatan untuk menyimpang. Yang paling mudah menyimpang
 /// justru bagian yang paling berbahaya: SIAPA yang boleh dihapus.
 enum DeviceCopyDeletion {
+    /// Mengecek salinan yang benar-benar masih dikenal PhotoKit.
+    ///
+    /// `origin` dan `BackupRecord` adalah cache untuk menggambar cepat. Keduanya
+    /// dapat tertinggal ketika foto dihapus dari Photos atau aplikasi lain, jadi
+    /// tidak boleh menjadi satu-satunya dasar untuk menawarkan aksi destruktif.
+    @MainActor
+    static func hasDeviceCopy(for asset: AssetLite) -> Bool {
+        guard asset.isOnDevice else { return false }
+
+        let localID: String?
+        if LocalPhotoLibrary.isLocal(asset.id) {
+            localID = LocalPhotoLibrary.localIdentifier(from: asset.id)
+        } else {
+            localID = SwiftDataManager.shared.localIdentifier(forServerAsset: asset.id)
+        }
+
+        guard let localID else { return false }
+        return LocalPhotoLibrary.assetExists(localID)
+    }
+
     /// nil kalau foto ini tidak boleh dihapus dari perangkat.
     ///
     /// Hanya untuk yang ada di DUA tempat. Foto yang cuma ada di perangkat
     /// dihapus lewat "Delete" biasa — menawarkannya di sini akan membuat
     /// penghapusan satu-satunya salinan terlihat seperti pembersihan ruang
     /// penyimpanan.
+    @MainActor
     static func menuAction(
         for asset: AssetLite, request: @escaping (String) -> Void
     ) -> PhotoGridMenuAction? {
-        guard asset.origin == .both else { return nil }
+        guard asset.origin == .both, hasDeviceCopy(for: asset) else { return nil }
         return PhotoGridMenuAction(
             title: String(localized: "Delete from Device"),
             systemImage: "iphone.slash",
