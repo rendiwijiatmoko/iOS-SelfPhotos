@@ -230,7 +230,9 @@ final class BackupService {
                 _ = try queue.bind(to: owner)
             }
             try queue.releaseAuthenticationWaits()
-            applyQueueSnapshot()
+            // Notifikasi terminal ditunda sampai failure lama sempat divalidasi
+            // terhadap PhotoKit oleh `prepare()`/restore lifecycle.
+            applyQueueSnapshot(notify: false)
         } catch {
             lastError = error.localizedDescription
             acceptsUploadResults = false
@@ -257,6 +259,7 @@ final class BackupService {
             lastError = error.localizedDescription
             acceptsUploadResults = false
         }
+        await pruneUnavailableFailures()
         applyQueueSnapshot()
     }
 
@@ -355,7 +358,35 @@ final class BackupService {
         // sudah menyala sejak versi sebelumnya tidak pernah memicu dialognya.
         await BackupNotifier.shared.ensureAuthorization(prompt: isEnabled)
         await LocalPhotoLibrary.shared.load()
+        await pruneUnavailableFailures()
         refreshCounts()
+    }
+
+    /// Membersihkan record gagal dari versi sebelumnya ketika aset sumbernya
+    /// sudah tidak dapat ditemukan lagi oleh PhotoKit. Hanya item `.failed`
+    /// yang disentuh: transfer aktif dan item yang masih menunggu iCloud tidak
+    /// boleh dianggap hilang hanya karena berkas aslinya belum tersedia lokal.
+    private func pruneUnavailableFailures() async {
+        guard LocalPhotoLibrary.hasReadAccess else { return }
+        let failedIDs = queue.failedIDs
+        guard !failedIDs.isEmpty else { return }
+
+        let existingIDs = await Task.detached(priority: .utility) {
+            LocalPhotoLibrary.existingLocalIdentifiers(failedIDs)
+        }.value
+        let unavailableIDs = Set(failedIDs).subtracting(existingIDs)
+        guard !unavailableIDs.isEmpty else { return }
+
+        do {
+            try queue.discard(unavailableIDs)
+            // Banner lama mungkin masih memuat hitungan sebelum pembersihan.
+            // Snapshot berikutnya akan menerbitkan hasil baru bila memang masih
+            // ada hasil terminal yang belum pernah diberitahukan.
+            BackupNotifier.shared.clearCompletion()
+            applyQueueSnapshot()
+        } catch {
+            lastError = error.localizedDescription
+        }
     }
 
     // MARK: - Unggah
@@ -667,9 +698,10 @@ final class BackupService {
             } else if let restored = await LocalPhotoLibrary.shared.photoMetadata(for: item.id) {
                 photos.append(restored)
             } else {
-                try? queue.markFailed(
-                    item.id,
-                    error: String(localized: "This asset is no longer available on the device."))
+                // Tidak ada lagi sumber yang dapat di-retry. Menyimpannya
+                // sebagai failure hanya membuat daftar dan notifikasi terus
+                // menghitung foto yang sudah dihapus pengguna.
+                try? queue.discard(item.id)
             }
         }
         applyQueueSnapshot()
@@ -964,7 +996,17 @@ final class BackupService {
                 return
             }
             guard let photo = await LocalPhotoLibrary.shared.photoMetadata(
-                for: localIdentifier), photo.isLivePhoto else {
+                for: localIdentifier) else {
+                try? queue.discard(localIdentifier)
+                pendingPhotos[localIdentifier] = nil
+                uploadProgressByID[localIdentifier] = nil
+                applyQueueSnapshot()
+                if remainingBackgroundTasks == 0 && enqueueDepth == 0 {
+                    finishRunIfSettled()
+                }
+                return
+            }
+            guard photo.isLivePhoto else {
                 finishUpload(
                     localIdentifier: localIdentifier,
                     checksum: motionChecksum,
@@ -1141,7 +1183,7 @@ final class BackupService {
             case .authenticationRequired:
                 handleAuthenticationRequired()
             case .permanent:
-                try? queue.markFailed(
+                markFailedIfAssetStillExists(
                     localIdentifier,
                     error: error.localizedDescription)
             }
@@ -1195,7 +1237,20 @@ final class BackupService {
         case .authenticationRequired:
             handleAuthenticationRequired()
         case .permanent:
-            try? queue.markFailed(localIdentifier, error: error.localizedDescription)
+            markFailedIfAssetStillExists(
+                localIdentifier,
+                error: error.localizedDescription)
+        }
+    }
+
+    /// Kegagalan permanen hanya berguna bila pengguna masih punya aset yang
+    /// dapat diperbaiki atau dicoba ulang. Jika fotonya sudah dihapus, record
+    /// queue juga dibuang agar tidak menjadi failure abadi.
+    private func markFailedIfAssetStillExists(_ localIdentifier: String, error: String) {
+        if LocalPhotoLibrary.assetExists(localIdentifier) {
+            try? queue.markFailed(localIdentifier, error: error)
+        } else {
+            try? queue.discard(localIdentifier)
         }
     }
 

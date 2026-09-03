@@ -128,6 +128,27 @@ final class BackgroundUploadQueueTests: XCTestCase {
         XCTAssertEqual(restored.snapshot.queued, 1)
     }
 
+    func testUnavailableFailuresAreDiscardedAsOnePersistedCleanup() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let queue = BackupQueueStore(fileURL: fixture.queueURL)
+        try queue.enqueue(["deleted-a", "deleted-b", "real-failure"])
+        try queue.markFailed("deleted-a", error: "asset unavailable")
+        try queue.markFailed("deleted-b", error: "asset unavailable")
+        try queue.markFailed("real-failure", error: "server rejected asset")
+
+        let removed = try queue.discard(Set(["deleted-a", "deleted-b"]))
+
+        XCTAssertEqual(removed, 2)
+        XCTAssertEqual(queue.failedIDs, ["real-failure"])
+        XCTAssertEqual(queue.snapshot.failed, 1)
+
+        let restored = BackupQueueStore(fileURL: fixture.queueURL)
+        XCTAssertEqual(restored.failedIDs, ["real-failure"])
+        XCTAssertNil(restored.item(id: "deleted-a"))
+        XCTAssertNil(restored.item(id: "deleted-b"))
+    }
+
     func testStalePreparingItemBecomesRetryInsteadOfHangingForever() throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }

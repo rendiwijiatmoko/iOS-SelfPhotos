@@ -387,6 +387,20 @@ final class BackupQueueStore {
         try persist()
     }
 
+    /// Menghapus beberapa record sekaligus dengan satu penulisan atomik.
+    /// Dipakai saat PhotoKit melaporkan bahwa sekumpulan kegagalan lama sudah
+    /// tidak punya aset sumber, supaya daftar dan hitungan notifikasi langsung
+    /// bersih tanpa menulis ledger satu kali untuk setiap foto.
+    @discardableResult
+    func discard(_ ids: Set<String>) throws -> Int {
+        guard !ids.isEmpty else { return 0 }
+        let previousCount = ledger.items.count
+        ledger.items.removeAll { ids.contains($0.id) }
+        let removedCount = previousCount - ledger.items.count
+        if removedCount > 0 { try persist() }
+        return removedCount
+    }
+
     func releaseNetworkWaits(now: Date = .now) throws {
         var changed = false
         for index in ledger.items.indices

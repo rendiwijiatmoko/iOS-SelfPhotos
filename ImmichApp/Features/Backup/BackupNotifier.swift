@@ -197,6 +197,14 @@ final class BackupNotifier: NSObject {
         center.removePendingNotificationRequests(withIdentifiers: [Self.progressID])
     }
 
+    /// Menghapus hasil terminal yang sudah tidak sesuai dengan ledger, misalnya
+    /// setelah kegagalan untuk foto yang telah dihapus dibersihkan dari queue.
+    func clearCompletion() {
+        let center = UNUserNotificationCenter.current()
+        center.removeDeliveredNotifications(withIdentifiers: [Self.completionID])
+        center.removePendingNotificationRequests(withIdentifiers: [Self.completionID])
+    }
+
     /// Trigger `nil` berarti SEKARANG. Identifier yang sama menimpa yang lama,
     /// jadi yang tersisa di pusat pemberitahuan selalu satu baris, bukan riwayat.
     private func add(_ content: UNMutableNotificationContent, id: String) {

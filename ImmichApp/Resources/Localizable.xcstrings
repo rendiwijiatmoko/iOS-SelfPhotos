@@ -97488,6 +97488,7 @@
       }
     },
     "This asset is no longer available on the device." : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {

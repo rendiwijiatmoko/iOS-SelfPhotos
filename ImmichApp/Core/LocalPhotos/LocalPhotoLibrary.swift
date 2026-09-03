@@ -143,6 +143,14 @@ final class LocalPhotoLibrary: NSObject {
 
     private(set) var photos: [LocalPhoto] = []
     private(set) var isAuthorized = false
+
+    /// Status langsung dari PhotoKit, termasuk saat singleton baru dibuat dan
+    /// `requestAccess()` belum sempat memperbarui state observasinya.
+    nonisolated static var hasReadAccess: Bool {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        return status == .authorized || status == .limited
+    }
+
     /// Bertambah setiap kali PhotoKit memberi tahu bahwa pustaka berubah.
     ///
     /// Tidak semua perubahan mengubah jumlah `photos` (satu foto bisa hilang
