@@ -45,6 +45,34 @@ struct SyncAssetV1DTO: Decodable {
     let deletedAt: Date?
 }
 
+/// Payload yang dipakai server Immich v3 untuk `AssetsV2`.
+///
+/// Bentuknya hampir sama dengan V1, tetapi `duration` berubah dari clock string
+/// menjadi integer milidetik. DTO terpisah membuat satu video tidak dapat
+/// menggagalkan decoding seluruh stream karena perbedaan tipe tersebut.
+struct SyncAssetV2DTO: Decodable {
+    let id: String
+    let ownerId: String
+    let originalFileName: String
+    let checksum: String
+    let type: String
+    let visibility: String
+    let isFavorite: Bool
+    let thumbhash: String?
+    let width: Int?
+    let height: Int?
+    let duration: Int?
+    let stackId: String?
+    let libraryId: String?
+    let livePhotoVideoId: String?
+    let fileCreatedAt: Date?
+    let fileModifiedAt: Date?
+    let createdAt: Date?
+    let localDateTime: Date?
+    let deletedAt: Date?
+    let isEdited: Bool
+}
+
 struct SyncAssetDeleteV1DTO: Decodable {
     let assetId: String
 }

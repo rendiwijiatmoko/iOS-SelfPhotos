@@ -105,8 +105,12 @@ final class SyncViewModel {
                 try await repo.deltaSync()
             }
             lastSyncTime = Date()
+            syncProgress = "Sync complete"
         } catch {
-            // Silently fail for background sync
+            // Jangan hilangkan diagnosis lagi. Layar status sync dan log state
+            // kini dapat menunjukkan penyebab sebenarnya bila kontrak server,
+            // autentikasi, atau jaringan berubah.
+            syncProgress = "Sync failed: \(error.localizedDescription)"
         }
     }
 

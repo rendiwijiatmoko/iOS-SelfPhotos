@@ -70,11 +70,25 @@ class SyncRepository {
 
     @MainActor
     private func streamAndApply(reset: Bool) async throws -> StreamOutcome {
-        var request = SyncStreamRequestDTO(types: ["AssetsV1"])
+        // Immich v3 mempertahankan nama request AssetsV1 di enum, tetapi
+        // handler server-nya sengaja selalu membalas 400 karena sudah
+        // deprecated. Aplikasi sebelumnya tetap memintanya, lalu background
+        // sync menelan error tersebut sehingga cache tampak sekadar tidak
+        // berubah. Untuk sesi cold-start versi server belum tentu selesai
+        // dipulihkan, jadi baca endpoint versi sebagai fallback.
+        let serverMajor: Int
+        if let compatibility = api.session.serverCompatibility {
+            serverMajor = compatibility.version.major
+        } else {
+            serverMajor = try await api.session.serverVersion().major
+        }
+
+        let requestType = serverMajor >= 3 ? "AssetsV2" : "AssetsV1"
+        var request = SyncStreamRequestDTO(types: [requestType])
         if reset { request.reset = true }
 
         var outcome = StreamOutcome()
-        var upserts: [SyncAssetV1DTO] = []
+        var upserts: [CachedAsset] = []
         var deletes: [String] = []
 
         let lines = try await api.streamLines(.json("/sync/stream", method: .post, body: request))
@@ -97,7 +111,18 @@ class SyncRepository {
                 } else {
                     // Restore dari klien lain datang lagi sebagai AssetV1 aktif.
                     DeletedServerAssetRegistry.shared.restore([asset.id])
-                    upserts.append(asset)
+                    upserts.append(makeCachedAsset(asset))
+                }
+            case "AssetV2":
+                let asset = try JSONDecoder.immich.decode(
+                    SyncLineDataDTO<SyncAssetV2DTO>.self, from: data).data
+                if asset.deletedAt != nil {
+                    DeletedServerAssetRegistry.shared.record(
+                        [asset.id], permanently: false)
+                    deletes.append(asset.id)
+                } else {
+                    DeletedServerAssetRegistry.shared.restore([asset.id])
+                    upserts.append(makeCachedAsset(asset))
                 }
             case "AssetDeleteV1":
                 let payload = try JSONDecoder.immich.decode(
@@ -127,14 +152,14 @@ class SyncRepository {
 
     @MainActor
     private func flush(
-        _ upserts: inout [SyncAssetV1DTO],
+        _ upserts: inout [CachedAsset],
         _ deletes: inout [String],
         isFullReset: Bool
     ) async throws {
         guard !upserts.isEmpty || !deletes.isEmpty else { return }
 
         try dataManager.applySyncBatch(
-            upserts: upserts.map(makeCachedAsset),
+            upserts: upserts,
             deletedIds: deletes,
             isFullReset: isFullReset)
 
@@ -145,15 +170,62 @@ class SyncRepository {
 
     @MainActor
     private func makeCachedAsset(_ dto: SyncAssetV1DTO) -> CachedAsset {
+        makeCachedAsset(
+            id: dto.id,
+            type: dto.type,
+            visibility: dto.visibility,
+            isFavorite: dto.isFavorite,
+            duration: ClockDuration.seconds(fromClock: dto.duration),
+            livePhotoVideoId: dto.livePhotoVideoId,
+            fileCreatedAt: dto.fileCreatedAt,
+            localDateTime: dto.localDateTime,
+            fileModifiedAt: dto.fileModifiedAt,
+            width: dto.width,
+            height: dto.height,
+            thumbhash: dto.thumbhash)
+    }
+
+    @MainActor
+    private func makeCachedAsset(_ dto: SyncAssetV2DTO) -> CachedAsset {
+        makeCachedAsset(
+            id: dto.id,
+            type: dto.type,
+            visibility: dto.visibility,
+            isFavorite: dto.isFavorite,
+            duration: dto.duration.map { Double($0) / 1_000 },
+            livePhotoVideoId: dto.livePhotoVideoId,
+            fileCreatedAt: dto.fileCreatedAt,
+            localDateTime: dto.localDateTime,
+            fileModifiedAt: dto.fileModifiedAt,
+            width: dto.width,
+            height: dto.height,
+            thumbhash: dto.thumbhash)
+    }
+
+    @MainActor
+    private func makeCachedAsset(
+        id: String,
+        type: String,
+        visibility: String,
+        isFavorite: Bool,
+        duration: Double?,
+        livePhotoVideoId: String?,
+        fileCreatedAt: Date?,
+        localDateTime: Date?,
+        fileModifiedAt: Date?,
+        width: Int?,
+        height: Int?,
+        thumbhash: String?
+    ) -> CachedAsset {
         var ratio: Double?
-        if let w = dto.width, let h = dto.height, w > 0, h > 0 {
+        if let w = width, let h = height, w > 0, h > 0 {
             ratio = Double(w) / Double(h)
         }
         return CachedAsset(
-            id: dto.id,
-            assetId: dto.id,
-            type: dto.type,
-            isFavorite: dto.isFavorite,
+            id: id,
+            assetId: id,
+            type: type,
+            isFavorite: isFavorite,
             // Yang boleh tampil di linimasa HANYA `timeline`.
             //
             // Immich punya empat nilai visibility: `timeline`, `archive`,
@@ -167,13 +239,13 @@ class SyncRepository {
             // di sisi kita: "jangan tampilkan di linimasa". Layar Archived dan
             // Locked Folder tidak membacanya — keduanya bertanya langsung ke
             // endpoint pencarian dengan visibility masing-masing.
-            isArchived: dto.visibility != "timeline",
-            duration: ClockDuration.seconds(fromClock: dto.duration),
-            livePhotoVideoId: dto.livePhotoVideoId,
-            createdAt: dto.fileCreatedAt ?? dto.localDateTime ?? Date(),
-            updatedAt: dto.fileModifiedAt ?? Date(),
+            isArchived: visibility != "timeline",
+            duration: duration,
+            livePhotoVideoId: livePhotoVideoId,
+            createdAt: fileCreatedAt ?? localDateTime ?? Date(),
+            updatedAt: fileModifiedAt ?? Date(),
             ratio: ratio,
-            thumbhash: dto.thumbhash
+            thumbhash: thumbhash
         )
     }
 }

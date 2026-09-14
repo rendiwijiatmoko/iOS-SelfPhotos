@@ -542,6 +542,47 @@ final class DTODecodingTests: XCTestCase {
         XCTAssertEqual(payload.assetId, "9a8b7c6d-0000-0000-0000-000000000001")
     }
 
+    func testSyncAssetV2LineDecodingUsesMillisecondDuration() throws {
+        let line = """
+        {
+            "type": "AssetV2",
+            "data": {
+                "id": "9a8b7c6d-0000-0000-0000-000000000001",
+                "ownerId": "9a8b7c6d-0000-0000-0000-000000000002",
+                "originalFileName": "IMG_0001.MOV",
+                "checksum": "sVUzS8bZ0dJIeYVPH3EqFw7VNBM=",
+                "type": "VIDEO",
+                "visibility": "timeline",
+                "isFavorite": false,
+                "thumbhash": null,
+                "width": 1920,
+                "height": 1080,
+                "duration": 95450,
+                "stackId": null,
+                "libraryId": null,
+                "livePhotoVideoId": null,
+                "fileCreatedAt": "2024-01-01T12:00:00.000Z",
+                "fileModifiedAt": "2024-01-02T12:00:00.000Z",
+                "createdAt": "2024-01-02T12:00:00.000Z",
+                "localDateTime": "2024-01-01T19:00:00.000Z",
+                "deletedAt": null,
+                "isEdited": false
+            },
+            "ack": "AssetV2|0189f0f0-0000-7000-8000-000000000000"
+        }
+        """
+        let data = try XCTUnwrap(line.data(using: .utf8))
+
+        let envelope = try decoder.decode(SyncLineEnvelopeDTO.self, from: data)
+        XCTAssertEqual(envelope.type, "AssetV2")
+
+        let payload = try decoder.decode(
+            SyncLineDataDTO<SyncAssetV2DTO>.self, from: data).data
+        XCTAssertEqual(payload.duration, 95_450)
+        XCTAssertEqual(Double(payload.duration!) / 1_000, 95.45, accuracy: 0.001)
+        XCTAssertFalse(payload.isEdited)
+    }
+
     func testSyncStreamRequestEncoding() throws {
         let body = SyncStreamRequestDTO(types: ["AssetV1", "AssetDeleteV1"])
         let json = try JSONSerialization.jsonObject(with: JSONEncoder.immich.encode(body)) as? [String: Any]

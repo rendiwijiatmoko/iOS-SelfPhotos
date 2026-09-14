@@ -22,6 +22,8 @@ struct TimelineView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     /// Linimasa merender dari hasil sync, jadi ia perlu tahu kapan sync selesai.
     @Environment(SyncViewModel.self) private var syncVM: SyncViewModel?
+    /// Dipakai bersama aksesori inline milik tab bar.
+    @Environment(TimelineNavigationState.self) private var timelineNavigation
     @State private var vm: TimelineViewModel?
     @State private var shareFileURL: URL?
     @State private var isSharePresented = false
@@ -30,9 +32,9 @@ struct TimelineView: View {
     /// Aset yang sedang dipilihkan album lewat sheet.
     @State private var showSettings = false
     @State private var albumPickerAsset: AssetLite?
-    @State private var isSelecting = false
     @State private var selectedIDs: Set<String> = []
     @State private var isPreparingSelectionShare = false
+    @State private var isRemovingDeviceSelection = false
     @State private var selectionShareURLs: [URL] = []
     @State private var isSelectionSharePresented = false
     /// Naik satu setiap penghapusan yang dikonfirmasi server.
@@ -56,11 +58,23 @@ struct TimelineView: View {
     /// Pegangan ke controller grid, untuk perintah yang datang dari luar —
     /// ketukan kedua tab Photos, misalnya.
     @State private var gridController: PhotoGridController?
+    /// Mencegah dua kartu memulai penerbangan ke grid secara bersamaan.
+    @State private var isPeriodZooming = false
     /// Grid pembuka tidak boleh memperlihatkan cache lama sesaat sebelum sync
     /// menambahkan aset terbaru dan memindahkannya lagi ke bawah.
     @State private var initialNewestContentReady = false
     @State private var isFinishingInitialTimelineLoad = false
     @State private var backupSetupJourney = BackupSetupJourney.shared
+
+    /// Mode pilih dibagi dengan AppRouter karena picker compact iPhone hidup
+    /// sebagai overlay di luar TimelineView.
+    private var isSelecting: Bool { timelineNavigation.isSelecting }
+
+    private var isSelectingBinding: Binding<Bool> {
+        Binding(
+            get: { timelineNavigation.isSelecting },
+            set: { timelineNavigation.setSelecting($0) })
+    }
 
     var body: some View {
         NavigationStack {
@@ -72,10 +86,27 @@ struct TimelineView: View {
                 // (lihat `timelineToolbar`), karena item toolbar tidak pernah
                 // menyusut atau berpindah ke tengah saat di-scroll.
                 .toolbar { timelineToolbar }
+                // Years dan Months adalah navigator visual penuh. Sembunyikan
+                // navigation bar-nya sebagai satu kesatuan agar judul, Select,
+                // dan Profile hilang sekaligus tanpa menyisakan ruang kosong.
+                .toolbar(
+                    timelineNavigation.mode == .all ? .visible : .hidden,
+                    for: .navigationBar)
                 // Tab bar diganti bottom bar selama memilih, supaya aksi
                 // seleksi menempati tempat yang sama.
                 .toolbar(isSelecting ? .hidden : .automatic, for: .tabBar)
                 .toolbar(isSelecting ? .visible : .hidden, for: .bottomBar)
+        }
+        .overlay(alignment: .bottom) {
+            if horizontalSizeClass == .regular, !isSelecting {
+                TimelineModePicker(
+                    navigation: timelineNavigation,
+                    allTitle: "All Photos")
+                    .controlSize(.large)
+                    .frame(width: 480)
+                    .glassEffect(.regular, in: .capsule)
+                    .padding(.bottom, 18)
+            }
         }
         .sheet(isPresented: $showSettings) { settingsSheet }
         .onChange(of: showSettings) { _, isPresented in
@@ -251,7 +282,7 @@ struct TimelineView: View {
                 } else if vm.sections.isEmpty {
                     emptyState
                 } else {
-                    timelineGrid(vm)
+                    timelineContent(vm)
                 }
 
             case .failed(let error):
@@ -262,6 +293,38 @@ struct TimelineView: View {
             // Satu frame kosong jauh lebih tenang daripada spinner yang berkedip
             // dan langsung hilang.
             Color.clear
+        }
+    }
+
+    /// Grid All dipertahankan hidup di belakang navigator Months/Years.
+    ///
+    /// Dengan begitu memilih satu kartu dapat memindahkan UICollectionView ke
+    /// tujuan lebih dulu, lalu memperlihatkannya — tanpa membangun ulang puluhan
+    /// ribu item dan tanpa satu frame di posisi lama.
+    private func timelineContent(_ vm: TimelineViewModel) -> some View {
+        ZStack {
+            timelineGrid(vm)
+                .opacity(timelineNavigation.mode == .all ? 1 : 0)
+                .allowsHitTesting(timelineNavigation.mode == .all)
+                .accessibilityHidden(timelineNavigation.mode != .all)
+
+            if timelineNavigation.mode != .all {
+                TimelineNavigatorView(
+                    mode: timelineNavigation.mode,
+                    items: timelineNavigation.mode == .years
+                        ? vm.yearNavigationItems
+                        : vm.monthNavigationItems,
+                    returnToNewestRequest: timelineNavigation.returnToNewestRequest,
+                    onSelect: jumpToPeriod)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: timelineNavigation.mode)
+        // Mengetuk ulang All membawa grid ke foto terbaru. Gerakan menuju batas
+        // bawah ini sekaligus mengembalikan tab bar native ke bentuk normal.
+        .onChange(of: timelineNavigation.returnToNewestRequest) { _, _ in
+            guard timelineNavigation.mode == .all else { return }
+            gridController?.scrollToNewest(animated: true)
         }
     }
 
@@ -282,7 +345,7 @@ struct TimelineView: View {
                 // Linimasa dibaca dari bawah, jadi baris bolongnya ditaruh di
                 // puncak — tempat yang hampir tidak pernah dilihat.
                 padsFirstRow: true),
-            isSelecting: $isSelecting,
+            isSelecting: isSelectingBinding,
             selectedIDs: $selectedIDs,
             detailScreen: { id in detailScreen(for: id, vm) },
             onVisibleSectionChanged: { monthTracker.show($0) },
@@ -309,6 +372,56 @@ struct TimelineView: View {
         // menahan baris pertama di bawah bar, jadi tidak ada foto yang tertutup —
         // yang berubah cuma: sekarang foto lewat di belakangnya saat digulir.
         .ignoresSafeArea(edges: [.top, .bottom])
+    }
+
+    /// Posisikan grid yang masih hidup lebih dulu, baru buka kembali mode All.
+    private func jumpToPeriod(
+        _ item: TimelineNavigationItem,
+        sourceFrame: CGRect
+    ) {
+        guard !isPeriodZooming,
+              sourceFrame.width > 1,
+              sourceFrame.height > 1,
+              let gridController,
+              gridController.scrollToAsset(
+                  id: item.targetAssetID,
+                  animated: false),
+              let destination = gridController.zoomSource(
+                  for: item.targetAssetID),
+              let image = destination.image,
+              let window = gridController.view.window
+        else {
+            gridController?.scrollToAsset(
+                id: item.targetAssetID,
+                animated: false)
+            timelineNavigation.mode = .all
+            return
+        }
+
+        isPeriodZooming = true
+        gridController.setZoomSourceHidden(true, for: item.targetAssetID)
+
+        // Kartu asal langsung diganti grid, tetapi satu gambar terbang menutup
+        // pergantian itu. Animasi opacity mode dimatikan supaya tidak ada dua
+        // transisi yang berebut atas gambar yang sama.
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            timelineNavigation.mode = .all
+        }
+
+        animatePhotoMatchZoom(
+            image: image,
+            fromScreenFrame: sourceFrame,
+            toScreenFrame: destination.frame,
+            in: window,
+            sourceCornerRadius: 18
+        ) {
+            gridController.setZoomSourceHidden(
+                false,
+                for: item.targetAssetID)
+            isPeriodZooming = false
+        }
     }
 
     /// Membaca hasil sync sekali lagi sebelum grid pembuka ditampilkan. Aman
@@ -410,7 +523,7 @@ struct TimelineView: View {
                 if isSelecting {
                     exitSelection()
                 } else {
-                    isSelecting = true
+                    timelineNavigation.setSelecting(true)
                 }
             }
         } label: {
@@ -433,7 +546,12 @@ struct TimelineView: View {
             Text("Photos")
                 .font(.largeTitle.bold())
 
-            VisibleMonthLabel(tracker: monthTracker)
+            if timelineNavigation.mode == .all {
+                VisibleMonthLabel(tracker: monthTracker)
+            } else {
+                Text(timelineNavigation.mode.title)
+                    .font(.headline.bold())
+            }
         }
         .lineLimit(1)
         // WAJIB: tanpa ini toolbar menyempitkan item sampai selebar ikon dan
@@ -498,16 +616,20 @@ struct TimelineView: View {
                 .sharedBackgroundVisibility(.hidden)
         }
 
-        ToolbarItem(placement: .topBarTrailing) { selectButton }
-        if !isSelecting {
-            ToolbarItem(placement: .topBarTrailing) {
-                JourneyProfileButton(isActive: isActive) {
-                    showSettings = true
+        // Pada iPad bar tetap terlihat di Years/Months supaya segmented control
+        // dapat dipakai, tetapi aksi milik grid All tidak ikut ditampilkan.
+        if timelineNavigation.mode == .all {
+            ToolbarItem(placement: .topBarTrailing) { selectButton }
+            if !isSelecting {
+                ToolbarItem(placement: .topBarTrailing) {
+                    JourneyProfileButton(isActive: isActive) {
+                        showSettings = true
+                    }
                 }
+                // Avatarnya sudah bulat penuh; kapsul kaca bawaan toolbar hanya
+                // menambah lingkaran kedua yang lebih besar di belakangnya.
+                .sharedBackgroundVisibility(.hidden)
             }
-            // Avatarnya sudah bulat penuh; kapsul kaca bawaan toolbar hanya
-            // menambah lingkaran kedua yang lebih besar di belakangnya.
-            .sharedBackgroundVisibility(.hidden)
         }
         if isSelecting {
             // Jumlahnya pindah ke bar ATAS: bar bawah sekarang penuh aksi, dan
@@ -522,8 +644,12 @@ struct TimelineView: View {
     /// Aksi mode pilih untuk linimasa.
     private var selectionActions: SelectionActions {
         let ids = Array(selectedIDs)
+        let selectedAssets = ids.compactMap { vm?.asset(for: $0) }
+        let localIDs = DeviceCopyDeletion.localIdentifiers(for: selectedAssets)
         var actions = SelectionActions()
-        actions.isBusy = isPreparingSelectionShare || selectedIDs.isEmpty
+        actions.isBusy = isPreparingSelectionShare
+            || isRemovingDeviceSelection
+            || selectedIDs.isEmpty
 
         actions.share = { shareSelection() }
         actions.favorite = {
@@ -556,7 +682,20 @@ struct TimelineView: View {
                 runSelection { await vm?.lockSelected(ids) }
             },
         ]
+        if !localIDs.isEmpty {
+            actions.menu.append(SelectionMenuAction(
+                title: removeFromDeviceTitle(localIDs.count),
+                systemImage: "iphone.slash",
+                isDestructive: true
+            ) {
+                removeSelectionFromDevice(localIDs)
+            })
+        }
         return actions
+    }
+
+    private func removeFromDeviceTitle(_ count: Int) -> LocalizedStringKey {
+        count == 1 ? "Remove 1 from Device" : "Remove \(count) from Device"
     }
 
     private func createSharedLink(for ids: [String]) {
@@ -605,7 +744,7 @@ struct TimelineView: View {
     // MARK: - Aksi seleksi
 
     private func exitSelection() {
-        isSelecting = false
+        timelineNavigation.setSelecting(false)
         selectedIDs.removeAll()
     }
 
@@ -616,6 +755,8 @@ struct TimelineView: View {
     /// salah — foto terbaru ada di bawah, sedangkan tarikan itu hanya bisa
     /// dilakukan dari puncak, tempat foto paling lama berada.
     private func returnToNewest(_ vm: TimelineViewModel) {
+        timelineNavigation.mode = .all
+
         // Beranimasi, bukan melompat: perpindahan sebesar ini tanpa gerakan
         // membuat pengguna kehilangan pegangan tentang ke mana ia baru saja
         // dibawa. Jaraknya ditempuh penuh; ongkosnya ditekan dengan
@@ -658,6 +799,25 @@ struct TimelineView: View {
             if await vm?.deleteSelected(ids) == true {
                 deleteFeedback += 1
             }
+            exitSelection()
+        }
+    }
+
+    private func removeSelectionFromDevice(_ localIDs: [String]) {
+        guard !localIDs.isEmpty, !isRemovingDeviceSelection else { return }
+        isRemovingDeviceSelection = true
+        Task {
+            let removed = await DeviceCopyDeletion.perform(
+                localIdentifiers: localIDs)
+            isRemovingDeviceSelection = false
+            guard removed > 0 else { return }
+
+            // Segera bangun ulang dari PhotoKit agar petak lokal hilang dan
+            // petak `.both` berubah menjadi server-only dalam snapshot yang
+            // sama. Observer Photos tetap menjadi pengaman bila perubahan
+            // datang dari luar aplikasi.
+            await vm?.reloadDevicePhotos()
+            deleteFeedback += 1
             exitSelection()
         }
     }
@@ -722,7 +882,164 @@ struct TimelineView: View {
     }
 }
 
+/// Navigator visual yang muncul saat Years atau Months dipilih.
+///
+/// Hanya satu kartu per periode yang hidup di sekitar layar berkat LazyVStack.
+/// Gambarnya sendiri tidak disimpan dalam state kartu; cache gambar global tetap
+/// menjadi satu-satunya pemilik bitmap sehingga menggulir ratusan bulan tidak
+/// menahan seluruh thumbnail di memori.
+private struct TimelineNavigatorView: View {
+    let mode: TimelineMode
+    let items: [TimelineNavigationItem]
+    let returnToNewestRequest: Int
+    let onSelect: (TimelineNavigationItem, CGRect) -> Void
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 34) {
+                    ForEach(items) { item in
+                        TimelineNavigatorButton(
+                            mode: mode,
+                            item: item,
+                            onSelect: onSelect)
+                            .id(item.id)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 24)
+            }
+            // Urutannya sama dengan All: paling lama di atas, paling baru di
+            // bawah. Mengetuk ulang segmen aktif kembali ke periode terbaru.
+            .defaultScrollAnchor(.bottom)
+            .background(Color(.systemBackground))
+            .onChange(of: returnToNewestRequest) { _, _ in
+                guard let newest = items.last else { return }
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    proxy.scrollTo(newest.id, anchor: .bottom)
+                }
+            }
+        }
+    }
+}
+
+private struct TimelineNavigatorButton: View {
+    let mode: TimelineMode
+    let item: TimelineNavigationItem
+    let onSelect: (TimelineNavigationItem, CGRect) -> Void
+
+    @State private var coverFrame = CGRect.zero
+
+    var body: some View {
+        Button {
+            onSelect(item, coverFrame)
+        } label: {
+            TimelineNavigatorCard(
+                mode: mode,
+                item: item,
+                coverFrame: $coverFrame)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(item.title)
+        .accessibilityHint("Show the first photo from this period")
+    }
+}
+
+private struct TimelineNavigatorCard: View {
+    let mode: TimelineMode
+    let item: TimelineNavigationItem
+    @Binding var coverFrame: CGRect
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            if mode == .months {
+                Text(item.title)
+                    .font(.title.bold())
+                    .foregroundStyle(.primary)
+            }
+
+            Color.clear
+                .aspectRatio(1.45, contentMode: .fit)
+                .overlay {
+                    TimelineNavigatorCover(asset: item.cover)
+                }
+                .clipShape(.rect(cornerRadius: 18))
+                .overlay(alignment: .topLeading) {
+                    Text(overlayTitle)
+                        .font(.title2.bold())
+                        .foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.55), radius: 3, y: 1)
+                        .padding(14)
+                }
+                .contentShape(.rect(cornerRadius: 18))
+                .onGeometryChange(for: CGRect.self) { proxy in
+                    proxy.frame(in: .global)
+                } action: { newFrame in
+                    if coverFrame != newFrame { coverFrame = newFrame }
+                }
+        }
+    }
+
+    private var overlayTitle: String {
+        if mode == .years { return item.title }
+        return String(Calendar.current.component(.day, from: item.cover.createdAt))
+    }
+}
+
+private struct TimelineNavigatorCover: View {
+    let asset: AssetLite
+
+    @Environment(SessionManager.self) private var session
+    @State private var revision = 0
+
+    var body: some View {
+        let image = displayedImage(revision: revision)
+
+        ZStack(alignment: .bottomTrailing) {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Color(.tertiarySystemFill)
+                    .overlay {
+                        Image(systemName: "photo")
+                            .font(.title)
+                            .foregroundStyle(.secondary)
+                    }
+            }
+
+            if asset.isVideo {
+                Image(systemName: "play.fill")
+                    .font(.caption.bold())
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .background(.black.opacity(0.55), in: .circle)
+                    .padding(10)
+            }
+        }
+        .clipped()
+        .task(id: asset.id) {
+            let loader = PhotoThumbnailLoader(session: session)
+            guard loader.cachedImage(for: asset.id) == nil else { return }
+            _ = await loader.image(for: asset.id)
+            revision &+= 1
+        }
+    }
+
+    /// `revision` sengaja menjadi parameter supaya pembacaannya tercatat oleh
+    /// SwiftUI walaupun bitmap sebenarnya selalu dibaca dari cache terbatas.
+    private func displayedImage(revision: Int) -> UIImage? {
+        ImageMemoryCache.shared.image(
+            for: ImageCache.memoryKey(
+                "\(asset.id)-thumbnail",
+                PhotoThumbnailLoader.maxPixelSize))
+            ?? ThumbHash.placeholder(for: asset.thumbhash)
+    }
+}
+
 #Preview {
     TimelineView()
         .environment(SessionManager())
+        .environment(TimelineNavigationState())
 }

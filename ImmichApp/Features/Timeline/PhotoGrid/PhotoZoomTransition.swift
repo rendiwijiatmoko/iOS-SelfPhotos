@@ -1,5 +1,58 @@
 import UIKit
 
+/// Menjembatani perpindahan gambar antara view SwiftUI dan sel UIKit.
+///
+/// `matchedGeometryEffect` hanya dapat mencocokkan dua view SwiftUI dalam
+/// namespace yang sama. Navigator periode berisi SwiftUI, sedangkan grid utama
+/// adalah `UICollectionView`, jadi satu image view sementara dipakai sebagai
+/// representasi bersama keduanya.
+@MainActor
+func animatePhotoMatchZoom(
+    image: UIImage,
+    fromScreenFrame: CGRect,
+    toScreenFrame: CGRect,
+    in window: UIWindow,
+    sourceCornerRadius: CGFloat,
+    completion: @escaping () -> Void
+) {
+    guard fromScreenFrame.width > 1,
+          fromScreenFrame.height > 1,
+          toScreenFrame.width > 1,
+          toScreenFrame.height > 1
+    else {
+        completion()
+        return
+    }
+
+    let flying = UIImageView(image: image)
+    flying.contentMode = .scaleAspectFill
+    flying.clipsToBounds = true
+    flying.frame = window.convert(fromScreenFrame, from: nil)
+    flying.layer.cornerRadius = sourceCornerRadius
+    flying.isUserInteractionEnabled = false
+    window.addSubview(flying)
+
+    let destination = window.convert(toScreenFrame, from: nil)
+
+    // Mulai pada run loop berikutnya agar SwiftUI sempat menukar navigator
+    // dengan grid di belakang gambar yang masih diam di frame asal.
+    DispatchQueue.main.async {
+        UIView.animate(
+            withDuration: 0.42,
+            delay: 0,
+            usingSpringWithDamping: 0.86,
+            initialSpringVelocity: 0,
+            options: [.beginFromCurrentState, .allowUserInteraction]
+        ) {
+            flying.frame = destination
+            flying.layer.cornerRadius = 0
+        } completion: { _ in
+            flying.removeFromSuperview()
+            completion()
+        }
+    }
+}
+
 /// Penanda scroll view yang memegang foto di layar detail.
 ///
 /// Transisi perlu kotak AKHIR fotonya, dan menebaknya dari ukuran layar tidak

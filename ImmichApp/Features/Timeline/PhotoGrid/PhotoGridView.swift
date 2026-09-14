@@ -1075,6 +1075,44 @@ final class PhotoGridController: UIViewController {
             animated: false)
     }
 
+    /// Melompat langsung ke sebuah aset tanpa melewati setiap thumbnail di
+    /// antaranya. Dipakai kartu Months dan Years untuk membuka foto pertama
+    /// periodenya di mode All.
+    @discardableResult
+    func scrollToAsset(id: String, animated: Bool) -> Bool {
+        guard isViewLoaded else { return false }
+
+        // Hentikan deselerasi/animasi lama sebelum membaca index path. Snapshot
+        // yang tertahan selama gulir juga harus dipasang lebih dulu agar tujuan
+        // dicari pada daftar terbaru.
+        collectionView.setContentOffset(collectionView.contentOffset, animated: false)
+        endReturnLink()
+        finishReturningToNewest(settle: false)
+        isScrolling = false
+        flushPendingSnapshot()
+
+        guard let path = dataSource?.indexPath(for: id) else { return false }
+
+        isAnchoredToNewest = false
+        lastReportedSection = nil
+        collectionView.layoutIfNeeded()
+
+        guard let attributes = collectionView.layoutAttributesForItem(at: path)
+        else { return false }
+
+        let lowest = -collectionView.adjustedContentInset.top
+        let destination = min(
+            max(attributes.frame.minY - collectionView.adjustedContentInset.top, lowest),
+            maxContentOffsetY())
+
+        isScrolling = animated
+        collectionView.setContentOffset(
+            CGPoint(x: collectionView.contentOffset.x, y: destination),
+            animated: animated)
+        if !animated { settleScrolling() }
+        return true
+    }
+
     /// Ketukan kedua pada tab: kembali ke foto terbaru sekaligus memasang lagi
     /// jangkarnya, supaya muat ulang yang menyusul tidak menariknya ke atas.
     func scrollToNewest(animated: Bool) {

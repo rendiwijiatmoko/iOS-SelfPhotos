@@ -83,6 +83,43 @@ final class TimelineViewModelTests: XCTestCase {
         XCTAssertEqual(TimelineViewModel.formatBucketTitle("not-a-month"), "not-a-month")
     }
 
+    func testMonthNavigationTargetsFirstAssetInEveryMonth() {
+        viewModel.sections = [
+            TimelineSection(
+                id: "2024-12", title: "December 2024",
+                assets: [makeAsset("dec-first"), makeAsset("dec-last")],
+                count: 2, startIndex: 0),
+            TimelineSection(
+                id: "2025-01", title: "January 2025",
+                assets: [makeAsset("jan-first")],
+                count: 1, startIndex: 2),
+        ]
+
+        XCTAssertEqual(viewModel.monthNavigationItems.map(\.id), ["2024-12", "2025-01"])
+        XCTAssertEqual(
+            viewModel.monthNavigationItems.map(\.targetAssetID),
+            ["dec-first", "jan-first"])
+    }
+
+    func testYearNavigationCollapsesMonthsAndTargetsFirstAssetOfYear() {
+        viewModel.sections = [
+            TimelineSection(
+                id: "2024-12", title: "December 2024",
+                assets: [makeAsset("2024-first")], count: 1, startIndex: 0),
+            TimelineSection(
+                id: "2025-01", title: "January 2025",
+                assets: [makeAsset("2025-first")], count: 1, startIndex: 1),
+            TimelineSection(
+                id: "2025-06", title: "June 2025",
+                assets: [makeAsset("2025-later")], count: 1, startIndex: 2),
+        ]
+
+        XCTAssertEqual(viewModel.yearNavigationItems.map(\.id), ["2024", "2025"])
+        XCTAssertEqual(
+            viewModel.yearNavigationItems.map(\.targetAssetID),
+            ["2024-first", "2025-first"])
+    }
+
     private func makeAsset(_ id: String) -> AssetLite {
         AssetLite(
             id: id,

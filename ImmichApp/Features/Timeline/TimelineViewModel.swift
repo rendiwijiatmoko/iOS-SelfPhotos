@@ -3,6 +3,16 @@ import Observation
 // Untuk withAnimation saat membuang aset dari grid.
 import SwiftUI
 
+/// Satu tujuan pada navigator Months atau Years.
+struct TimelineNavigationItem: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let cover: AssetLite
+
+    /// Aset paling awal pada periode ini; menjadi jangkar saat kembali ke All.
+    var targetAssetID: String { cover.id }
+}
+
 @MainActor
 @Observable
 final class TimelineViewModel {
@@ -47,6 +57,35 @@ final class TimelineViewModel {
     /// Pencocok foto perangkat dengan aset server; nil kalau layar ini dibangun
     /// tanpa jaringan (pratinjau, tes).
     private let matcher: DeviceAssetMatcher?
+
+    /// Satu kartu per bulan, tetap dalam urutan lama → baru seperti timeline.
+    var monthNavigationItems: [TimelineNavigationItem] {
+        sections.compactMap { section in
+            guard let first = section.assets.first else { return nil }
+            return TimelineNavigationItem(
+                id: section.id,
+                title: Self.formatNavigatorMonthTitle(section.id),
+                cover: first)
+        }
+    }
+
+    /// Satu kartu per tahun. Cover sekaligus targetnya adalah aset pertama pada
+    /// bulan pertama yang tersedia di tahun tersebut.
+    var yearNavigationItems: [TimelineNavigationItem] {
+        var result: [TimelineNavigationItem] = []
+        result.reserveCapacity(max(sections.count / 12, 1))
+
+        for section in sections {
+            guard let first = section.assets.first else { continue }
+            let year = String(section.id.prefix(4))
+            guard result.last?.id != year else { continue }
+            result.append(TimelineNavigationItem(
+                id: year,
+                title: year,
+                cover: first))
+        }
+        return result
+    }
 
     init(
         dataManager: SwiftDataManager? = nil,
@@ -793,11 +832,23 @@ final class TimelineViewModel {
         guard let date = MonthKey.date(from: bucket) else { return bucket }
         return monthTitleFormatter.string(from: date)
     }
+
+    nonisolated static func formatNavigatorMonthTitle(_ bucket: String) -> String {
+        guard let date = MonthKey.date(from: bucket) else { return bucket }
+        return navigatorMonthTitleFormatter.string(from: date)
+    }
 }
 
 private let monthTitleFormatter: DateFormatter = {
     let f = DateFormatter()
     f.locale = .current
     f.setLocalizedDateFormatFromTemplate("MMMM yyyy")
+    return f
+}()
+
+private let navigatorMonthTitleFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = .current
+    f.setLocalizedDateFormatFromTemplate("MMM yyyy")
     return f
 }()

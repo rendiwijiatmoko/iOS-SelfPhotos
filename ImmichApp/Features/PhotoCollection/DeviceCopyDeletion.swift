@@ -7,6 +7,32 @@ import SwiftUI
 /// tempat berarti tiga kesempatan untuk menyimpang. Yang paling mudah menyimpang
 /// justru bagian yang paling berbahaya: SIAPA yang boleh dihapus.
 enum DeviceCopyDeletion {
+    /// Menerjemahkan isi grid menjadi id PhotoKit yang benar-benar masih ada.
+    ///
+    /// Mode Select dapat berisi campuran petak lokal yang sudah dicadangkan
+    /// (`device:` dengan origin `.both`), petak server yang punya pasangan
+    /// lokal, petak lokal yang belum aman, dan petak server-only. Hanya dua
+    /// kelompok pertama yang boleh sampai ke permintaan hapus PhotoKit.
+    @MainActor
+    static func localIdentifiers(for assets: [AssetLite]) -> [String] {
+        let manager = SwiftDataManager.shared
+        var candidates: [String] = []
+        var seen = Set<String>()
+        candidates.reserveCapacity(assets.count)
+
+        // Tetap pertahankan pagar yang sama dengan aksi satu item: jangan
+        // menawarkan pembersihan perangkat untuk satu-satunya salinan yang
+        // belum pernah berhasil masuk server.
+        for asset in assets where asset.origin == .both {
+            let localID = localIdentifier(for: asset.id, manager: manager)
+            guard let localID, seen.insert(localID).inserted else { continue }
+            candidates.append(localID)
+        }
+
+        let existing = LocalPhotoLibrary.existingLocalIdentifiers(candidates)
+        return candidates.filter(existing.contains)
+    }
+
     /// Mengecek salinan yang benar-benar masih dikenal PhotoKit.
     ///
     /// `origin` dan `BackupRecord` adalah cache untuk menggambar cepat. Keduanya
@@ -60,13 +86,25 @@ enum DeviceCopyDeletion {
     @MainActor
     static func perform(_ id: String) async -> Bool {
         let manager = SwiftDataManager.shared
-        let localID = LocalPhotoLibrary.isLocal(id)
-            ? LocalPhotoLibrary.localIdentifier(from: id)
-            : manager.localIdentifier(forServerAsset: id)
+        guard let localID = localIdentifier(for: id, manager: manager),
+              LocalPhotoLibrary.assetExists(localID)
+        else { return false }
+        return await perform(localIdentifiers: [localID]) == 1
+    }
 
-        guard let localID else { return false }
-        guard await LocalPhotoLibrary.shared.delete(
-            [LocalPhotoLibrary.assetID(for: localID)]) else { return false }
+    /// Menghapus beberapa salinan lokal dalam satu transaksi PhotoKit.
+    ///
+    /// Daftar dicek ulang tepat sebelum penghapusan karena menu dapat tetap
+    /// terbuka saat Photos diubah oleh app lain. Nilai kembali adalah jumlah
+    /// yang benar-benar diminta untuk dihapus, bukan jumlah seluruh seleksi.
+    @discardableResult
+    @MainActor
+    static func perform(localIdentifiers: [String]) async -> Int {
+        let existing = LocalPhotoLibrary.existingLocalIdentifiers(localIdentifiers)
+        guard !existing.isEmpty else { return 0 }
+
+        let ids = existing.map { LocalPhotoLibrary.assetID(for: $0) }
+        guard await LocalPhotoLibrary.shared.delete(ids) else { return 0 }
 
         // Tautannya DIPUTUS, catatan unggahannya tidak.
         //
@@ -74,8 +112,21 @@ enum DeviceCopyDeletion {
         // yang tidak berlaku lagi hanya "ada salinannya di perangkat ini".
         // Menghapus catatannya sekalian akan membuat fotonya naik lagi pada
         // putaran pencadangan berikutnya.
-        try? manager.unlinkDeviceAsset(localIdentifier: localID)
-        return true
+        let manager = SwiftDataManager.shared
+        for localID in existing {
+            try? manager.unlinkDeviceAsset(localIdentifier: localID)
+        }
+        return existing.count
+    }
+
+    @MainActor
+    private static func localIdentifier(
+        for id: String,
+        manager: SwiftDataManager
+    ) -> String? {
+        LocalPhotoLibrary.isLocal(id)
+            ? LocalPhotoLibrary.localIdentifier(from: id)
+            : manager.localIdentifier(forServerAsset: id)
     }
 }
 

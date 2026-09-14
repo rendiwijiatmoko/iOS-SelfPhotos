@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct AppRouter: View {
     @Environment(SessionManager.self) private var session
@@ -41,6 +42,7 @@ struct AppRouter: View {
 struct MainTabView: View {
     @Environment(SessionManager.self) private var session
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.scenePhase) private var scenePhase
     @State private var syncVM: SyncViewModel?
     @State private var selectedDestination: Destination = .photos
     @State private var sidebarAlbumsVM: AlbumListViewModel?
@@ -49,6 +51,8 @@ struct MainTabView: View {
     @State private var backupSetupJourney = BackupSetupJourney.shared
     @State private var localPhotoLibrary = LocalPhotoLibrary.shared
     @State private var navigation = AppNavigation.shared
+    /// Satu state untuk isi tab Photos dan kontrol yang hidup di tab bar.
+    @State private var timelineNavigation = TimelineNavigationState()
     /// Naik satu setiap tab Photos ditekan ulang saat sudah aktif.
     @State private var photosResetRequest = 0
     /// Layar detail meminta pita offline menyingkir selama ia tampil.
@@ -127,6 +131,7 @@ struct MainTabView: View {
         // sync itu, bukan dari endpoint linimasa. Tanpa akses ke sini, layar
         // Photos tidak punya cara tahu kapan datanya sudah ada.
         .environment(syncVM)
+        .environment(timelineNavigation)
         .onChange(of: localPhotoLibrary.selectedAlbumIDs) {
             backupSetupJourney.refreshForAlbumSelection()
         }
@@ -137,6 +142,14 @@ struct MainTabView: View {
         .onChange(of: navigation.pendingDestination) { _, destination in
             guard let destination else { return }
             openExternalDestination(destination)
+        }
+        // `.task` di bawah hanya berjalan ketika MainTabView dibuat. Saat app
+        // kembali dari background, view yang sama masih hidup sehingga upload
+        // dari web/perangkat lain tidak pernah diminta lagi. Jalankan delta
+        // sync setiap scene aktif; SyncViewModel sendiri menolak overlap.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await syncVM?.performBackgroundSync() }
         }
         .task {
             // Quick action cold-start sudah menunggu sebelum view ini dibuat.
@@ -183,15 +196,27 @@ struct MainTabView: View {
                 )
             }
 
-            // Role .search membuat sistem menempatkannya terpisah di ujung
-            // dan mengubahnya jadi kolom cari saat tab-nya dipilih.
-            //
-            // Kolomnya sendiri dipasang DI DALAM `SearchView`, pada
-            // `NavigationStack`-nya — bukan di sini. `searchable` di
-            // TabView menyebar ke setiap tab dan memunculkan kolom cari di
-            // bar atas Photos dan Library juga.
+            // Role Search dipertahankan agar transisi ke kolom pencarian dan
+            // perilaku sistemnya tetap sama seperti sebelumnya.
             Tab(value: TabID.search, role: .search) {
                 SearchView(isActive: selectedDestination == .search)
+            }
+        }
+        // State minimize dibaca dari tab bar yang benar-benar digambar sistem.
+        // Picker di bawah hanya mengisi celah tengah ketika state itu aktif.
+        .tabBarMinimizeBehaviorWithUpdate(
+            isMinimized: Binding(
+                get: { timelineNavigation.isTabBarMinimized },
+                set: { timelineNavigation.setTabBarMinimized($0) }),
+            behavior: selectedDestination == .photos ? .onScrollUp : .never)
+        .overlay(alignment: .bottom) {
+            if showsTimelineModePicker {
+                TimelineModePicker(navigation: timelineNavigation)
+                    .controlSize(.large)
+                    .glassEffect(.regular, in: .capsule)
+                    .offset(y: 6)
+                    .padding(.horizontal, 85)
+                    .frame(maxWidth: 620)
             }
         }
     }
@@ -308,6 +333,15 @@ struct MainTabView: View {
         }
 
         selectedDestination = destination
+        if destination != .photos {
+            timelineNavigation.setTabBarMinimized(false)
+        }
+    }
+
+    private var showsTimelineModePicker: Bool {
+        selectedDestination == .photos
+            && timelineNavigation.isTabBarMinimized
+            && !timelineNavigation.isSelecting
     }
 
     private func openBackupTab() {
@@ -325,6 +359,225 @@ struct MainTabView: View {
         case .favorites, .memories, .album:
             select(.library)
         }
+    }
+}
+
+private extension View {
+    /// Membungkus perilaku minimize sistem sambil melaporkan state visual tab
+    /// bar yang sebenarnya. Offset scroll tidak cukup karena UIKit sendiri yang
+    /// menentukan kapan transisi platter selesai.
+    func tabBarMinimizeBehaviorWithUpdate(
+        isMinimized: Binding<Bool>,
+        behavior: TabBarMinimizeBehavior
+    ) -> some View {
+        modifier(TabBarMinimizeStateModifier(
+            isMinimized: isMinimized,
+            behavior: behavior))
+    }
+}
+
+private struct TabBarMinimizeStateModifier: ViewModifier {
+    @Binding var isMinimized: Bool
+    let behavior: TabBarMinimizeBehavior
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                TabBarMinimizeObserver(isMinimized: $isMinimized)
+                    .frame(width: 0, height: 0)
+            }
+            // Menempatkan probe dan TabView dalam grup komposisi yang sama,
+            // seperti struktur yang dipakai sistem selama minimization.
+            .compositingGroup()
+            .tabBarMinimizeBehavior(behavior)
+    }
+}
+
+private struct TabBarMinimizeObserver: UIViewRepresentable {
+    @Binding var isMinimized: Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isMinimized: $isMinimized)
+    }
+
+    func makeUIView(context: Context) -> TabBarProbeView {
+        let view = TabBarProbeView()
+        view.isUserInteractionEnabled = false
+        view.onWindowChanged = { [weak view, weak coordinator = context.coordinator] in
+            guard let view else { return }
+            coordinator?.attach(from: view)
+        }
+        DispatchQueue.main.async { [weak view, weak coordinator = context.coordinator] in
+            guard let view else { return }
+            coordinator?.attach(from: view)
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: TabBarProbeView, context: Context) {
+        context.coordinator.isMinimized = $isMinimized
+        context.coordinator.attach(from: uiView)
+    }
+
+    static func dismantleUIView(
+        _ uiView: TabBarProbeView,
+        coordinator: Coordinator
+    ) {
+        coordinator.invalidate()
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var isMinimized: Binding<Bool>
+
+        private weak var minimizedPlatter: UIView?
+        private weak var expandedPlatter: UIView?
+        private var minimizedObservation: NSKeyValueObservation?
+        private var expandedObservation: NSKeyValueObservation?
+        private var retryWorkItem: DispatchWorkItem?
+        private var retriesRemaining = 12
+
+        init(isMinimized: Binding<Bool>) {
+            self.isMinimized = isMinimized
+        }
+
+        func attach(from probe: UIView) {
+            guard let tabBar = tabBarController(from: probe)?.tabBar else {
+                scheduleRetry(from: probe)
+                return
+            }
+
+            tabBar.layoutIfNeeded()
+            let platters = tabBar.subviews.filter { view in
+                NSStringFromClass(type(of: view)).contains("PlatterView")
+            }
+            let minimized = platters.first(where: \.isMinimizedPlatter)
+            let expanded = platters.first { !$0.isMinimizedPlatter }
+
+            guard let minimized, let expanded else {
+                scheduleRetry(from: probe)
+                return
+            }
+            guard minimized !== minimizedPlatter || expanded !== expandedPlatter else {
+                return
+            }
+
+            invalidateObservations()
+            minimizedPlatter = minimized
+            expandedPlatter = expanded
+            retriesRemaining = 12
+
+            minimizedObservation = minimized.observe(
+                \.isHidden,
+                options: [.new]
+            ) { [weak self] view, change in
+                let isHidden = change.newValue ?? view.isHidden
+                guard let self else { return }
+                DispatchQueue.main.async {
+                    self.setMinimized(!isHidden)
+                }
+            }
+            expandedObservation = expanded.observe(
+                \.isHidden,
+                options: [.new]
+            ) { [weak self] view, change in
+                let isHidden = change.newValue ?? view.isHidden
+                guard !isHidden, let self else { return }
+                DispatchQueue.main.async {
+                    // Saat expand, bar normal muncul sebelum platter kecil
+                    // disembunyikan. Hapus picker pada event paling awal ini.
+                    self.setMinimized(false)
+                }
+            }
+
+            // Inisialisasi hanya ketika kedua representasi sudah berada pada
+            // state yang tegas. Jika probe terpasang di tengah animasi dan
+            // keduanya terlihat, pertahankan state sampai KVO berikutnya.
+            if !minimized.isHidden && expanded.isHidden {
+                setMinimized(true)
+            } else if minimized.isHidden && !expanded.isHidden {
+                setMinimized(false)
+            }
+        }
+
+        func invalidate() {
+            retryWorkItem?.cancel()
+            retryWorkItem = nil
+            invalidateObservations()
+            isMinimized.wrappedValue = false
+        }
+
+        private func setMinimized(_ newValue: Bool) {
+            if isMinimized.wrappedValue != newValue {
+                isMinimized.wrappedValue = newValue
+            }
+        }
+
+        private func scheduleRetry(from probe: UIView) {
+            guard retryWorkItem == nil, retriesRemaining > 0 else { return }
+            retriesRemaining -= 1
+            let workItem = DispatchWorkItem { [weak self, weak probe] in
+                guard let self, let probe else { return }
+                self.retryWorkItem = nil
+                self.attach(from: probe)
+            }
+            retryWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: workItem)
+        }
+
+        private func invalidateObservations() {
+            minimizedObservation?.invalidate()
+            expandedObservation?.invalidate()
+            minimizedObservation = nil
+            expandedObservation = nil
+            minimizedPlatter = nil
+            expandedPlatter = nil
+        }
+
+        private func tabBarController(from view: UIView) -> UITabBarController? {
+            var responder: UIResponder? = view
+            while let current = responder {
+                if let controller = current as? UITabBarController {
+                    return controller
+                }
+                responder = current.next
+            }
+            return findTabBarController(in: view.window?.rootViewController)
+        }
+
+        private func findTabBarController(
+            in controller: UIViewController?
+        ) -> UITabBarController? {
+            guard let controller else { return nil }
+            if let tabBarController = controller as? UITabBarController {
+                return tabBarController
+            }
+            if let presented = findTabBarController(
+                in: controller.presentedViewController) {
+                return presented
+            }
+            for child in controller.children {
+                if let tabBarController = findTabBarController(in: child) {
+                    return tabBarController
+                }
+            }
+            return nil
+        }
+    }
+}
+
+private final class TabBarProbeView: UIView {
+    var onWindowChanged: (() -> Void)?
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        onWindowChanged?()
+    }
+}
+
+private extension UIView {
+    var isMinimizedPlatter: Bool {
+        abs(frame.width - frame.height) < 2
     }
 }
 
