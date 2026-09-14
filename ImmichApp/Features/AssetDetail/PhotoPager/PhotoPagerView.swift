@@ -456,6 +456,15 @@ extension PhotoPagerController: UICollectionViewDataSource {
 // MARK: - Delegate
 
 extension PhotoPagerController: UICollectionViewDelegate {
+    func collectionView(
+        _ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,
+        forItemAt indexPath: IndexPath
+    ) {
+        // Offscreen cells can remain retained without prepareForReuse, and
+        // visibleCells no longer includes them during the final dismiss pass.
+        (cell as? PhotoPagerCell)?.stopPlayback()
+    }
+
     // Pager sengaja TIDAK berdetak: ketukan haptic hanya milik strip thumbnail,
     // supaya satu usapan tidak menghasilkan dua getaran yang saling menimpa.
 

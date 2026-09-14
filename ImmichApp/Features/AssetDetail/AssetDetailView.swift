@@ -1434,12 +1434,29 @@ struct ShareSheet: UIViewControllerRepresentable {
     /// tipe file generik (mis. "JPG"), bukan isi fotonya.
     var previewImage: UIImage? = nil
 
+    func makeCoordinator() -> CleanupCoordinator {
+        CleanupCoordinator(urls: [url])
+    }
+
     func makeUIViewController(context: Context) -> UIActivityViewController {
         let item = ShareItemSource(url: url, previewImage: previewImage)
-        return UIActivityViewController(activityItems: [item], applicationActivities: nil)
+        let controller = UIActivityViewController(
+            activityItems: [item], applicationActivities: nil)
+        controller.completionWithItemsHandler = { [weak coordinator = context.coordinator]
+            _, _, _, _ in
+            coordinator?.cleanup()
+        }
+        return controller
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+
+    static func dismantleUIViewController(
+        _ uiViewController: UIActivityViewController,
+        coordinator: CleanupCoordinator
+    ) {
+        coordinator.cleanup()
+    }
 }
 
 /// Share sheet untuk banyak file sekaligus.
@@ -1449,11 +1466,43 @@ struct ShareSheet: UIViewControllerRepresentable {
 struct MultiShareSheet: UIViewControllerRepresentable {
     let urls: [URL]
 
+    func makeCoordinator() -> CleanupCoordinator {
+        CleanupCoordinator(urls: urls)
+    }
+
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: urls, applicationActivities: nil)
+        let controller = UIActivityViewController(activityItems: urls, applicationActivities: nil)
+        controller.completionWithItemsHandler = { [weak coordinator = context.coordinator]
+            _, _, _, _ in
+            coordinator?.cleanup()
+        }
+        return controller
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+
+    static func dismantleUIViewController(
+        _ uiViewController: UIActivityViewController,
+        coordinator: CleanupCoordinator
+    ) {
+        coordinator.cleanup()
+    }
+}
+
+/// `dismantleUIViewController` menjadi pengaman bila sheet ditutup oleh SwiftUI
+/// tanpa memanggil completion handler (mis. view induk ikut hilang).
+final class CleanupCoordinator {
+    private var urls: [URL]
+
+    init(urls: [URL]) {
+        self.urls = urls
+    }
+
+    func cleanup() {
+        guard !urls.isEmpty else { return }
+        TemporaryMediaStore.remove(urls)
+        urls.removeAll()
+    }
 }
 
 /// Membungkus URL file supaya share sheet punya metadata pratinjau.

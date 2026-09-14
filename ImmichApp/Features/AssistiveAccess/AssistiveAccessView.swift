@@ -281,7 +281,7 @@ private struct AssistiveAccessPhotoDetail: View {
         .assistiveAccessNavigationIcon(
             systemImage: asset.isVideo ? "video.fill" : "photo.fill")
         .task(id: asset.id) {
-            player?.pause()
+            VideoPlaybackLifecycle.stop(player)
             player = nil
             isLoading = true
             if let cached = loader.cachedImage(for: asset.id) {
@@ -293,7 +293,10 @@ private struct AssistiveAccessPhotoDetail: View {
             // sumber itu disiapkan.
             if asset.isVideo,
                let playbackAsset = await loader.playbackAsset(for: asset.id) {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled else {
+                    playbackAsset.cancelLoading()
+                    return
+                }
                 let autoplayPlayer = AVPlayer(
                     playerItem: AVPlayerItem(asset: playbackAsset))
                 player = autoplayPlayer
@@ -302,7 +305,7 @@ private struct AssistiveAccessPhotoDetail: View {
                 // playback dimulai, supaya frame pertama tidak terlewat.
                 await Task.yield()
                 guard !Task.isCancelled else {
-                    autoplayPlayer.pause()
+                    VideoPlaybackLifecycle.stop(autoplayPlayer)
                     return
                 }
                 autoplayPlayer.play()
@@ -315,7 +318,7 @@ private struct AssistiveAccessPhotoDetail: View {
             isLoading = false
         }
         .onDisappear {
-            player?.pause()
+            VideoPlaybackLifecycle.stop(player)
             player = nil
         }
     }

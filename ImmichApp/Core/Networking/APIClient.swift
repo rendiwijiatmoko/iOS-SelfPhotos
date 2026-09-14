@@ -4,9 +4,11 @@ class APIClient {
     let session: SessionManager
     private let urlSession: URLSession
 
-    init(session: SessionManager, urlSession: URLSession = .shared) {
+    private static let foregroundSession = URLSession(configuration: NetworkResponseCache.configuration())
+
+    init(session: SessionManager, urlSession: URLSession? = nil) {
         self.session = session
-        self.urlSession = urlSession
+        self.urlSession = urlSession ?? Self.foregroundSession
     }
 
     /// Session khusus byte gambar.
@@ -18,9 +20,7 @@ class APIClient {
     /// Batas koneksi per host dinaikkan karena thumbnail itu kecil dan banyak —
     /// enam koneksi bawaan membuat antreannya jauh lebih panjang dari perlunya.
     static let imageSessionConfiguration: URLSessionConfiguration = {
-        let config = URLSessionConfiguration.default
-        config.urlCache = nil
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let config = NetworkResponseCache.configuration()
         config.httpMaximumConnectionsPerHost = 8
         config.timeoutIntervalForRequest = 20
         config.timeoutIntervalForResource = 60

@@ -51,6 +51,7 @@ final class BackupService {
             guard isEnabled != oldValue else { return }
             UserDefaults.standard.set(isEnabled, forKey: Self.enabledKey)
             guard isEnabled else {
+                allowsManualQueueRefill = false
                 stop()
                 BackupScheduler.cancel()
                 BackupNotifier.shared.clearProgress()
@@ -132,6 +133,7 @@ final class BackupService {
     private static let cellularPhotosKey = "backup.cellularPhotos"
     private static let cellularVideosKey = "backup.cellularVideos"
     private static let syncAlbumsKey = "backup.syncAlbums"
+    private static let manualQueueRefillKey = "backup.manualQueueRefill"
 
     private var repo: BackupRepository?
     private var albumRepo: AlbumRepository?
@@ -139,6 +141,12 @@ final class BackupService {
     private let dataManager = SwiftDataManager.shared
     private let queue = BackupQueueStore.shared
     private var task: Task<Void, Never>?
+    private var refillRequested = false
+    private var allowsManualQueueRefill = false {
+        didSet {
+            UserDefaults.standard.set(allowsManualQueueRefill, forKey: Self.manualQueueRefillKey)
+        }
+    }
     private var libraryChangeTask: Task<Void, Never>?
     private var retryWakeTask: Task<Void, Never>?
     private var notificationRevision = 0
@@ -174,6 +182,7 @@ final class BackupService {
         cellularPhotos = UserDefaults.standard.bool(forKey: Self.cellularPhotosKey)
         cellularVideos = UserDefaults.standard.bool(forKey: Self.cellularVideosKey)
         syncAlbums = UserDefaults.standard.bool(forKey: Self.syncAlbumsKey)
+        allowsManualQueueRefill = UserDefaults.standard.bool(forKey: Self.manualQueueRefillKey)
         LocalPhotoLibrary.shared.onLibraryChange = { [weak self] in
             self?.handleLibraryChange()
         }
@@ -247,6 +256,7 @@ final class BackupService {
         do {
             let activeTasks = await BackupUploader.shared.activeTasks()
             try queue.reconcile(activeTasks: activeTasks)
+            await BackupUploader.shared.reclaimExcessStaging()
             for item in queue.items where item.state == .cancelling {
                 await BackupUploader.shared.cancel(localIdentifier: item.id)
             }
@@ -261,6 +271,10 @@ final class BackupService {
         }
         await pruneUnavailableFailures()
         applyQueueSnapshot()
+        if allowsManualQueueRefill {
+            await ensureConfigured()
+            refillReadyQueue()
+        }
     }
 
     private func handleNetworkChange(isOnline: Bool, isExpensive: Bool) {
@@ -294,9 +308,14 @@ final class BackupService {
     /// menyampaikan hasilnya. Yang kedua membuatnya berantai — selama masih ada
     /// sisa, tiap penyelesaian membangunkan aplikasi ini untuk mengantre lagi.
     func continueInBackground() async {
-        guard isEnabled else { return }
+        guard isEnabled || allowsManualQueueRefill else { return }
         await ensureConfigured()
-        guard isEnabled, repo != nil, !Task.isCancelled else { return }
+        guard isEnabled || allowsManualQueueRefill,
+              repo != nil, !Task.isCancelled else { return }
+        if !isEnabled {
+            refillReadyQueue()
+            return
+        }
         await NetworkMonitor.shared.waitUntilReady()
         guard !Task.isCancelled else { return }
         await prepare()
@@ -374,7 +393,9 @@ final class BackupService {
         let existingIDs = await Task.detached(priority: .utility) {
             LocalPhotoLibrary.existingLocalIdentifiers(failedIDs)
         }.value
-        let unavailableIDs = Set(failedIDs).subtracting(existingIDs)
+        let preservedIDs = Set(BackupTemporaryFiles.recordedContexts(
+            in: BackupTemporaryFiles.recoveryDirectory).map(\.localIdentifier))
+        let unavailableIDs = Set(failedIDs).subtracting(existingIDs).subtracting(preservedIDs)
         guard !unavailableIDs.isEmpty else { return }
 
         do {
@@ -403,12 +424,51 @@ final class BackupService {
             self?.task = nil
             self?.refreshCounts()
             self?.applyQueueSnapshot()
+            self?.resumeQueuedUploadsIfRequested()
         }
     }
 
-    /// Memulihkan antrean URLSession lebih dulu, lalu mengambil maksimal 100
-    /// kandidat TERBARU. Batas yang sama dipakai Immich agar satu jatah singkat
-    /// iOS cukup untuk menyerahkan pekerjaan ke daemon background.
+    /// Completion frees a staging slot. Refill in foreground as well as during
+    /// background events; otherwise a bounded queue would stop after its first window.
+    func refillReadyQueue() {
+        guard isEnabled || allowsManualQueueRefill else { return }
+        refillRequested = true
+        resumeQueuedUploadsIfRequested()
+    }
+
+    func finishStorageRecovery(localIdentifier: String, taskIdentifier: Int) {
+        guard acceptsUploadResults else { return }
+        do {
+            guard try queue.requeueAfterStorageRecovery(
+                localIdentifier, taskIdentifier: taskIdentifier) else { return }
+            pendingPhotos[localIdentifier] = nil
+            uploadProgressByID[localIdentifier] = nil
+            applyQueueSnapshot()
+        } catch {
+            lastError = error.localizedDescription
+            acceptsUploadResults = false
+        }
+    }
+
+    private func resumeQueuedUploadsIfRequested() {
+        guard refillRequested, task == nil else { return }
+        refillRequested = false
+        guard isEnabled || allowsManualQueueRefill,
+              acceptsUploadResults, hasAuthenticatedSession, repo != nil,
+              dataManager.isPersistentStoreAvailable,
+              !queue.readyItems(limit: 1).isEmpty else { return }
+        task = Task { [weak self] in
+            await NetworkMonitor.shared.waitUntilReady()
+            await self?.processReadyQueueItems()
+            self?.task = nil
+            self?.refreshCounts()
+            self?.applyQueueSnapshot()
+            self?.resumeQueuedUploadsIfRequested()
+        }
+    }
+
+    /// Discover up to 100 metadata candidates. Only the staging window below
+    /// may export originals and hand their multipart bodies to URLSession.
     private func enqueueAutomaticBatch() async {
         await NetworkMonitor.shared.waitUntilReady()
         guard !Task.isCancelled else { return }
@@ -416,6 +476,7 @@ final class BackupService {
         do {
             let activeTasks = await BackupUploader.shared.activeTasks()
             try queue.reconcile(activeTasks: activeTasks)
+            await BackupUploader.shared.reclaimExcessStaging()
             for item in queue.items where item.state == .cancelling {
                 await BackupUploader.shared.cancel(localIdentifier: item.id)
             }
@@ -478,14 +539,17 @@ final class BackupService {
             return
         }
         applyQueueSnapshot()
+        allowsManualQueueRefill = true
         let work = Task { await processReadyQueueItems() }
         task = work
         await work.value
         task = nil
         refreshCounts()
+        resumeQueuedUploadsIfRequested()
     }
 
     func stop() {
+        refillRequested = false
         task?.cancel()
         task = nil
         libraryChangeTask?.cancel()
@@ -502,6 +566,7 @@ final class BackupService {
     /// Menghentikan backup dan membuang semua state yang terikat akun.
     func resetForLogout() {
         acceptsUploadResults = false
+        allowsManualQueueRefill = false
         stop()
         repo = nil
         albumRepo = nil
@@ -676,12 +741,8 @@ final class BackupService {
         return cellularPhotos || cellularVideos
     }
 
-    /// Satu per satu, berurutan.
-    ///
-    /// Bukan karena tidak bisa berbarengan, tapi karena tiap unggahan menahan
-    /// SELURUH berkas di memori — beberapa video 4K sekaligus akan membuat
-    /// sistem menghentikan aplikasinya. Berurutan juga membuat kemajuan yang
-    /// ditampilkan jujur.
+    /// Prepare only a small window of originals. The rest of the queue remains
+    /// metadata until a transfer completes and frees its temporary body.
     private func processReadyQueueItems() async {
         guard let repo else { return }
         albumIDsByName = [:]
@@ -697,6 +758,9 @@ final class BackupService {
                 photos.append(cached)
             } else if let restored = await LocalPhotoLibrary.shared.photoMetadata(for: item.id) {
                 photos.append(restored)
+            } else if BackupTemporaryFiles.recordedContexts(in: BackupTemporaryFiles.recoveryDirectory)
+                .contains(where: { $0.localIdentifier == item.id }) {
+                reportPreservedUpload(localIdentifier: item.id)
             } else {
                 // Tidak ada lagi sumber yang dapat di-retry. Menyimpannya
                 // sebagai failure hanya membuat daftar dan notifikasi terus
@@ -729,6 +793,15 @@ final class BackupService {
 
         for photo in photos {
             if Task.isCancelled { return }
+            let staged = await BackupUploader.shared.stagingUsage()
+            guard !Task.isCancelled,
+                  BackupStagingPolicy.canPrepare(
+                    activeCount: max(queue.snapshot.active, staged.activeTasks),
+                    stagedBytes: staged.bytes)
+            else { return }
+            // Another callback may have claimed this item during the await.
+            guard let current = queue.item(id: photo.id), !current.state.isActive,
+                  current.state != .failed else { continue }
             // Live Photo tidak boleh terpotong menjadi still image ketika opsi
             // video seluler dimatikan. Kedua izin harus aktif agar pasangan
             // lengkap boleh naik melalui jaringan mahal.
@@ -842,7 +915,7 @@ final class BackupService {
                 // apakah aplikasi ini masih hidup. Hasilnya masuk lewat
                 // `finishUpload`, bisa jadi berjam-jam kemudian di proses yang
                 // sama sekali baru.
-                let uploadTask = BackupUploader.shared.makeUploadTask(
+                let uploadTask = try BackupUploader.shared.makeUploadTask(
                     prepared,
                     localIdentifier: photo.id,
                     checksum: checksum,
@@ -870,6 +943,28 @@ final class BackupService {
             }
         }
         applyQueueSnapshot()
+    }
+
+    func reportStorageCleanupFailure(_ error: Error) {
+        lastError = error.localizedDescription
+    }
+
+    /// No automatic re-export is possible without the original. Keep this
+    /// visible as a failure rather than silently discarding the queue entry.
+    func reportPreservedUpload(localIdentifier: String, taskIdentifier: Int? = nil) {
+        if let taskIdentifier, let current = queue.item(id: localIdentifier),
+           current.taskIdentifier != taskIdentifier { return }
+        let message = String(localized: "Upload failed. A recovery copy was kept because the original is unavailable. Restore Photos access or the original before retrying.")
+        lastError = message
+        guard acceptsUploadResults else { return }
+        do {
+            if queue.item(id: localIdentifier) == nil { try queue.enqueue([localIdentifier]) }
+            try queue.markFailed(localIdentifier, error: message)
+        } catch { lastError = error.localizedDescription }
+        pendingPhotos[localIdentifier] = nil
+        uploadProgressByID[localIdentifier] = nil
+        applyQueueSnapshot()
+        if enqueueDepth == 0 { finishRunIfSettled() }
     }
 
     /// Tahap pertama Live Photo: upload motion video sebagai hidden asset.
@@ -924,10 +1019,14 @@ final class BackupService {
                 // Hidden mencegah server menjalankan job media biasa pada klip
                 // motion yang hanya merupakan pasangan Live Photo.
                 additionalFields: ["visibility": "hidden"])
+            var handedOff = false
+            defer {
+                if !handedOff { try? FileManager.default.removeItem(at: prepared.bodyFile) }
+            }
             try? FileManager.default.removeItem(at: motion.url)
             try Task.checkCancellation()
 
-            let uploadTask = BackupUploader.shared.makeUploadTask(
+            let uploadTask = try BackupUploader.shared.makeUploadTask(
                 prepared,
                 localIdentifier: photo.id,
                 checksum: checksum,
@@ -940,6 +1039,7 @@ final class BackupService {
                     checksum: checksum,
                     taskIdentifier: uploadTask.taskIdentifier)
                 uploadTask.resume()
+                handedOff = true
                 applyQueueSnapshot()
             } catch {
                 uploadTask.cancel()
@@ -1066,10 +1166,14 @@ final class BackupService {
                 createdAt: photo.createdAt,
                 modifiedAt: photo.modifiedAt,
                 additionalFields: ["livePhotoVideoId": motionAssetID])
+            var handedOff = false
+            defer {
+                if !handedOff { try? FileManager.default.removeItem(at: prepared.bodyFile) }
+            }
             try? FileManager.default.removeItem(at: still.url)
             try Task.checkCancellation()
 
-            let uploadTask = BackupUploader.shared.makeUploadTask(
+            let uploadTask = try BackupUploader.shared.makeUploadTask(
                 prepared,
                 localIdentifier: photo.id,
                 checksum: checksum,
@@ -1082,6 +1186,7 @@ final class BackupService {
                     checksum: checksum,
                     taskIdentifier: uploadTask.taskIdentifier)
                 uploadTask.resume()
+                handedOff = true
                 applyQueueSnapshot()
             } catch {
                 uploadTask.cancel()
@@ -1338,6 +1443,7 @@ final class BackupService {
     private func finishRunIfSettled() {
         let state = queue.snapshot
         guard state.active == 0, state.queued == 0 else { return }
+        allowsManualQueueRefill = false
         lastRunAt = Date()
         applyQueueSnapshot()
         if state.waiting > 0 { BackupScheduler.schedule() }

@@ -144,11 +144,15 @@ final class PhotoPreviewLoader {
 
         if let localAssetID,
            let localAsset = await LocalPhotoLibrary.shared.videoAsset(for: localAssetID) {
+            guard !Task.isCancelled else {
+                localAsset.cancelLoading()
+                return nil
+            }
             return localAsset
         }
 
         // Aset yang hanya ada di perangkat tidak punya fallback server.
-        guard !LocalPhotoLibrary.isLocal(assetId),
+        guard !Task.isCancelled, !LocalPhotoLibrary.isLocal(assetId),
               let source = videoSource(for: assetId)
         else { return nil }
 

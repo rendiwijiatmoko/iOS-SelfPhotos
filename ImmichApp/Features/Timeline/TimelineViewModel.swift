@@ -722,9 +722,9 @@ final class TimelineViewModel {
         var urls: [URL] = []
         for id in ids {
             guard let data = try? await assetRepo.downloadOriginal(id) else { continue }
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("\(id).jpg")
-            if (try? data.write(to: url)) != nil {
+            if let url = try? TemporaryMediaStore.createShareFile(
+                data: data,
+                suggestedFilename: "\(id).jpg") {
                 urls.append(url)
             }
         }
@@ -757,9 +757,9 @@ final class TimelineViewModel {
         do {
             let data = try await assetRepo.downloadOriginal(asset.id)
             let filename = "\(asset.id).\(asset.isVideo ? "mov" : "jpg")"
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-            try data.write(to: url)
-            return url
+            return try TemporaryMediaStore.createShareFile(
+                data: data,
+                suggestedFilename: filename)
         } catch {
             actionError = Self.describe(error)
             return nil

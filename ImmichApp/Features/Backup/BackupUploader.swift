@@ -15,6 +15,9 @@ struct BackupUploadTaskContext: Codable, Equatable, Sendable {
     let localIdentifier: String
     let checksum: String
     let bodyPath: String
+    /// Persisted in URLSession so cancellation remains a requeue operation
+    /// even when the process exits before its completion callback arrives.
+    var isStorageRecovery: Bool? = nil
 
     var encoded: String {
         guard let data = try? JSONEncoder().encode(self) else { return "" }
@@ -111,6 +114,7 @@ final class BackupUploader: NSObject {
     @MainActor static let shared = BackupUploader()
 
     static let sessionIdentifier = "app.immich.backup.upload"
+    @MainActor private var isRecoveringStorage = false
 
     /// Diisi `AppDelegate` saat sistem meluncurkan aplikasi ini hanya untuk
     /// menyampaikan hasil transfer. WAJIB dipanggil setelah semua delegate
@@ -165,7 +169,7 @@ final class BackupUploader: NSObject {
         checksum: String,
         allowsCellular: Bool,
         phase: BackupUploadPhase = .primaryAsset
-    ) -> URLSessionUploadTask {
+    ) throws -> URLSessionUploadTask {
         var request = prepared.request
         // Ditegakkan PER PERMINTAAN, bukan per sesi: satu sesi latar melayani
         // foto dan video sekaligus, sedangkan aturannya berbeda untuk keduanya.
@@ -175,12 +179,14 @@ final class BackupUploader: NSObject {
         // bukan memberi izin mengabaikan pembatasan data sistem.
         request.allowsConstrainedNetworkAccess = false
 
-        let task = session.uploadTask(with: request, fromFile: prepared.bodyFile)
-        task.taskDescription = BackupUploadTaskContext(
+        let context = BackupUploadTaskContext(
             phase: phase,
             localIdentifier: localIdentifier,
             checksum: checksum,
-            bodyPath: prepared.bodyFile.path).encoded
+            bodyPath: prepared.bodyFile.path)
+        try BackupTemporaryFiles.record(context)
+        let task = session.uploadTask(with: request, fromFile: prepared.bodyFile)
+        task.taskDescription = context.encoded
         return task
     }
 
@@ -191,6 +197,100 @@ final class BackupUploader: NSObject {
     /// ini, lengkap dengan `taskDescription`-nya.
     func reconnect() {
         _ = session
+    }
+
+    @MainActor
+    func cleanupOrphanedFiles(olderThan cutoff: Date) async {
+        let tasks = await session.allTasks
+        let paths = Set(tasks.compactMap {
+            BackupUploadTaskContext.decode($0.taskDescription)?.bodyPath
+        })
+        let directory = FileManager.default.temporaryDirectory
+        await Task.detached(priority: .utility) {
+            let activeNames = Set(paths.map { URL(fileURLWithPath: $0).lastPathComponent })
+            for context in BackupTemporaryFiles.recordedContexts(in: directory) {
+                let name = URL(fileURLWithPath: context.bodyPath).lastPathComponent
+                guard !activeNames.contains(name),
+                      let body = BackupTemporaryFiles.bodyURL(for: context.bodyPath, in: directory),
+                      let modified = try? body.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+                      modified < cutoff else { continue }
+                // An absent task does not prove server success. Preserve its
+                // last copy when Photos access is missing or restricted.
+                try? BackupTemporaryFiles.finish(
+                    context, succeeded: false,
+                    sourceAvailable: LocalPhotoLibrary.hasReadAccess && LocalPhotoLibrary.assetExists(context.localIdentifier))
+            }
+            BackupTemporaryFiles.cleanupOrphans(
+                in: directory, activeBodyPaths: paths, olderThan: cutoff)
+        }.value
+    }
+
+    /// Call only after the queue has adopted/persisted the existing tasks.
+    /// Cancellation asks URLSession to release its own upload copy; deleting
+    /// our multipart alone would leave that copy occupying device storage.
+    @MainActor
+    func reclaimExcessStaging() async {
+        guard !isRecoveringStorage, LocalPhotoLibrary.hasReadAccess else { return }
+        isRecoveringStorage = true
+        defer { isRecoveringStorage = false }
+        let tasks = await session.allTasks
+        let localIDs = tasks.compactMap {
+            BackupUploadTaskContext.decode($0.taskDescription)?.localIdentifier
+        }
+        let availableOriginals = await Task.detached(priority: .utility) {
+            LocalPhotoLibrary.existingLocalIdentifiers(localIDs)
+        }.value
+        let protectedTaskIDs = Set(tasks.compactMap { task -> Int? in
+            guard let context = BackupUploadTaskContext.decode(task.taskDescription),
+                  !availableOriginals.contains(context.localIdentifier) else { return nil }
+            return task.taskIdentifier
+        })
+        let candidates = tasks.compactMap { task -> BackupStagingPolicy.Upload? in
+            guard task.state == .running || task.state == .suspended,
+                  let context = BackupUploadTaskContext.decode(task.taskDescription),
+                  context.isStorageRecovery != true || protectedTaskIDs.contains(task.taskIdentifier)
+            else { return nil }
+            let expected = max(0, task.countOfBytesExpectedToSend)
+            let fileSize = BackupTemporaryFiles.bodyURL(for: context.bodyPath).flatMap {
+                try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize
+            } ?? 0
+            let size = max(fileSize, Int(expected))
+            let progress = size > 0 ? min(1, Double(task.countOfBytesSent) / Double(size)) : 0
+            return .init(taskIdentifier: task.taskIdentifier, bytes: size, progress: progress)
+        }
+        let retained = BackupStagingPolicy.retainedTaskIDs(
+            from: candidates, protectedTaskIDs: protectedTaskIDs)
+        for task in tasks {
+            guard task.state == .running || task.state == .suspended,
+                  var context = BackupUploadTaskContext.decode(task.taskDescription)
+            else { continue }
+            if retained.contains(task.taskIdentifier) {
+                if protectedTaskIDs.contains(task.taskIdentifier), context.isStorageRecovery == true {
+                    context.isStorageRecovery = nil
+                    task.taskDescription = context.encoded
+                }
+                continue
+            }
+            context.isStorageRecovery = true
+            task.taskDescription = context.encoded
+            // Do not unlink its file until didCompleteWithError acknowledges
+            // cancellation. A successful response racing this call still wins.
+            task.cancel()
+        }
+    }
+
+    @MainActor
+    func stagingUsage() async -> (activeTasks: Int, bytes: Int) {
+        let tasks = await session.allTasks
+        let bytes = tasks.reduce(0) { total, task in
+            guard let context = BackupUploadTaskContext.decode(task.taskDescription),
+                  let url = BackupTemporaryFiles.bodyURL(for: context.bodyPath)
+            else { return total + Int(max(0, task.countOfBytesExpectedToSend)) }
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+                ?? Int(max(0, task.countOfBytesExpectedToSend))
+            return total + size
+        }
+        return (tasks.count, bytes)
     }
 
     /// ID PhotoKit yang sudah berada di tangan `nsurlsessiond`.
@@ -206,6 +306,7 @@ final class BackupUploader: NSObject {
         let tasks = await session.allTasks
         var result: [BackupActiveTask] = []
         for task in tasks {
+            guard task.state != .completed else { continue }
             guard let context = BackupUploadTaskContext.decode(task.taskDescription) else {
                 // Task tanpa identitas tidak mungkin diselesaikan dengan aman
                 // dan task suspended semacam ini akan menahan session finish
@@ -226,7 +327,8 @@ final class BackupUploader: NSObject {
         guard !identifiers.isEmpty else { return }
         let tasks = await session.allTasks
         for task in tasks
-        where identifiers.contains(task.taskIdentifier) && task.state == .suspended {
+        where identifiers.contains(task.taskIdentifier) && task.state == .suspended
+            && BackupUploadTaskContext.decode(task.taskDescription)?.isStorageRecovery != true {
             task.resume()
         }
     }
@@ -298,10 +400,6 @@ extension BackupUploader: URLSessionDataDelegate {
         lock.unlock()
 
         guard let context = BackupUploadTaskContext.decode(task.taskDescription) else { return }
-        // Badan multipart-nya bisa ratusan megabyte; membiarkannya berarti
-        // menggandakan pustaka foto di direktori sementara.
-        try? FileManager.default.removeItem(atPath: context.bodyPath)
-
         let outcome: Result<String, Error>
         if let error {
             outcome = .failure(error)
@@ -313,6 +411,32 @@ extension BackupUploader: URLSessionDataDelegate {
         completionHandlers.enter()
         Task { @MainActor in
             defer { self.completionHandlers.leave() }
+            defer { BackupService.shared.refillReadyQueue() }
+            let succeeded: Bool
+            if case .success = outcome { succeeded = true } else { succeeded = false }
+            do {
+                let preserved = try await Task.detached(priority: .utility) {
+                    try BackupTemporaryFiles.finish(
+                        context, succeeded: succeeded,
+                        sourceAvailable: succeeded || (LocalPhotoLibrary.hasReadAccess && LocalPhotoLibrary.assetExists(context.localIdentifier)))
+                }.value
+                if preserved {
+                    BackupService.shared.reportPreservedUpload(
+                        localIdentifier: context.localIdentifier, taskIdentifier: completedTaskID)
+                    return
+                }
+            } catch {
+                // Do not silently report cleanup success; the receipt protects
+                // the file until a later launch can retry filesystem cleanup.
+                BackupService.shared.reportStorageCleanupFailure(error)
+            }
+            if context.isStorageRecovery == true,
+               (error as? URLError)?.code == .cancelled {
+                BackupService.shared.finishStorageRecovery(
+                    localIdentifier: context.localIdentifier,
+                    taskIdentifier: completedTaskID)
+                return
+            }
             let activeTasks = await self.session.allTasks
             let remaining = activeTasks.filter { $0.taskIdentifier != completedTaskID }.count
             switch context.phase {

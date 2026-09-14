@@ -715,12 +715,16 @@ final class PhotoPagerCell: UICollectionViewCell {
         loadingIndicator.startAnimating()
         videoLoadTask = Task { [weak self] in
             let asset = await loader.playbackAsset(for: id)
-            guard let self else { return }
+            guard !Task.isCancelled, let self else {
+                asset?.cancelLoading()
+                return
+            }
             self.videoLoadTask = nil
             guard !Task.isCancelled,
                   self.currentAssetID == id,
                   let asset
             else {
+                asset?.cancelLoading()
                 self.loadingIndicator.stopAnimating()
                 self.playButton.isHidden = !self.isVideo
                 return
@@ -898,10 +902,8 @@ final class PhotoPagerCell: UICollectionViewCell {
             player.removeTimeObserver(timeObserver)
         }
         timeObserver = nil
-        player?.pause()
-        // Melepas item juga membatalkan pembacaan/range request yang masih aktif,
-        // dan menjamin kunjungan berikutnya dimulai lagi dari detik nol.
-        player?.replaceCurrentItem(with: nil)
+        VideoPlaybackLifecycle.stop(player)
+        playerLayer?.player = nil
         playerLayer?.removeFromSuperlayer()
         playerLayer = nil
         player = nil
@@ -985,7 +987,7 @@ final class PhotoPagerCell: UICollectionViewCell {
                 let livePhoto = await loader.localLivePhoto(
                     forLocalAssetID: localLivePhotoAssetID,
                     targetSize: targetSize)
-                guard let self else { return }
+                guard !Task.isCancelled, let self else { return }
                 self.liveLoadTask = nil
                 guard !Task.isCancelled,
                       self.isLivePhotoPressed,
@@ -1008,13 +1010,17 @@ final class PhotoPagerCell: UICollectionViewCell {
             // Jalur ini memilih resource PhotoKit bila masih ada di perangkat;
             // URL server hanya fallback. Live Photo lokal jadi terasa instan.
             let asset = await loader.playbackAsset(for: videoID)
-            guard let self else { return }
+            guard !Task.isCancelled, let self else {
+                asset?.cancelLoading()
+                return
+            }
             self.liveLoadTask = nil
             guard !Task.isCancelled,
                   self.isLivePhotoPressed,
                   self.livePhotoVideoID == videoID,
                   let asset
             else {
+                asset?.cancelLoading()
                 self.loadingIndicator.stopAnimating()
                 return
             }
@@ -1149,10 +1155,7 @@ final class PhotoPagerCell: UICollectionViewCell {
                 oldView.removeFromSuperview()
             }
         }
-        livePlayer?.pause()
-        // Melepas item menghentikan range request yang masih berjalan, sehingga
-        // pindah halaman tidak menyisakan download Live Photo lama.
-        livePlayer?.replaceCurrentItem(with: nil)
+        VideoPlaybackLifecycle.stop(livePlayer)
         if let oldLayer = liveLayer {
             oldLayer.removeAllAnimations()
             let fade = CABasicAnimation(keyPath: "opacity")

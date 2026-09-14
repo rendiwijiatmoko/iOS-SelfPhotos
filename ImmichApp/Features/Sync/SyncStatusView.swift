@@ -50,7 +50,9 @@ private final class SyncStatusViewModel {
     var remoteAlbums: Int?
     var memories: Int?
     var hashedAssets: Int?
-    var cacheSize = 0
+    var storageUsage: AppStorageUsage?
+    var cacheSize: Int { storageUsage?.imageCache ?? 0 }
+    var backgroundUploadSize = 0
     var isRefreshing = false
     var isClearingCache = false
     var isExportingDatabase = false
@@ -97,18 +99,18 @@ private final class SyncStatusViewModel {
         isRefreshing = true
         defer { isRefreshing = false }
 
+        // Local storage remains available even if server requests are slow.
+        await refreshStorageUsage()
+
         async let localTask = library.statusCounts()
         async let statsTask: AssetStatsDTO? = try? settingsRepo.getAssetStats()
         async let remoteAlbumsTask: [AlbumResponseDTO]? = try? albumRepo.all()
         async let memoriesTask: [MemoryDTO]? = try? memoriesRepo.getMemories()
-        async let cacheTask = ImageCache.shared.diskCacheSize()
-
-        let (local, stats, albums, memoryItems, cache) = await (
+        let (local, stats, albums, memoryItems) = await (
             localTask,
             statsTask,
             remoteAlbumsTask,
-            memoriesTask,
-            cacheTask)
+            memoriesTask)
 
         localAssets = local.assets
         localAlbums = local.albums
@@ -116,7 +118,6 @@ private final class SyncStatusViewModel {
         remoteAlbums = albums?.count
         memories = memoryItems?.count
         hashedAssets = dataManager.storedChecksums().count
-        cacheSize = cache
     }
 
     func run(_ job: SyncStatusJob, appSync: SyncViewModel?) async {
@@ -196,9 +197,17 @@ private final class SyncStatusViewModel {
         guard !isClearingCache else { return }
         isClearingCache = true
         await ImageCache.shared.clear()
-        cacheSize = await ImageCache.shared.diskCacheSize()
+        NetworkResponseCache.clear()
+        await refreshStorageUsage()
         isClearingCache = false
         completionFeedback &+= 1
+    }
+
+    func refreshStorageUsage() async {
+        async let localFiles = AppStorageUsage.measure()
+        let uploads = await BackupUploader.shared.stagingUsage()
+        backgroundUploadSize = uploads.bytes
+        storageUsage = await localFiles
     }
 
     func exportDatabase() async throws -> URL {
@@ -279,6 +288,7 @@ struct SyncStatusView: View {
                 trailing: ("Hashed Assets", "number", vm.hashedAssets))
 
             jobsSection
+            storageSection
             actionsSection
         }
         .listStyle(.insetGrouped)
@@ -443,6 +453,30 @@ struct SyncStatusView: View {
         }
     }
 
+    private var storageSection: some View {
+        Section {
+            if let usage = vm.storageUsage {
+                LabeledContent("Image Cache", value: formatBytes(usage.imageCache))
+                LabeledContent("Other Caches", value: formatBytes(usage.otherCaches))
+                LabeledContent("Backup Files", value: formatBytes(usage.backupFiles))
+                LabeledContent("Recovery Copies", value: formatBytes(usage.recoveredUploads))
+                LabeledContent("Temporary Files", value: formatBytes(usage.temporaryFiles))
+                LabeledContent("App Data", value: formatBytes(usage.appData))
+                LabeledContent("Shared Data", value: formatBytes(usage.sharedData))
+                LabeledContent("Local Files Total", value: formatBytes(usage.total))
+                LabeledContent("Background Upload Data", value: formatBytes(vm.backgroundUploadSize))
+            }
+            Button("Refresh Storage Usage", systemImage: "arrow.clockwise") {
+                Task { await vm.refreshStorageUsage() }
+            }
+        } header: {
+            Text("On-Device Storage")
+        } footer: {
+            Text("Other Caches includes HTTP and system graphics caches. HTTP cache is cleared when a video closes or the app enters the background. System-managed cache files may remain or be recreated, so this number may not reach zero.")
+            Text("Temporary upload files are removed after server-confirmed success, or after a failed upload when the original is still accessible in Photos. Recovery Copies are kept when an upload fails and the original is unavailable; Clear File Cache does not remove them. Restore Photos access or the original before retrying. iOS may also keep background-upload copies that are not included in Local Files Total.")
+        }
+    }
+
     private var actionsSection: some View {
         Section {
             Button {
@@ -460,7 +494,7 @@ struct SyncStatusView: View {
                     Label("Clear File Cache", systemImage: "trash")
                 }
             }
-            .disabled(vm.cacheSize == 0 || vm.isClearingCache)
+            .disabled(vm.isClearingCache)
 
             Button {
                 Task {

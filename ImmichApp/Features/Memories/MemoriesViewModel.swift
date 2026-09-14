@@ -36,10 +36,9 @@ final class MemoriesViewModel {
     func shareURL(for asset: AssetLite) async -> URL? {
         do {
             let data = try await assetRepo.downloadOriginal(asset.id)
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("\(asset.id).\(asset.isVideo ? "mov" : "jpg")")
-            try data.write(to: url)
-            return url
+            return try TemporaryMediaStore.createShareFile(
+                data: data,
+                suggestedFilename: "\(asset.id).\(asset.isVideo ? "mov" : "jpg")")
         } catch {
             return nil
         }

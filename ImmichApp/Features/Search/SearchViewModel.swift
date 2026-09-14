@@ -257,9 +257,9 @@ final class SearchViewModel {
         var urls: [URL] = []
         for id in ids {
             guard let data = try? await assetRepo.downloadOriginal(id) else { continue }
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("\(id).jpg")
-            if (try? data.write(to: url)) != nil {
+            if let url = try? TemporaryMediaStore.createShareFile(
+                data: data,
+                suggestedFilename: "\(id).jpg") {
                 urls.append(url)
             }
         }

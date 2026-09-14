@@ -157,9 +157,9 @@ struct DeviceAlbumDetailView: View {
             guard let file = await LocalPhotoLibrary.shared.originalData(for: id) else {
                 continue
             }
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent(file.filename)
-            if (try? file.data.write(to: url)) != nil {
+            if let url = try? TemporaryMediaStore.createShareFile(
+                data: file.data,
+                suggestedFilename: file.filename) {
                 urls.append(url)
             }
         }

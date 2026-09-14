@@ -351,6 +351,28 @@ final class BackupQueueStore {
         }
     }
 
+    /// The upload is still requested; only its temporary staged copy was
+    /// released. Preserve phase/motion mapping and reject stale callbacks.
+    @discardableResult
+    func requeueAfterStorageRecovery(
+        _ id: String, taskIdentifier: Int, now: Date = .now
+    ) throws -> Bool {
+        guard let item = item(id: id), item.taskIdentifier == taskIdentifier else { return false }
+        if item.state == .cancelling {
+            try markFailed(id, error: String(localized: "Upload canceled."), now: now)
+            return true
+        }
+        guard item.state == .uploading else { return false }
+        try update(id) { item in
+            item.state = .queued
+            item.taskIdentifier = nil
+            item.nextAttemptAt = nil
+            item.lastError = nil
+            item.updatedAt = now
+        }
+        return true
+    }
+
     func markFailed(_ id: String, error: String, now: Date = .now) throws {
         try update(id) { item in
             item.state = .failed

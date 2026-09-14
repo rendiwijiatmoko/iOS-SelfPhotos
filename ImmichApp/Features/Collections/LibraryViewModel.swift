@@ -292,10 +292,9 @@ final class LibraryViewModel {
         do {
             let data = try await assetRepo.downloadOriginal(asset.id)
             let filename = "\(asset.id).\(asset.isVideo ? "mov" : "jpg")"
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent(filename)
-            try data.write(to: url)
-            return url
+            return try TemporaryMediaStore.createShareFile(
+                data: data,
+                suggestedFilename: filename)
         } catch {
             actionError = (error as? APIError)?.errorDescription
                 ?? String(localized: "Failed to prepare share")

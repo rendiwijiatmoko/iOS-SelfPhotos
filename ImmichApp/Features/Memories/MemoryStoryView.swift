@@ -419,8 +419,7 @@ final class MemoryStoryVideoView: UIView {
         // menyiapkan pemutar untuk semuanya berarti beberapa unduhan video
         // berjalan bersamaan demi satu yang ditonton.
         guard isActive else {
-            player?.pause()
-            wasActive = false
+            teardown()
             return
         }
 
@@ -443,7 +442,7 @@ final class MemoryStoryVideoView: UIView {
     }
 
     func teardown() {
-        player?.pause()
+        VideoPlaybackLifecycle.stop(player)
         if let endObserver {
             NotificationCenter.default.removeObserver(endObserver)
             self.endObserver = nil
@@ -462,7 +461,9 @@ final class MemoryStoryVideoView: UIView {
         let urlAsset = AVURLAsset(
             url: source.url,
             options: ["AVURLAssetHTTPHeaderFieldsKey": source.headers])
-        let newPlayer = AVPlayer(playerItem: AVPlayerItem(asset: urlAsset))
+        let item = AVPlayerItem(asset: urlAsset)
+        item.preferredForwardBufferDuration = 2
+        let newPlayer = AVPlayer(playerItem: item)
         // Bisu: story berpindah sendiri, dan suara yang menyala tiba-tiba saat
         // baris kenangan disentuh bukan yang diharapkan siapa pun.
         newPlayer.isMuted = true

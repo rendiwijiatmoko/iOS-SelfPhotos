@@ -15,11 +15,19 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        let launchedAt = Date()
+        NetworkResponseCache.clear()
+        // File original yang disiapkan untuk share sheet harus bersifat
+        // sementara. Bersihkan sisa crash/versi lama sebelum membuat yang baru.
+        TemporaryMediaStore.cleanupAfterLaunch()
+
         // Delegate notifikasi harus terpasang sebelum launch selesai agar tap
         // notifikasi cold-start tidak hilang sebelum SwiftUI sempat dibangun.
         let notifier = BackupNotifier.shared
         BackupUploader.shared.reconnect()
         Task { @MainActor in
+            await BackupUploader.shared.cleanupOrphanedFiles(olderThan: launchedAt)
+            await ImageCache.shared.enforceDiskLimit()
             await notifier.ensureAuthorization(prompt: false)
             await BackupService.shared.restoreBackgroundLifecycle()
         }
@@ -66,6 +74,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 /// sudah berjalan. SwiftUI tetap membuat serta mengelola window-nya; delegate
 /// ini hanya menangani event scene yang belum punya modifier SwiftUI.
 final class AppSceneDelegate: NSObject, UIWindowSceneDelegate {
+    func sceneDidEnterBackground(_ scene: UIScene) {
+        NetworkResponseCache.clear()
+    }
+
     func scene(
         _ scene: UIScene,
         willConnectTo session: UISceneSession,

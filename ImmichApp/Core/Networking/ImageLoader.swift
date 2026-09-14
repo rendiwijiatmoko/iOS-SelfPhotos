@@ -125,6 +125,11 @@ actor ImageCache {
     private var isScanning = false
     private var isEvicting = false
 
+    /// Bertambah setelah setiap mutasi file yang dilakukan di luar scan/evict.
+    /// Hasil scan yang dimulai sebelum angka ini berubah sudah basi dan tidak
+    /// boleh menggantikan pembukuan terbaru.
+    private var diskMutationGeneration = 0
+
     nonisolated private static let diskCacheDir = FileManager.default
         .urls(for: .cachesDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("immich-image-cache")
@@ -150,7 +155,8 @@ actor ImageCache {
 
         let diskPath = diskCacheURL.appendingPathComponent(hashKey(key))
         let size = (try? diskPath.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-        try? FileManager.default.removeItem(at: diskPath)
+        guard (try? FileManager.default.removeItem(at: diskPath)) != nil else { return }
+        diskMutationGeneration &+= 1
         if let usage = runningDiskUsage {
             runningDiskUsage = max(0, usage - size)
         }
@@ -286,7 +292,7 @@ actor ImageCache {
         try Task.checkCancellation()
         guard expectedGeneration == generation else { throw CancellationError() }
 
-        store(data, at: diskPath)
+        await store(data, at: diskPath)
 
         guard let image = await Self.decode(data, maxPixelSize: maxPixelSize) else {
             throw APIError.unknown
@@ -381,14 +387,27 @@ actor ImageCache {
         ImageMemoryCache.shared.insert(image, for: memoryKey)
     }
 
-    /// Penulisan ke disk dilepas sebagai pekerjaan latar.
-    ///
-    /// Pemanggilnya sedang menunggu gambarnya, bukan menunggu berkasnya tersimpan
-    /// — dan menahannya di actor akan memblokir permintaan gambar berikutnya.
-    private func store(_ data: Data, at path: URL) {
-        Task.detached(priority: .background) {
-            try? data.write(to: path, options: .atomic)
-        }
+    /// Penulisan disk tetap berjalan di luar actor, tetapi penyelesaiannya
+    /// ditunggu sebelum ukuran dibukukan. Dengan begitu scan/eviction tidak bisa
+    /// menyatakan cache aman ketika atomic write-nya sebenarnya belum muncul.
+    private func store(_ data: Data, at path: URL) async {
+        // Pembukuan baru dilakukan SETELAH atomic write selesai. Sebelumnya
+        // eviction dapat memindai saat file belum muncul, lalu hasil scan lama
+        // menimpa angka pemakaian meskipun banyak write sudah menyusul.
+        let sizes: (old: Int, new: Int)? = await Task.detached(priority: .background) {
+            let oldSize = (try? path.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            do {
+                try data.write(to: path, options: .atomic)
+                let newSize = (try? path.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+                    ?? data.count
+                return (oldSize, newSize)
+            } catch {
+                return nil
+            }
+        }.value
+
+        guard let sizes else { return }
+        diskMutationGeneration &+= 1
 
         guard let usage = runningDiskUsage else {
             // Ukuran cache belum diketahui. Memindai direktori berisi ribuan
@@ -398,8 +417,9 @@ actor ImageCache {
             return
         }
 
-        runningDiskUsage = usage + data.count
-        if usage + data.count > maxDiskCacheSize { startEviction() }
+        let updatedUsage = max(0, usage - sizes.old + sizes.new)
+        runningDiskUsage = updatedUsage
+        if updatedUsage > maxDiskCacheSize { startEviction() }
     }
 
     /// Menghitung ukuran cache di latar, lalu menyimpan hasilnya.
@@ -408,14 +428,22 @@ actor ImageCache {
         isScanning = true
 
         let directory = diskCacheURL
+        let startedAtGeneration = diskMutationGeneration
         Task { [weak self] in
             let total = await Self.scan(directory).total
-            await self?.finishUsageScan(total)
+            await self?.finishUsageScan(total, startedAtGeneration: startedAtGeneration)
         }
     }
 
-    private func finishUsageScan(_ total: Int) {
+    private func finishUsageScan(_ total: Int, startedAtGeneration: Int) {
         isScanning = false
+        guard startedAtGeneration == diskMutationGeneration else {
+            // Ada file yang selesai ditulis/dihapus ketika scan berlangsung.
+            // Ulangi sampai mendapat snapshot yang stabil.
+            runningDiskUsage = nil
+            startUsageScan()
+            return
+        }
         runningDiskUsage = total
         if total > maxDiskCacheSize { startEviction() }
     }
@@ -427,14 +455,25 @@ actor ImageCache {
 
         let directory = diskCacheURL
         let limit = maxDiskCacheSize
+        let startedAtGeneration = diskMutationGeneration
         Task { [weak self] in
             let remaining = await Self.evict(in: directory, limit: limit)
-            await self?.finishEviction(remaining)
+            await self?.finishEviction(
+                remaining,
+                startedAtGeneration: startedAtGeneration)
         }
     }
 
-    private func finishEviction(_ remaining: Int) {
+    private func finishEviction(_ remaining: Int, startedAtGeneration: Int) {
         isEvicting = false
+        guard startedAtGeneration == diskMutationGeneration else {
+            // Write baru bisa selesai selama eviction berjalan. Nilai
+            // `remaining` tidak mencakupnya secara andal, jadi rekonsiliasi
+            // lewat scan baru dan jalankan eviction lagi bila masih berlebih.
+            runningDiskUsage = nil
+            startUsageScan()
+            return
+        }
         runningDiskUsage = remaining
     }
 
@@ -482,6 +521,7 @@ actor ImageCache {
         try? FileManager.default.removeItem(at: diskCacheURL)
         try? FileManager.default.createDirectory(
             at: diskCacheURL, withIntermediateDirectories: true)
+        diskMutationGeneration &+= 1
         runningDiskUsage = 0
     }
 
@@ -491,6 +531,16 @@ actor ImageCache {
 
     func diskCacheLimit() -> Int {
         maxDiskCacheSize
+    }
+
+    /// Memulihkan cache yang sudah telanjur melewati batas pada versi lama,
+    /// tanpa menunggu pengguna menggulir dan menulis thumbnail baru.
+    func enforceDiskLimit() {
+        guard let usage = runningDiskUsage else {
+            startUsageScan()
+            return
+        }
+        if usage > maxDiskCacheSize { startEviction() }
     }
 
     func setDiskCacheLimit(_ bytes: Int) {
@@ -557,8 +607,13 @@ actor ImageCache {
 
             for file in files {
                 if totalSize <= target { break }
-                try? fileManager.removeItem(at: file.url)
-                totalSize -= file.size
+                do {
+                    try fileManager.removeItem(at: file.url)
+                    totalSize -= file.size
+                } catch {
+                    // A failed delete does not reclaim any storage.
+                    continue
+                }
             }
             return totalSize
         }.value
