@@ -193,9 +193,10 @@ final class OnboardingViewModelTests: XCTestCase {
         }
     }
 
-    func testDisabledPasswordCapabilityStopsBeforeCredentials() async {
+    func testOAuthOnlyServerOffersSSOWithoutPassword() async {
         mockSession.shouldSucceedPing = true
-        mockSession.shouldSucceedLogin = true
+        mockSession.shouldSucceedOIDC = true
+        mockSession.mockOAuthButtonText = "Sign in with Google"
         mockSession.mockFeatures = ServerFeaturesDTO(
             smartSearch: true,
             facialRecognition: true,
@@ -208,15 +209,57 @@ final class OnboardingViewModelTests: XCTestCase {
         viewModel.password = "password123"
 
         let connected = await viewModel.connectToServer()
-        XCTAssertFalse(connected)
+        XCTAssertTrue(connected)
 
         XCTAssertEqual(mockSession.loginPasswordCallCount, 0)
-        XCTAssertNil(viewModel.validatedServerText)
+        XCTAssertTrue(viewModel.canSignInWithOIDC)
+        XCTAssertEqual(viewModel.oauthButtonText, "Sign in with Google")
+        XCTAssertEqual(mockSession.serverConfigCallCount, 1)
         XCTAssertFalse(viewModel.canSubmit)
-        if case .failed(let message) = viewModel.phase {
-            XCTAssertTrue(message.localizedCaseInsensitiveContains("password"))
-        } else {
-            XCTFail("Expected password-login compatibility failure")
-        }
+        let signedIn = await viewModel.signInWithOIDC()
+        XCTAssertTrue(signedIn)
+        XCTAssertTrue(mockSession.isLoggedIn)
+        XCTAssertEqual(mockSession.loginOIDCCallCount, 1)
+    }
+
+    func testOAuthButtonFallsBackWhenServerConfigIsUnavailable() async {
+        mockSession.shouldSucceedPing = true
+        mockSession.shouldFailServerConfig = true
+        mockSession.mockFeatures = ServerFeaturesDTO(
+            smartSearch: true, facialRecognition: true,
+            oauth: true, passwordLogin: true, search: true)
+        viewModel.serverText = "https://immich.example.com"
+
+        let connected = await viewModel.connectToServer()
+        XCTAssertTrue(connected)
+        XCTAssertEqual(viewModel.oauthButtonText, "Sign In with OAuth")
+        XCTAssertTrue(viewModel.canSignInWithOIDC)
+    }
+
+    func testServerWithoutPasswordOrOAuthCannotConnect() async {
+        mockSession.shouldSucceedPing = true
+        mockSession.mockFeatures = ServerFeaturesDTO(
+            smartSearch: true, facialRecognition: true,
+            oauth: false, passwordLogin: false, search: true)
+        viewModel.serverText = "https://immich.example.com"
+
+        let connected = await viewModel.connectToServer()
+        XCTAssertFalse(connected)
+        XCTAssertNil(viewModel.validatedServerText)
+        XCTAssertFalse(viewModel.canSignInWithOIDC)
+    }
+
+    func testEditingServerDisablesOIDC() async {
+        mockSession.shouldSucceedPing = true
+        mockSession.mockFeatures = ServerFeaturesDTO(
+            smartSearch: true, facialRecognition: true,
+            oauth: true, passwordLogin: false, search: true)
+        viewModel.serverText = "https://immich.example.com"
+        let connected = await viewModel.connectToServer()
+        XCTAssertTrue(connected)
+
+        viewModel.serverText = "https://other.example.com"
+        XCTAssertFalse(viewModel.canSignInWithOIDC)
+        XCTAssertEqual(mockSession.loginOIDCCallCount, 0)
     }
 }

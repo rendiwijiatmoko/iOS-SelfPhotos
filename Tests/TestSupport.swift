@@ -15,6 +15,7 @@ class MockSessionManager: SessionManager {
     var shouldSucceedPing = false
     var shouldSucceedLogin = false
     var shouldSucceedApiKey = false
+    var shouldSucceedOIDC = false
     var mockVersion = ServerVersionDTO(major: 3, minor: 0, patch: 0)
     var mockFeatures: ServerFeaturesDTO? = ServerFeaturesDTO(
         smartSearch: true,
@@ -22,12 +23,16 @@ class MockSessionManager: SessionManager {
         oauth: false,
         passwordLogin: true,
         search: true)
+    var mockOAuthButtonText: String?
+    var shouldFailServerConfig = false
 
     private(set) var pingCallCount = 0
     private(set) var versionCallCount = 0
     private(set) var featuresCallCount = 0
+    private(set) var serverConfigCallCount = 0
     private(set) var loginPasswordCallCount = 0
     private(set) var loginApiKeyCallCount = 0
+    private(set) var loginOIDCCallCount = 0
 
     /// Mulai dari keadaan keluar akun, apa pun isi keychain simulator.
     ///
@@ -56,6 +61,15 @@ class MockSessionManager: SessionManager {
         return mockFeatures
     }
 
+    override func serverConfig() async throws -> ServerConfigDTO {
+        serverConfigCallCount += 1
+        guard !shouldFailServerConfig else { throw APIError.unknown }
+        let object = ["oauthButtonText": mockOAuthButtonText ?? ""]
+        return try JSONDecoder().decode(
+            ServerConfigDTO.self,
+            from: JSONEncoder().encode(object))
+    }
+
     override func serverVersion() async throws -> ServerVersionDTO {
         versionCallCount += 1
         return mockVersion
@@ -70,6 +84,12 @@ class MockSessionManager: SessionManager {
     override func loginApiKey(_ key: String) async throws {
         loginApiKeyCallCount += 1
         guard shouldSucceedApiKey else { throw APIError.unauthorized }
+        isLoggedIn = true
+    }
+
+    override func loginOIDC() async throws {
+        loginOIDCCallCount += 1
+        guard shouldSucceedOIDC else { throw APIError.unauthorized }
         isLoggedIn = true
     }
 }

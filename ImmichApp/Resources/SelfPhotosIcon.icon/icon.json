@@ -17,7 +17,7 @@
           "fill" : {
             "solid" : "extended-srgb:0.20392,0.78039,0.34902,1.00000"
           },
-          "glass" : false,
+          "glass" : true,
           "image-name" : "center.png",
           "name" : "center",
           "position" : {
@@ -32,7 +32,7 @@
           "fill" : {
             "solid" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
           },
-          "glass" : false,
+          "glass" : true,
           "image-name" : "left.png",
           "name" : "left",
           "position" : {
@@ -47,7 +47,7 @@
           "fill" : {
             "solid" : "extended-srgb:1.00000,0.55294,0.15686,1.00000"
           },
-          "glass" : false,
+          "glass" : true,
           "image-name" : "right.png",
           "name" : "right",
           "position" : {
@@ -62,7 +62,7 @@
           "fill" : {
             "solid" : "extended-srgb:1.00000,0.21961,0.23529,1.00000"
           },
-          "glass" : false,
+          "glass" : true,
           "hidden" : false,
           "image-name" : "top.png",
           "name" : "top",
@@ -112,7 +112,7 @@
               }
             }
           ],
-          "glass" : false,
+          "glass" : true,
           "hidden" : false,
           "image-name" : "legback.png",
           "name" : "legback",
@@ -138,7 +138,7 @@
               }
             }
           ],
-          "glass" : false,
+          "glass" : true,
           "hidden" : false,
           "image-name" : "legfront.png",
           "name" : "legfront",
@@ -164,7 +164,7 @@
               }
             }
           ],
-          "glass" : false,
+          "glass" : true,
           "hidden" : false,
           "image-name" : "head.png",
           "name" : "head",

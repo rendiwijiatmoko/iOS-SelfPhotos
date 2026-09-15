@@ -52,6 +52,7 @@ class SessionManager {
         urlSession: URLSession(configuration: APIClient.imageSessionConfiguration))
 
     @ObservationIgnored private lazy var api = APIClient(session: self)
+    @ObservationIgnored private let oidcBrowser = OIDCWebSession()
 
     init() {
         loadStoredSession()
@@ -100,6 +101,7 @@ class SessionManager {
     func ping() async throws { let _: ServerPingDTO = try await api.send(.init(path: "/server/ping")) }
     func serverVersion() async throws -> ServerVersionDTO { try await api.send(.init(path: "/server/version")) }
     func features() async throws -> ServerFeaturesDTO { try await api.send(.init(path: "/server/features")) }
+    func serverConfig() async throws -> ServerConfigDTO { try await api.send(.init(path: "/server/config")) }
 
     /// Menjalankan urutan pemeriksaan publik sebelum kredensial pernah dikirim.
     ///
@@ -130,6 +132,36 @@ class SessionManager {
                                body: LoginRequestDTO(email: email, password: password))
         let res: LoginResponseDTO = try await api.send(ep)
         applyAuth(token: res.accessToken, mode: .bearer)
+        try await fetchMe()
+        persist()
+        isLoggedIn = true
+        BackupService.shared.configure(session: self)
+    }
+
+    func loginOIDC() async throws {
+        try requireCompatibleServer(passwordLogin: false)
+        guard serverCompatibility?.features.oauth == true else {
+            throw ServerCompatibilityError.oauthUnavailable
+        }
+        let authorizedServer = baseURL
+        let request = try OIDCLoginRequest()
+        let authorize: OAuthAuthorizeResponseDTO = try await api.send(
+            .json("/oauth/authorize", method: .post, body: OAuthAuthorizeRequestDTO(
+                redirectUri: OIDCLoginRequest.redirectURI,
+                state: request.state,
+                codeChallenge: request.codeChallenge)))
+        guard let authorizationURL = URL(string: authorize.url) else {
+            throw OIDCLoginError.invalidAuthorizationURL
+        }
+        let callback = try await oidcBrowser.authenticate(at: authorizationURL)
+        guard baseURL == authorizedServer else { throw OIDCLoginError.serverChanged }
+        let normalizedCallback = try request.callbackURL(callback)
+        let response: LoginResponseDTO = try await api.send(
+            .json("/oauth/callback", method: .post, body: OAuthCallbackRequestDTO(
+                url: normalizedCallback,
+                state: request.state,
+                codeVerifier: request.codeVerifier)))
+        applyAuth(token: response.accessToken, mode: .bearer)
         try await fetchMe()
         persist()
         isLoggedIn = true

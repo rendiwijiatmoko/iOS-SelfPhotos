@@ -20,7 +20,7 @@ This policy covers the App's handling of information on your Apple device and it
 
 To provide its features, SelfPhotos may process the following information:
 
-- **Connection and authentication data** — your Immich server address and the access token or API key issued by that server. If you sign in with an email address and password, those credentials are sent directly to the configured server to create a session. The App stores the resulting access token, not your password.
+- **Connection and authentication data** — your Immich server address and the access token or API key issued by that server. If you sign in with an email address and password, those credentials are sent directly to the configured server to create a session. If you use single sign-on, the App opens the identity provider configured by your Immich server in a system browser and sends the resulting authorization callback to Immich to create a session. The App stores the resulting Immich access token, not your password or the identity provider's password.
 - **Account information** — account ID, display name, email address, profile image reference, and other profile fields returned by your server.
 - **Server library data** — photos, videos, thumbnails, albums, People records, memories, shared links, favorites, archive and trash status, descriptions, dates, locations, filenames, EXIF details, and other media or library metadata provided by or submitted to your server.
 - **Device photo library data** — photos, videos, Live Photos, album membership, identifiers, filenames, creation and modification dates, dimensions, favorites, and checksums needed to display local media, detect duplicates, upload selected items, save server media, or free device storage.
@@ -122,7 +122,7 @@ We do not use your information for advertising, marketing, unrelated profiling, 
 
 ## Network Transfers and Security
 
-The App sends authentication data, API requests, media, and metadata only to the Immich server address you configure, except for Apple services described below. Authentication tokens and API keys are stored in the iOS Keychain. Local databases, preferences, temporary upload files, thumbnails, and previews are stored inside the App's sandboxed containers.
+The App sends its API requests, media, and metadata to the Immich server address you configure, except for Apple services described below. If you use single sign-on, the system browser also connects to the identity provider configured by that server; the provider may process your sign-in according to its own privacy policy. Authentication tokens and API keys are stored in the iOS Keychain. Local databases, preferences, temporary upload files, thumbnails, and previews are stored inside the App's sandboxed containers.
 
 The security of data in transit depends on the URL and network you choose. We strongly recommend connecting through a trusted **HTTPS** endpoint with a valid certificate. If you configure a plain HTTP address, traffic is not protected by TLS and may be visible to or modified by other parties on the network.
 

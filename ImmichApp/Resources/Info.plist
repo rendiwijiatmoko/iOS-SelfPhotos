@@ -2,15 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Memilih scene Assistive Access native saat mode tersebut aktif. -->
-	<key>UISupportsAssistiveAccess</key>
-	<true/>
-	<!-- Aplikasi tidak mengimplementasikan enkripsi non-exempt. HTTPS/TLS memakai
-	     API sistem Apple; CryptoKit hanya dipakai untuk checksum SHA-1/SHA-256. -->
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
-	<!-- Bahasa yang ditawarkan iOS pada Settings > SelfPhotos > Language.
-	     String catalog menyediakan terjemahan per locale; English tetap fallback. -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>app.immich.backup.refresh</string>
+		<string>app.immich.backup.processing</string>
+	</array>
 	<key>CFBundleLocalizations</key>
 	<array>
 		<string>en</string>
@@ -53,35 +49,6 @@
 		<string>uk</string>
 		<string>vi</string>
 	</array>
-	<!-- Pengenal tugas latar HARUS terdaftar di sini.
-
-	     Ini satu-satunya alasan berkas ini ada: nilainya sebuah array, dan
-	     tidak ada build setting `INFOPLIST_KEY_*` untuk array. `GENERATE_
-	     INFOPLIST_FILE` tetap YES — Xcode menggabungkan berkas ini dengan
-	     kunci-kunci yang dihasilkannya, jadi yang lain tidak perlu disalin
-	     ke sini.
-
-	     DUA pengenal, sama seperti aplikasi Immich resmi. Masing-masing punya
-	     antrean penjadwalan sendiri di iOS: yang refresh sering tapi pendek,
-	     yang processing jarang tapi panjang — dan yang kedua itulah yang
-	     biasanya berjalan tengah malam saat perangkat mengisi daya.
-
-	     Kalau daftar ini tidak cocok dengan pengenal di `BackupScheduler`,
-	     `BGTaskScheduler.register` menjatuhkan aplikasinya saat diluncurkan. -->
-	<key>BGTaskSchedulerPermittedIdentifiers</key>
-	<array>
-		<string>app.immich.backup.refresh</string>
-		<string>app.immich.backup.processing</string>
-	</array>
-	<!-- Wajib untuk BGAppRefreshTask dan BGProcessingTask. Tanpa dua mode ini,
-	     identifier di atas terdaftar tetapi sistem tidak memberi aplikasi waktu
-	     eksekusi background yang dimintanya. -->
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>fetch</string>
-		<string>processing</string>
-	</array>
-	<!-- URL yang dipakai WidgetKit untuk membuka tujuan di dalam aplikasi. -->
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -90,18 +57,15 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>selfphotos</string>
-				<!-- Scheme lama dipertahankan agar widget/deep link dari versi
-				     sebelum rebrand tetap berfungsi setelah aplikasi diperbarui. -->
 				<string>immiches</string>
 			</array>
 		</dict>
 	</array>
-	<!-- Menu saat ikon aplikasi ditekan lama. -->
 	<key>UIApplicationShortcutItems</key>
 	<array>
 		<dict>
-            <key>UIApplicationShortcutItemIconSymbolName</key>
-            <string>heart</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>heart</string>
 			<key>UIApplicationShortcutItemTitle</key>
 			<string>FAVORITES_SHORTCUT_TITLE</string>
 			<key>UIApplicationShortcutItemType</key>
@@ -116,5 +80,12 @@
 			<string>xyz.0xmwehehe.ImmichApp.search</string>
 		</dict>
 	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>processing</string>
+	</array>
+	<key>UISupportsAssistiveAccess</key>
+	<true/>
 </dict>
 </plist>

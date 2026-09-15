@@ -5,6 +5,22 @@ struct LoginRequestDTO: Encodable {
     let password: String
 }
 
+struct OAuthAuthorizeRequestDTO: Encodable {
+    let redirectUri: String
+    let state: String
+    let codeChallenge: String
+}
+
+struct OAuthAuthorizeResponseDTO: Decodable {
+    let url: String
+}
+
+struct OAuthCallbackRequestDTO: Encodable {
+    let url: String
+    let state: String
+    let codeVerifier: String
+}
+
 struct LoginResponseDTO: Decodable {
     let accessToken: String
     let userId: String

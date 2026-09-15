@@ -83,28 +83,48 @@ struct OnboardingView: View {
                 subtitle: "Sign in with your Immich account.",
                 logoSize: 48)
 
-            field("Email") {
-                TextField("you@example.com", text: $vm.email)
-                    .textInputAutocapitalization(.never)
-                    .textContentType(.username)
-                    .keyboardType(.emailAddress)
-                    .autocorrectionDisabled()
-                    .submitLabel(.next)
+            if vm.features?.passwordLogin == true {
+                field("Email") {
+                    TextField("you@example.com", text: $vm.email)
+                        .textInputAutocapitalization(.never)
+                        .textContentType(.username)
+                        .keyboardType(.emailAddress)
+                        .autocorrectionDisabled()
+                        .submitLabel(.next)
+                }
+
+                field("Password") {
+                    SecureField("Required", text: $vm.password)
+                        .textContentType(.password)
+                        .submitLabel(.go)
+                        .onSubmit { signIn(vm) }
+                }
+
+                if vm.features?.oauth == true {
+                    Button { signIn(vm) } label: {
+                        buttonLabel("Sign In", isLoading: vm.phase.isLoading)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .disabled(!vm.canSubmit || vm.phase.isLoading)
+                } else {
+                    Button { signIn(vm) } label: {
+                        buttonLabel("Sign In", isLoading: vm.phase.isLoading)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(!vm.canSubmit || vm.phase.isLoading)
+                }
             }
 
-            field("Password") {
-                SecureField("Required", text: $vm.password)
-                    .textContentType(.password)
-                    .submitLabel(.go)
-                    .onSubmit { signIn(vm) }
+            if vm.features?.oauth == true {
+                Button { signInWithOIDC(vm) } label: {
+                    serverButtonLabel(vm.oauthButtonText, isLoading: vm.phase.isLoading)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(!vm.canSignInWithOIDC || vm.phase.isLoading)
             }
-
-            Button { signIn(vm) } label: {
-                buttonLabel("Sign In", isLoading: vm.phase.isLoading)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(!vm.canSubmit || vm.phase.isLoading)
         }
         .navigationTitle("Sign In")
         .navigationBarTitleDisplayMode(.inline)
@@ -113,6 +133,15 @@ struct OnboardingView: View {
     private func signIn(_ vm: OnboardingViewModel) {
         Task {
             guard await vm.signIn() else {
+                presentCurrentError(from: vm)
+                return
+            }
+        }
+    }
+
+    private func signInWithOIDC(_ vm: OnboardingViewModel) {
+        Task {
+            guard await vm.signInWithOIDC() else {
                 presentCurrentError(from: vm)
                 return
             }
@@ -177,6 +206,18 @@ struct OnboardingView: View {
         _ title: LocalizedStringKey,
         isLoading: Bool
     ) -> some View {
+        Group {
+            if isLoading {
+                ProgressView()
+            } else {
+                Text(title)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 22)
+    }
+
+    private func serverButtonLabel(_ title: String, isLoading: Bool) -> some View {
         Group {
             if isLoading {
                 ProgressView()

@@ -11,6 +11,7 @@ final class OnboardingViewModel {
             else { return }
             self.validatedServerText = nil
             features = nil
+            oauthButtonText = "Sign In with OAuth"
             phase = .idle
         }
     }
@@ -23,6 +24,7 @@ final class OnboardingViewModel {
     /// Dipakai untuk menyembunyikan tab yang tidak berlaku — mis. server
     /// OAuth-only yang mematikan login kata sandi.
     var features: ServerFeaturesDTO?
+    var oauthButtonText = "Sign In with OAuth"
     private(set) var validatedServerText: String?
 
     private let session: SessionManager
@@ -50,7 +52,12 @@ final class OnboardingViewModel {
     }
 
     var canSubmit: Bool {
-        validatedServerText != nil && !email.isEmpty && !password.isEmpty
+        validatedServerText != nil && features?.passwordLogin == true
+            && !email.isEmpty && !password.isEmpty
+    }
+
+    var canSignInWithOIDC: Bool {
+        validatedServerText != nil && features?.oauth == true
     }
 
     /// Tahap pertama hanya menyentuh endpoint publik. Kredensial belum pernah
@@ -63,9 +70,17 @@ final class OnboardingViewModel {
         do {
             try session.setServer(serverText)
             let compatibility = try await session.checkServerCompatibility()
-            guard compatibility.features.passwordLogin else {
-                throw ServerCompatibilityError.passwordLoginUnavailable
+            guard compatibility.features.passwordLogin || compatibility.features.oauth else {
+                throw ServerCompatibilityError.authenticationUnavailable
             }
+            var configuredButtonText: String?
+            if compatibility.features.oauth {
+                configuredButtonText = (try? await session.serverConfig())?.oauthButtonText
+            }
+            let trimmedButtonText = configuredButtonText?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            oauthButtonText = trimmedButtonText.flatMap { $0.isEmpty ? nil : $0 }
+                ?? "Sign In with OAuth"
             features = compatibility.features
             validatedServerText = normalized(serverText)
             phase = .loaded(())
@@ -73,6 +88,7 @@ final class OnboardingViewModel {
         } catch {
             validatedServerText = nil
             features = nil
+            oauthButtonText = "Sign In with OAuth"
             phase = .failed(message(for: error))
             return false
         }
@@ -95,6 +111,25 @@ final class OnboardingViewModel {
             return true
         } catch {
             phase = .failed(message(for: error))
+            return false
+        }
+    }
+
+    @discardableResult
+    func signInWithOIDC() async -> Bool {
+        guard canSignInWithOIDC else { return false }
+        phase = .loading
+        do {
+            try await session.loginOIDC()
+            UserDefaults.standard.set(serverText, forKey: Self.lastServerKey)
+            phase = .loaded(())
+            return true
+        } catch {
+            if let apiError = error as? APIError, case .unauthorized = apiError {
+                phase = .failed(String(localized: "Single sign-on was rejected by the server."))
+            } else {
+                phase = .failed(message(for: error))
+            }
             return false
         }
     }

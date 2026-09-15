@@ -56,6 +56,8 @@ enum ServerCompatibilityError: LocalizedError, Equatable {
     case serverTooOld(found: ServerVersionDTO)
     case appTooOld(found: ServerVersionDTO)
     case passwordLoginUnavailable
+    case oauthUnavailable
+    case authenticationUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -70,7 +72,11 @@ enum ServerCompatibilityError: LocalizedError, Equatable {
                 localized: "Server \(found.displayName) is newer than this app supports. Update the app before signing in.")
         case .passwordLoginUnavailable:
             return String(
-                localized: "Password login is disabled on this server. SelfPhotos currently supports email and password sign-in only.")
+                localized: "Password login is disabled on this server.")
+        case .oauthUnavailable:
+            return String(localized: "Single sign-on is disabled on this server.")
+        case .authenticationUnavailable:
+            return String(localized: "This server does not offer a supported sign-in method.")
         }
     }
 
