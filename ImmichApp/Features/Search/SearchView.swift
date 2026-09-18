@@ -33,10 +33,10 @@ struct SearchView: View {
                 // Photos dan Library. Item toolbar tidak menyusut atau pindah ke
                 // tengah saat isinya digulir.
                 //
-                // Latar bar-nya diserahkan ke sistem seperti di Photos, tanpa
-                // `toolbarBackground(.hidden,…)`: di iOS 26 itulah yang memberi
-                // kacanya, dan layar ini sama-sama grid yang digulir.
+                // Navigation bar tetap ada, tanpa latar di belakang judul dan
+                // aksi saat hasil pencarian digulir.
                 .toolbar { searchToolbar }
+                .toolbarBackground(.hidden, for: .navigationBar)
                 // Tab bar diganti bottom bar selama memilih, supaya aksi
                 // seleksi menempati tempat yang sama — persis seperti Photos.
                 //
@@ -111,6 +111,9 @@ struct SearchView: View {
         // penanda sekali-jalan menjaga keyboard tidak dipaksa muncul lagi saat
         // pengguna kembali ke Search pada sesi tab yang sama.
         .task(id: isActive) {
+            // iOS 27 mengaktifkan search dari pemilihan tab lewat TabView.
+            // Fokus manual ini hanya diperlukan untuk perilaku iOS 26.
+            if #available(iOS 27.0, *) { return }
             guard isActive, !didRequestInitialFocus else {
                 if !isActive { isSearchFocused = false }
                 return

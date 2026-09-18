@@ -1,6 +1,17 @@
 import SwiftUI
 import UIKit
 
+private extension View {
+    @ViewBuilder
+    func activateSearchOnTabSelection() -> some View {
+        if #available(iOS 27.0, *) {
+            tabViewSearchActivation(.searchTabSelection)
+        } else {
+            self
+        }
+    }
+}
+
 struct AppRouter: View {
     @Environment(SessionManager.self) private var session
     @AppStorage(SettingsViewModel.themeKey) private var theme = "system"
@@ -202,6 +213,7 @@ struct MainTabView: View {
                 SearchView(isActive: selectedDestination == .search)
             }
         }
+        .activateSearchOnTabSelection()
         // State minimize dibaca dari tab bar yang benar-benar digambar sistem.
         // Picker di bawah hanya mengisi celah tengah ketika state itu aktif.
         .tabBarMinimizeBehaviorWithUpdate(
@@ -294,6 +306,7 @@ struct MainTabView: View {
                 SearchView(isActive: selectedDestination == .search)
             }
         }
+        .activateSearchOnTabSelection()
         .tabViewStyle(.sidebarAdaptable)
         .sheet(isPresented: $showNewAlbum) {
             NewAlbumSheet { name, description, assetIDs in

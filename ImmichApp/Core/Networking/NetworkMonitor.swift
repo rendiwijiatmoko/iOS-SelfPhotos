@@ -50,7 +50,7 @@ final class NetworkMonitor {
         monitor.pathUpdateHandler = { path in
             let online = path.status == .satisfied
             let expensive = path.isExpensive || path.isConstrained
-            Task { @MainActor [weak self] in
+            Task { @MainActor [weak self = self] in
                 guard let self else { return }
                 let didChange = self.isOnline != online
                     || self.isExpensive != expensive

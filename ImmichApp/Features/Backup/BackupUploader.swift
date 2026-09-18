@@ -216,7 +216,7 @@ final class BackupUploader: NSObject {
                       modified < cutoff else { continue }
                 // An absent task does not prove server success. Preserve its
                 // last copy when Photos access is missing or restricted.
-                try? BackupTemporaryFiles.finish(
+                _ = try? BackupTemporaryFiles.finish(
                     context, succeeded: false,
                     sourceAvailable: LocalPhotoLibrary.hasReadAccess && LocalPhotoLibrary.assetExists(context.localIdentifier))
             }

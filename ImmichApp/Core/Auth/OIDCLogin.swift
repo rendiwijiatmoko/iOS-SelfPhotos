@@ -110,9 +110,14 @@ final class OIDCWebSession: NSObject, ASWebAuthenticationPresentationContextProv
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap(\.windows)
-            .first(where: \.isKeyWindow) ?? ASPresentationAnchor()
+        let windowScenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        if let keyWindow = windowScenes.flatMap(\.windows).first(where: \.isKeyWindow) {
+            return keyWindow
+        }
+
+        guard let windowScene = windowScenes.first else {
+            fatalError("A connected window scene is required to present the OIDC login session.")
+        }
+        return windowScene.windows.first ?? ASPresentationAnchor(windowScene: windowScene)
     }
 }
