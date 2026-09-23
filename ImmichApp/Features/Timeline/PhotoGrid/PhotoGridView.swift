@@ -1075,6 +1075,34 @@ final class PhotoGridController: UIViewController {
             animated: false)
     }
 
+    /// Aset terdekat dengan tengah area foto yang benar-benar terlihat.
+    /// Membaca posisi saat ini tanpa mengubah offset atau jangkar terbaru.
+    func visibleAssetForTimelineNavigation() -> AssetLite? {
+        guard isViewLoaded, let dataSource else { return nil }
+
+        let visible = collectionView.bounds.inset(by: collectionView.adjustedContentInset)
+        guard visible.width > 0, visible.height > 0 else { return nil }
+
+        var nearestAsset: AssetLite?
+        var nearestDistance = CGFloat.greatestFiniteMagnitude
+        for path in collectionView.indexPathsForVisibleItems.sorted() {
+            guard let id = dataSource.itemIdentifier(for: path),
+                  let asset = assetsByID[id],
+                  let attributes = collectionView.layoutAttributesForItem(at: path),
+                  attributes.frame.intersects(visible)
+            else { continue }
+
+            let dx = attributes.frame.midX - visible.midX
+            let dy = attributes.frame.midY - visible.midY
+            let distance = dx * dx + dy * dy
+            if distance < nearestDistance {
+                nearestDistance = distance
+                nearestAsset = asset
+            }
+        }
+        return nearestAsset
+    }
+
     /// Melompat langsung ke sebuah aset tanpa melewati setiap thumbnail di
     /// antaranya. Dipakai kartu Months dan Years untuk membuka foto pertama
     /// periodenya di mode All.

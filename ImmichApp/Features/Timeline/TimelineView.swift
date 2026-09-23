@@ -18,7 +18,6 @@ struct TimelineView: View {
     var isActive = true
 
     @Environment(SessionManager.self) private var session
-    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     /// Linimasa merender dari hasil sync, jadi ia perlu tahu kapan sync selesai.
     @Environment(SyncViewModel.self) private var syncVM: SyncViewModel?
@@ -58,8 +57,6 @@ struct TimelineView: View {
     /// Pegangan ke controller grid, untuk perintah yang datang dari luar —
     /// ketukan kedua tab Photos, misalnya.
     @State private var gridController: PhotoGridController?
-    /// Mencegah dua kartu memulai penerbangan ke grid secara bersamaan.
-    @State private var isPeriodZooming = false
     /// Grid pembuka tidak boleh memperlihatkan cache lama sesaat sebelum sync
     /// menambahkan aset terbaru dan memindahkannya lagi ke bawah.
     @State private var initialNewestContentReady = false
@@ -189,14 +186,6 @@ struct TimelineView: View {
         .onChange(of: LocalPhotoLibrary.shared.revision) { _, _ in
             Task { await vm?.reloadDevicePhotos() }
         }
-        // Membuka kembali aplikasi selalu kembali ke foto terbaru. Controller
-        // sengaja melepas anchor bawah setelah pengguna scroll; tanpa memasangnya
-        // lagi di foreground, foto yang ditemukan/diunggah auto-backup bertambah
-        // di bawah sementara layar tertahan pada posisi sesi sebelumnya.
-        .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
-            gridController?.scrollToNewest(animated: false)
-        }
         .deleteFromDeviceAlert($deviceDeleteID) { deleteFeedback += 1 }
         .sensoryFeedback(.impact(weight: .heavy), trigger: deleteFeedback)
         // Favorit BUKAN ketukan berat: hasilnya bukan sesuatu yang hilang,
@@ -296,35 +285,14 @@ struct TimelineView: View {
         }
     }
 
-    /// Grid All dipertahankan hidup di belakang navigator Months/Years.
-    ///
-    /// Dengan begitu memilih satu kartu dapat memindahkan UICollectionView ke
-    /// tujuan lebih dulu, lalu memperlihatkannya — tanpa membangun ulang puluhan
-    /// ribu item dan tanpa satu frame di posisi lama.
     private func timelineContent(_ vm: TimelineViewModel) -> some View {
-        ZStack {
+        TimelineBrowserView(
+            viewModel: vm,
+            navigation: timelineNavigation,
+            gridController: gridController,
+            resetScrollRequest: resetScrollRequest
+        ) {
             timelineGrid(vm)
-                .opacity(timelineNavigation.mode == .all ? 1 : 0)
-                .allowsHitTesting(timelineNavigation.mode == .all)
-                .accessibilityHidden(timelineNavigation.mode != .all)
-
-            if timelineNavigation.mode != .all {
-                TimelineNavigatorView(
-                    mode: timelineNavigation.mode,
-                    items: timelineNavigation.mode == .years
-                        ? vm.yearNavigationItems
-                        : vm.monthNavigationItems,
-                    returnToNewestRequest: timelineNavigation.returnToNewestRequest,
-                    onSelect: jumpToPeriod)
-                    .transition(.opacity)
-            }
-        }
-        .animation(.easeInOut(duration: 0.2), value: timelineNavigation.mode)
-        // Mengetuk ulang All membawa grid ke foto terbaru. Gerakan menuju batas
-        // bawah ini sekaligus mengembalikan tab bar native ke bentuk normal.
-        .onChange(of: timelineNavigation.returnToNewestRequest) { _, _ in
-            guard timelineNavigation.mode == .all else { return }
-            gridController?.scrollToNewest(animated: true)
         }
     }
 
@@ -372,56 +340,6 @@ struct TimelineView: View {
         // menahan baris pertama di bawah bar, jadi tidak ada foto yang tertutup —
         // yang berubah cuma: sekarang foto lewat di belakangnya saat digulir.
         .ignoresSafeArea(edges: [.top, .bottom])
-    }
-
-    /// Posisikan grid yang masih hidup lebih dulu, baru buka kembali mode All.
-    private func jumpToPeriod(
-        _ item: TimelineNavigationItem,
-        sourceFrame: CGRect
-    ) {
-        guard !isPeriodZooming,
-              sourceFrame.width > 1,
-              sourceFrame.height > 1,
-              let gridController,
-              gridController.scrollToAsset(
-                  id: item.targetAssetID,
-                  animated: false),
-              let destination = gridController.zoomSource(
-                  for: item.targetAssetID),
-              let image = destination.image,
-              let window = gridController.view.window
-        else {
-            gridController?.scrollToAsset(
-                id: item.targetAssetID,
-                animated: false)
-            timelineNavigation.mode = .all
-            return
-        }
-
-        isPeriodZooming = true
-        gridController.setZoomSourceHidden(true, for: item.targetAssetID)
-
-        // Kartu asal langsung diganti grid, tetapi satu gambar terbang menutup
-        // pergantian itu. Animasi opacity mode dimatikan supaya tidak ada dua
-        // transisi yang berebut atas gambar yang sama.
-        var transaction = Transaction(animation: nil)
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            timelineNavigation.mode = .all
-        }
-
-        animatePhotoMatchZoom(
-            image: image,
-            fromScreenFrame: sourceFrame,
-            toScreenFrame: destination.frame,
-            in: window,
-            sourceCornerRadius: 18
-        ) {
-            gridController.setZoomSourceHidden(
-                false,
-                for: item.targetAssetID)
-            isPeriodZooming = false
-        }
     }
 
     /// Membaca hasil sync sekali lagi sebelum grid pembuka ditampilkan. Aman
@@ -755,14 +673,8 @@ struct TimelineView: View {
     /// salah — foto terbaru ada di bawah, sedangkan tarikan itu hanya bisa
     /// dilakukan dari puncak, tempat foto paling lama berada.
     private func returnToNewest(_ vm: TimelineViewModel) {
-        timelineNavigation.mode = .all
-
-        // Beranimasi, bukan melompat: perpindahan sebesar ini tanpa gerakan
-        // membuat pengguna kehilangan pegangan tentang ke mana ia baru saja
-        // dibawa. Jaraknya ditempuh penuh; ongkosnya ditekan dengan
-        // menghentikan pemuatan thumbnail selama terbang — lihat
-        // `scrollToNewest(animated:)`.
-        gridController?.scrollToNewest(animated: true)
+        // TimelineBrowserView menangani resetScrollRequest dan perpindahan
+        // mode sebagai satu aksi supaya jangkar periode tidak menimpa newest.
 
         // Penyegaran DITUNDA sampai terbangnya benar-benar selesai.
         //
@@ -879,162 +791,6 @@ struct TimelineView: View {
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.background)
-    }
-}
-
-/// Navigator visual yang muncul saat Years atau Months dipilih.
-///
-/// Hanya satu kartu per periode yang hidup di sekitar layar berkat LazyVStack.
-/// Gambarnya sendiri tidak disimpan dalam state kartu; cache gambar global tetap
-/// menjadi satu-satunya pemilik bitmap sehingga menggulir ratusan bulan tidak
-/// menahan seluruh thumbnail di memori.
-private struct TimelineNavigatorView: View {
-    let mode: TimelineMode
-    let items: [TimelineNavigationItem]
-    let returnToNewestRequest: Int
-    let onSelect: (TimelineNavigationItem, CGRect) -> Void
-
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 34) {
-                    ForEach(items) { item in
-                        TimelineNavigatorButton(
-                            mode: mode,
-                            item: item,
-                            onSelect: onSelect)
-                            .id(item.id)
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 24)
-            }
-            // Urutannya sama dengan All: paling lama di atas, paling baru di
-            // bawah. Mengetuk ulang segmen aktif kembali ke periode terbaru.
-            .defaultScrollAnchor(.bottom)
-            .background(Color(.systemBackground))
-            .onChange(of: returnToNewestRequest) { _, _ in
-                guard let newest = items.last else { return }
-                withAnimation(.easeInOut(duration: 0.35)) {
-                    proxy.scrollTo(newest.id, anchor: .bottom)
-                }
-            }
-        }
-    }
-}
-
-private struct TimelineNavigatorButton: View {
-    let mode: TimelineMode
-    let item: TimelineNavigationItem
-    let onSelect: (TimelineNavigationItem, CGRect) -> Void
-
-    @State private var coverFrame = CGRect.zero
-
-    var body: some View {
-        Button {
-            onSelect(item, coverFrame)
-        } label: {
-            TimelineNavigatorCard(
-                mode: mode,
-                item: item,
-                coverFrame: $coverFrame)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(item.title)
-        .accessibilityHint("Show the first photo from this period")
-    }
-}
-
-private struct TimelineNavigatorCard: View {
-    let mode: TimelineMode
-    let item: TimelineNavigationItem
-    @Binding var coverFrame: CGRect
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            if mode == .months {
-                Text(item.title)
-                    .font(.title.bold())
-                    .foregroundStyle(.primary)
-            }
-
-            Color.clear
-                .aspectRatio(1.45, contentMode: .fit)
-                .overlay {
-                    TimelineNavigatorCover(asset: item.cover)
-                }
-                .clipShape(.rect(cornerRadius: 18))
-                .overlay(alignment: .topLeading) {
-                    Text(overlayTitle)
-                        .font(.title2.bold())
-                        .foregroundStyle(.white)
-                        .shadow(color: .black.opacity(0.55), radius: 3, y: 1)
-                        .padding(14)
-                }
-                .contentShape(.rect(cornerRadius: 18))
-                .onGeometryChange(for: CGRect.self) { proxy in
-                    proxy.frame(in: .global)
-                } action: { newFrame in
-                    if coverFrame != newFrame { coverFrame = newFrame }
-                }
-        }
-    }
-
-    private var overlayTitle: String {
-        if mode == .years { return item.title }
-        return String(Calendar.current.component(.day, from: item.cover.createdAt))
-    }
-}
-
-private struct TimelineNavigatorCover: View {
-    let asset: AssetLite
-
-    @Environment(SessionManager.self) private var session
-    @State private var revision = 0
-
-    var body: some View {
-        let image = displayedImage(revision: revision)
-
-        ZStack(alignment: .bottomTrailing) {
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Color(.tertiarySystemFill)
-                    .overlay {
-                        Image(systemName: "photo")
-                            .font(.title)
-                            .foregroundStyle(.secondary)
-                    }
-            }
-
-            if asset.isVideo {
-                Image(systemName: "play.fill")
-                    .font(.caption.bold())
-                    .foregroundStyle(.white)
-                    .padding(8)
-                    .background(.black.opacity(0.55), in: .circle)
-                    .padding(10)
-            }
-        }
-        .clipped()
-        .task(id: asset.id) {
-            let loader = PhotoThumbnailLoader(session: session)
-            guard loader.cachedImage(for: asset.id) == nil else { return }
-            _ = await loader.image(for: asset.id)
-            revision &+= 1
-        }
-    }
-
-    /// `revision` sengaja menjadi parameter supaya pembacaannya tercatat oleh
-    /// SwiftUI walaupun bitmap sebenarnya selalu dibaca dari cache terbatas.
-    private func displayedImage(revision: Int) -> UIImage? {
-        ImageMemoryCache.shared.image(
-            for: ImageCache.memoryKey(
-                "\(asset.id)-thumbnail",
-                PhotoThumbnailLoader.maxPixelSize))
-            ?? ThumbHash.placeholder(for: asset.thumbhash)
     }
 }
 

@@ -1,5 +1,55 @@
 import UIKit
 
+/// A pending or running card-to-grid match, including its cleanup callback.
+/// The caller cancels it when changing modes or leaving the timeline.
+@MainActor
+final class PhotoMatchZoomTransition {
+    private var flyingView: UIImageView?
+    private var animator: UIViewPropertyAnimator?
+    private var completion: (() -> Void)?
+    private var hasFinished = false
+
+    fileprivate init(completion: @escaping () -> Void) {
+        self.completion = completion
+    }
+
+    /// Safe before animation starts, while running, or after it completes.
+    func cancel() {
+        finish()
+    }
+
+    fileprivate func prepare(
+        flyingView: UIImageView,
+        destination: CGRect,
+        destinationCornerRadius: CGFloat
+    ) {
+        self.flyingView = flyingView
+        let animator = UIViewPropertyAnimator(duration: 0.42, dampingRatio: 0.86) {
+            flyingView.frame = destination
+            flyingView.layer.cornerRadius = destinationCornerRadius
+        }
+        animator.addCompletion { _ in self.finish() }
+        self.animator = animator
+    }
+
+    fileprivate func start() {
+        guard !hasFinished else { return }
+        animator?.startAnimation()
+    }
+
+    fileprivate func finish() {
+        guard !hasFinished else { return }
+        hasFinished = true
+        if animator?.state == .active { animator?.stopAnimation(true) }
+        animator = nil
+        flyingView?.removeFromSuperview()
+        flyingView = nil
+        let onCompletion = completion
+        completion = nil
+        onCompletion?()
+    }
+}
+
 /// Menjembatani perpindahan gambar antara view SwiftUI dan sel UIKit.
 ///
 /// `matchedGeometryEffect` hanya dapat mencocokkan dua view SwiftUI dalam
@@ -7,21 +57,31 @@ import UIKit
 /// adalah `UICollectionView`, jadi satu image view sementara dipakai sebagai
 /// representasi bersama keduanya.
 @MainActor
+@discardableResult
 func animatePhotoMatchZoom(
     image: UIImage,
     fromScreenFrame: CGRect,
     toScreenFrame: CGRect,
     in window: UIWindow,
     sourceCornerRadius: CGFloat,
+    destinationCornerRadius: CGFloat = 0,
     completion: @escaping () -> Void
-) {
+) -> PhotoMatchZoomTransition {
+    let transition = PhotoMatchZoomTransition(completion: completion)
     guard fromScreenFrame.width > 1,
           fromScreenFrame.height > 1,
           toScreenFrame.width > 1,
           toScreenFrame.height > 1
     else {
-        completion()
-        return
+        transition.finish()
+        return transition
+    }
+
+    // Tetap beri SwiftUI satu putaran untuk memasang tujuan sebelum membuka
+    // selnya, tanpa menerbangkan atau memperbesar gambar saat Reduce Motion.
+    guard !UIAccessibility.isReduceMotionEnabled else {
+        DispatchQueue.main.async { transition.finish() }
+        return transition
     }
 
     let flying = UIImageView(image: image)
@@ -33,24 +93,17 @@ func animatePhotoMatchZoom(
     window.addSubview(flying)
 
     let destination = window.convert(toScreenFrame, from: nil)
+    transition.prepare(
+        flyingView: flying,
+        destination: destination,
+        destinationCornerRadius: destinationCornerRadius)
 
     // Mulai pada run loop berikutnya agar SwiftUI sempat menukar navigator
     // dengan grid di belakang gambar yang masih diam di frame asal.
     DispatchQueue.main.async {
-        UIView.animate(
-            withDuration: 0.42,
-            delay: 0,
-            usingSpringWithDamping: 0.86,
-            initialSpringVelocity: 0,
-            options: [.beginFromCurrentState, .allowUserInteraction]
-        ) {
-            flying.frame = destination
-            flying.layer.cornerRadius = 0
-        } completion: { _ in
-            flying.removeFromSuperview()
-            completion()
-        }
+        transition.start()
     }
+    return transition
 }
 
 /// Penanda scroll view yang memegang foto di layar detail.

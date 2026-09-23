@@ -4,19 +4,37 @@ import Observation
 import SwiftUI
 
 /// Satu tujuan pada navigator Months atau Years.
-struct TimelineNavigationItem: Identifiable, Equatable {
+struct TimelineNavigationItem: Identifiable, Equatable, Sendable {
     let id: String
     let title: String
-    let cover: AssetLite
+    var cover: AssetLite
+    var highlights: [TimelineDayHighlight] = []
 
     /// Aset paling awal pada periode ini; menjadi jangkar saat kembali ke All.
+    var targetAssetID: String { cover.id }
+}
+
+/// Satu tanggal pilihan dalam bulan; cover juga menjadi tujuan zoom ke All.
+struct TimelineDayHighlight: Identifiable, Equatable, Sendable {
+    let id: String
+    let date: Date
+    let title: String
+    let count: Int
+    var cover: AssetLite
+
     var targetAssetID: String { cover.id }
 }
 
 @MainActor
 @Observable
 final class TimelineViewModel {
-    var sections: [TimelineSection] = []
+    /// Section dan navigator disimpan bersama agar highlight tidak dihitung
+    /// ulang pada setiap evaluasi body ketika pengguna menggulir.
+    private var content = TimelineContent()
+    var sections: [TimelineSection] {
+        get { content.sections }
+        set { content = Self.makeContent(sections: newValue, calendar: calendar) }
+    }
     /// Daftar datar seluruh foto, disimpan bukan dihitung.
     ///
     /// Layar detail memerlukannya sebagai isi pager. Sebagai properti terhitung,
@@ -57,46 +75,36 @@ final class TimelineViewModel {
     /// Pencocok foto perangkat dengan aset server; nil kalau layar ini dibangun
     /// tanpa jaringan (pratinjau, tes).
     private let matcher: DeviceAssetMatcher?
+    private let calendar: Calendar
 
-    /// Satu kartu per bulan, tetap dalam urutan lama → baru seperti timeline.
+    /// Maksimal tiga tanggal teramai per bulan, ditampilkan lama → baru.
     var monthNavigationItems: [TimelineNavigationItem] {
-        sections.compactMap { section in
-            guard let first = section.assets.first else { return nil }
-            return TimelineNavigationItem(
-                id: section.id,
-                title: Self.formatNavigatorMonthTitle(section.id),
-                cover: first)
-        }
+        content.months
     }
 
     /// Satu kartu per tahun. Cover sekaligus targetnya adalah aset pertama pada
     /// bulan pertama yang tersedia di tahun tersebut.
     var yearNavigationItems: [TimelineNavigationItem] {
-        var result: [TimelineNavigationItem] = []
-        result.reserveCapacity(max(sections.count / 12, 1))
-
-        for section in sections {
-            guard let first = section.assets.first else { continue }
-            let year = String(section.id.prefix(4))
-            guard result.last?.id != year else { continue }
-            result.append(TimelineNavigationItem(
-                id: year,
-                title: year,
-                cover: first))
-        }
-        return result
+        content.years
     }
 
     init(
         dataManager: SwiftDataManager? = nil,
         assetRepo: AssetDetailRepository? = nil,
         albumRepo: AlbumRepository? = nil,
-        matcher: DeviceAssetMatcher? = nil
+        matcher: DeviceAssetMatcher? = nil,
+        calendar: Calendar = .current
     ) {
         self.dataManager = dataManager
         self.assetRepo = assetRepo
         self.albumRepo = albumRepo
         self.matcher = matcher
+        // MonthKey memakai kalender Gregorian. Preferensi kalender sistem
+        // tidak boleh membuat label harinya memakai bulan/tahun yang berbeda.
+        var timelineCalendar = Calendar(identifier: .gregorian)
+        timelineCalendar.timeZone = calendar.timeZone
+        timelineCalendar.locale = Locale(identifier: "en_US_POSIX")
+        self.calendar = timelineCalendar
         self.hasLocalData = (dataManager?.timelineAssetCount() ?? 0) > 0
 
         // Linimasa yang memasang telinganya, bukan pemuat gambar yang memanggil
@@ -235,10 +243,10 @@ final class TimelineViewModel {
         // Puluhan ribu iterasi plus pembangunan array section bukan pekerjaan
         // yang boleh menahan antarmuka — dan tidak ada satu pun bagiannya yang
         // butuh main thread.
-        let built = await Self.build(rows)
+        let built = await Self.build(rows, calendar: calendar)
 
         signature = newSignature
-        sections = built.sections
+        content = built.content
         allAssets = built.assets
         hasLoaded = true
         phase = .loaded(())
@@ -421,8 +429,9 @@ final class TimelineViewModel {
     /// saat sync, jadi cukup memutus setiap kali kuncinya berganti — tanpa kamus
     /// perantara, pengurutan ulang, maupun pemformatan tanggal.
     nonisolated private static func build(
-        _ rows: [TimelineRow]
-    ) async -> (sections: [TimelineSection], assets: [AssetLite]) {
+        _ rows: [TimelineRow],
+        calendar: Calendar
+    ) async -> (content: TimelineContent, assets: [AssetLite]) {
         await Task.detached(priority: .userInitiated) {
             var sections: [TimelineSection] = []
             sections.reserveCapacity(64)
@@ -443,8 +452,86 @@ final class TimelineViewModel {
                     sections[sections.count - 1].count += 1
                 }
             }
-            return (sections, assets)
+            return (makeContent(sections: sections, calendar: calendar), assets)
         }.value
+    }
+
+    private struct TimelineContent: Sendable {
+        var sections: [TimelineSection] = []
+        var months: [TimelineNavigationItem] = []
+        var years: [TimelineNavigationItem] = []
+    }
+
+    nonisolated private static func makeContent(
+        sections: [TimelineSection],
+        calendar: Calendar,
+        reusingMonths: [String: TimelineNavigationItem] = [:]
+    ) -> TimelineContent {
+        var result = TimelineContent(sections: sections)
+        result.months.reserveCapacity(sections.count)
+        result.years.reserveCapacity(max(sections.count / 12, 1))
+
+        for section in sections {
+            guard let first = section.assets.first else { continue }
+            if let cached = reusingMonths[section.id] {
+                result.months.append(cached)
+            } else {
+                result.months.append(TimelineNavigationItem(
+                    id: section.id,
+                    title: formatNavigatorMonthTitle(section.id),
+                    cover: first,
+                    highlights: dayHighlights(for: section, calendar: calendar)))
+            }
+
+            let year = String(section.id.prefix(4))
+            guard result.years.last?.id != year else { continue }
+            result.years.append(TimelineNavigationItem(id: year, title: year, cover: first))
+        }
+        return result
+    }
+
+    nonisolated private static func dayHighlights(
+        for section: TimelineSection,
+        calendar: Calendar
+    ) -> [TimelineDayHighlight] {
+        var days: [Date: (count: Int, cover: AssetLite)] = [:]
+        for asset in section.assets {
+            let day = calendar.startOfDay(for: asset.createdAt)
+            if var existing = days[day] {
+                existing.count += 1
+                // Foto diam diutamakan; tanggal lalu id memutus seri secara
+                // stabil, bahkan ketika urutan hasil sync berubah.
+                let preferred = existing.cover.isVideo != asset.isVideo
+                    ? !asset.isVideo
+                    : asset.createdAt == existing.cover.createdAt
+                        ? asset.id < existing.cover.id
+                        : asset.createdAt < existing.cover.createdAt
+                if preferred { existing.cover = asset }
+                days[day] = existing
+            } else {
+                days[day] = (1, asset)
+            }
+        }
+
+        return days.sorted {
+            $0.value.count == $1.value.count
+                ? $0.key < $1.key
+                : $0.value.count > $1.value.count
+        }
+        .prefix(3)
+        .sorted { $0.key < $1.key }
+        .map { day, value in
+            let parts = calendar.dateComponents([.year, .month, .day], from: day)
+            let dayNumber = parts.day ?? 1
+            let dateID = String(
+                format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 1, dayNumber)
+            return TimelineDayHighlight(
+                id: dateID,
+                date: day,
+                title: String(dayNumber),
+                count: value.count,
+                cover: value.cover)
+        }
     }
 
     // MARK: - Aksi context menu
@@ -485,12 +572,29 @@ final class TimelineViewModel {
     /// tulisannya. Hasilnya: foto yang baru saja difavoritkan tetap menawarkan
     /// "Favorite", tidak pernah "Unfavorite".
     func setFavorite(_ id: String, to value: Bool) {
-        for sectionIndex in sections.indices {
-            guard let assetIndex = sections[sectionIndex].assets
+        var updated = content
+        for sectionIndex in updated.sections.indices {
+            guard let assetIndex = updated.sections[sectionIndex].assets
                 .firstIndex(where: { $0.id == id }) else { continue }
-            sections[sectionIndex].assets[assetIndex].isFavorite = value
+            updated.sections[sectionIndex].assets[assetIndex].isFavorite = value
             break
         }
+        // Favorit tidak mengubah ranking tanggal: tambal cover yang disimpan
+        // tanpa mengelompokkan ulang seluruh perpustakaan.
+        for index in updated.months.indices {
+            if updated.months[index].cover.id == id {
+                updated.months[index].cover.isFavorite = value
+            }
+            for highlightIndex in updated.months[index].highlights.indices {
+                if updated.months[index].highlights[highlightIndex].cover.id == id {
+                    updated.months[index].highlights[highlightIndex].cover.isFavorite = value
+                }
+            }
+        }
+        for index in updated.years.indices where updated.years[index].cover.id == id {
+            updated.years[index].cover.isFavorite = value
+        }
+        content = updated
         if let index = allAssets.firstIndex(where: { $0.id == id }) {
             allAssets[index].isFavorite = value
         }
@@ -787,17 +891,33 @@ final class TimelineViewModel {
     private func removeAssets(_ ids: Set<String>) {
         guard !ids.isEmpty else { return }
         withAnimation(.easeInOut(duration: 0.25)) {
-            for idx in sections.indices {
-                sections[idx].assets.removeAll { ids.contains($0.id) }
-                sections[idx].count = sections[idx].assets.count
+            var updatedSections = sections
+            var changedMonths = Set<String>()
+            for idx in updatedSections.indices {
+                let previousCount = updatedSections[idx].assets.count
+                updatedSections[idx].assets.removeAll { ids.contains($0.id) }
+                updatedSections[idx].count = updatedSections[idx].assets.count
+                if updatedSections[idx].assets.count != previousCount {
+                    changedMonths.insert(updatedSections[idx].id)
+                }
             }
-            sections.removeAll { $0.assets.isEmpty }
+            guard !changedMonths.isEmpty else { return }
+            updatedSections.removeAll { $0.assets.isEmpty }
             allAssets.removeAll { ids.contains($0.id) }
             // Kalau yang terakhir ikut terbuang, tidak ada lagi yang "sudah ada
             // di perangkat" — dan pemuatan berikutnya memang pantas diberi
             // spinner.
             hasLocalData = !allAssets.isEmpty
-            reindex()
+            reindex(&updatedSections)
+            // Hanya bulan yang kehilangan aset perlu memilih ulang tanggal
+            // teramai. Bulan lain memakai highlight yang sudah tersimpan.
+            let unchangedMonths = Dictionary(uniqueKeysWithValues: content.months
+                .filter { !changedMonths.contains($0.id) }
+                .map { ($0.id, $0) })
+            content = Self.makeContent(
+                sections: updatedSections,
+                calendar: calendar,
+                reusingMonths: unchangedMonths)
             // Isinya baru saja berubah di klien; sidik jari lama tidak lagi
             // mewakili apa pun, dan menahannya akan membuat muat ulang
             // berikutnya dilewati.
@@ -814,7 +934,7 @@ final class TimelineViewModel {
     /// Grid memakainya untuk tahu bulan apa yang sedang tampil tanpa memecah
     /// dirinya per bulan, jadi setelah ada foto yang dibuang offsetnya harus
     /// dirapatkan lagi — kalau tidak, judul bulan di toolbar meleset.
-    private func reindex() {
+    private func reindex(_ sections: inout [TimelineSection]) {
         var offset = 0
         for index in sections.indices {
             sections[index].startIndex = offset
