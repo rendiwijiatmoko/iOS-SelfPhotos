@@ -11,7 +11,7 @@ final class BackupSetupJourneyTests: XCTestCase {
         journey.refreshForAlbumSelection()
 
         XCTAssertEqual(journey.step, .profile)
-        XCTAssertTrue(journey.isCoachmarkVisible)
+        assertCoachmarkBecomesVisibleWhenReady(journey)
     }
 
     func testSelectedAlbumKeepsJourneyHidden() {
@@ -44,7 +44,7 @@ final class BackupSetupJourneyTests: XCTestCase {
         journey.refreshForAlbumSelection()
 
         XCTAssertEqual(journey.step, .profile)
-        XCTAssertTrue(journey.isCoachmarkVisible)
+        assertCoachmarkBecomesVisibleWhenReady(journey)
     }
 
     func testSkipSuppressesRepeatedRefreshOnlyForCurrentEmptySelection() {
@@ -63,7 +63,7 @@ final class BackupSetupJourneyTests: XCTestCase {
         journey.refreshForAlbumSelection()
 
         XCTAssertEqual(journey.step, .profile)
-        XCTAssertTrue(journey.isCoachmarkVisible)
+        assertCoachmarkBecomesVisibleWhenReady(journey)
     }
 
     func testNewAppSessionOffersTipAgainWhenAlbumsRemainEmpty() {
@@ -75,7 +75,7 @@ final class BackupSetupJourneyTests: XCTestCase {
         nextSession.refreshForAlbumSelection()
 
         XCTAssertEqual(nextSession.step, .profile)
-        XCTAssertTrue(nextSession.isCoachmarkVisible)
+        assertCoachmarkBecomesVisibleWhenReady(nextSession)
     }
 
     func testClosingSettingsReturnsJourneyToProfile() {
@@ -86,7 +86,56 @@ final class BackupSetupJourneyTests: XCTestCase {
         journey.returnToProfileIfNeeded()
 
         XCTAssertEqual(journey.step, .profile)
-        XCTAssertTrue(journey.isCoachmarkVisible)
+        assertCoachmarkBecomesVisibleWhenReady(journey)
+    }
+
+    func testCallbackForPreviousStepDoesNotPresentCoachmark() {
+        let journey = makeJourney()
+        journey.refreshForAlbumSelection()
+        let profileRequest = journey.presentationRequest
+        journey.advanceToBackupRow()
+
+        journey.markTipReady(for: .profile, request: profileRequest)
+
+        XCTAssertEqual(journey.step, .backupRow)
+        assertCoachmarkBecomesVisibleWhenReady(journey)
+    }
+
+    func testCallbackForPreviousRequestAtSameStepDoesNotPresentCoachmark() {
+        let journey = makeJourney()
+        journey.refreshForAlbumSelection()
+        let oldRequest = journey.presentationRequest
+        journey.advanceToBackupRow()
+        journey.returnToProfileIfNeeded()
+
+        journey.markTipReady(for: .profile, request: oldRequest)
+
+        XCTAssertEqual(journey.step, .profile)
+        assertCoachmarkBecomesVisibleWhenReady(journey)
+    }
+
+    func testCallbackAfterSkipDoesNotPresentCoachmark() {
+        let journey = makeJourney()
+        journey.refreshForAlbumSelection()
+        let request = journey.presentationRequest
+        journey.skip()
+
+        journey.markTipReady(for: .profile, request: request)
+
+        XCTAssertEqual(journey.step, .idle)
+        XCTAssertFalse(journey.isCoachmarkVisible)
+    }
+
+    private func assertCoachmarkBecomesVisibleWhenReady(
+        _ journey: BackupSetupJourney,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertFalse(journey.isCoachmarkVisible, file: file, line: line)
+
+        journey.markTipReady(for: journey.step, request: journey.presentationRequest)
+
+        XCTAssertTrue(journey.isCoachmarkVisible, file: file, line: line)
     }
 
     private func makeJourney() -> BackupSetupJourney {
