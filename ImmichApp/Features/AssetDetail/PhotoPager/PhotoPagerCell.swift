@@ -52,7 +52,7 @@ final class PhotoPagerCell: UICollectionViewCell {
     /// beberapa koneksi video terbuka sekaligus padahal cuma satu yang akan
     /// ditonton.
     private var player: AVPlayer?
-    private var playerLayer: AVPlayerLayer?
+    private var videoView: PhotoVideoSurfaceView?
     private var videoLoadTask: Task<Void, Never>?
     private var endObserver: NSObjectProtocol?
     /// Mengikuti status buffering dari AVPlayer. Pengamat ini wajib dilepas
@@ -568,12 +568,13 @@ final class PhotoPagerCell: UICollectionViewCell {
                 imageView.frame = CGRect(origin: .zero, size: fitted)
                 scrollView.contentSize = fitted
             }
-            // Layer video menempati kotak yang sama persis dengan fotonya.
-            // Tanpa `CATransaction`, ia ikut animasi implisit Core Animation dan
-            // tertinggal setengah frame di belakang gambarnya.
+            // Backing layer UIView mengikuti animasi refit yang sama, termasuk
+            // beginFromCurrentState saat pengguna mengetuk lagi di tengah transisi.
+            // Sublayer dengan disableActions langsung melompat ke ukuran akhir
+            // sementara imageView masih bergerak, sehingga video terpotong.
+            videoView?.frame = CGRect(origin: .zero, size: fitted)
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            playerLayer?.frame = CGRect(origin: .zero, size: fitted)
             liveLayer?.frame = CGRect(origin: .zero, size: fitted)
             CATransaction.commit()
             imageView.layer.cornerRadius = effectiveRadius
@@ -748,10 +749,11 @@ final class PhotoPagerCell: UICollectionViewCell {
         // setelah buffer maju. Intent pengguna tetap dilacak terpisah di bawah.
         player.automaticallyWaitsToMinimizeStalling = true
         player.isMuted = Self.prefersMuted
-        let layer = AVPlayerLayer(player: player)
-        layer.videoGravity = .resizeAspect
-        layer.frame = imageView.bounds
-        imageView.layer.addSublayer(layer)
+        let surface = PhotoVideoSurfaceView(frame: imageView.bounds)
+        surface.isUserInteractionEnabled = false
+        surface.playerLayer.player = player
+        surface.playerLayer.videoGravity = .resizeAspect
+        imageView.addSubview(surface)
 
         // Selesai diputar: kembali ke awal dan tombolnya muncul lagi, seperti
         // Photos — bukan berhenti di frame terakhir tanpa jalan keluar.
@@ -779,7 +781,7 @@ final class PhotoPagerCell: UICollectionViewCell {
         }
 
         self.player = player
-        self.playerLayer = layer
+        self.videoView = surface
         wantsVideoPlayback = true
         playbackStatusObserver = player.observe(
             \.timeControlStatus,
@@ -903,9 +905,9 @@ final class PhotoPagerCell: UICollectionViewCell {
         }
         timeObserver = nil
         VideoPlaybackLifecycle.stop(player)
-        playerLayer?.player = nil
-        playerLayer?.removeFromSuperlayer()
-        playerLayer = nil
+        videoView?.playerLayer.player = nil
+        videoView?.removeFromSuperview()
+        videoView = nil
         player = nil
         if let endObserver {
             NotificationCenter.default.removeObserver(endObserver)
@@ -1297,4 +1299,12 @@ private final class LayoutReportingScrollView: UIScrollView {
         super.layoutSubviews()
         onLayout?()
     }
+}
+
+/// Memakai AVPlayerLayer sebagai backing layer agar geometri video ikut
+/// transaksi animasi UIKit yang mengubah bingkai kontennya.
+private final class PhotoVideoSurfaceView: UIView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
 }
