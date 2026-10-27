@@ -33,13 +33,15 @@ final class BackupUploadRequests {
     }
 
     func retryWakeDelay(automaticEnabled: Bool, now: Date = .now) -> TimeInterval? {
-        guard let date = queue.items
-            .filter({ (automaticEnabled || $0.isUserRequested) && $0.state.isWaiting })
-            .compactMap(\.nextAttemptAt).min() else { return nil }
-        let delay = date.timeIntervalSince(now)
         // Explicit actions and slot completions refill immediately. If due
         // work cannot progress, avoid repeatedly scheduling a zero-delay wake.
-        return delay > 0 ? delay : 30
+        queue.items
+            .filter({ (automaticEnabled || $0.isUserRequested) && $0.state.isWaiting })
+            .compactMap { item -> TimeInterval? in
+                guard let date = item.nextAttemptAt else { return nil }
+                let delay = date.timeIntervalSince(now)
+                return delay > 0 ? delay : 30
+            }.min()
     }
 
     func allowsCellular(for photo: LocalPhoto, policy: BackupNetworkPolicy) -> Bool {

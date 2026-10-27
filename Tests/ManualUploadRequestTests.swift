@@ -335,6 +335,20 @@ final class ManualUploadRequestTests: XCTestCase {
         XCTAssertEqual(fixture.queue.snapshot.active, BackupStagingPolicy.maximumActiveUploads)
     }
 
+    func testOverdueWaitDoesNotDelayAnotherRequestsUpcomingDeadline() throws {
+        let fixture = try fixture()
+        try fixture.requests.requestUploads(["overdue", "upcoming"], uploadedIDs: [])
+        try fixture.queue.markRetry("overdue", state: .retryScheduled, error: "Earlier failure",
+            retryAt: timestamp.addingTimeInterval(-60), now: timestamp)
+        try fixture.queue.markRetry("upcoming", state: .waitingForICloud, error: "Original is downloading",
+            retryAt: timestamp.addingTimeInterval(10), now: timestamp)
+
+        XCTAssertEqual(fixture.requests.retryWakeDelay(automaticEnabled: false, now: timestamp), 10)
+        XCTAssertEqual(fixture.requests.retryWakeDelay(automaticEnabled: false, now: timestamp.addingTimeInterval(10)), 30)
+        try fixture.queue.markCompleted("upcoming")
+        XCTAssertEqual(fixture.requests.retryWakeDelay(automaticEnabled: false, now: timestamp), 30)
+    }
+
     func testRequestArrivingDuringPreparationRemainsQueuedForTheNextPass() async throws {
         let fixture = try fixture()
         fixture.photos = ["first": photo("first"), "next": photo("next")]
