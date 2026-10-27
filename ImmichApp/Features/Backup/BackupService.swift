@@ -51,10 +51,10 @@ final class BackupService {
             guard isEnabled != oldValue else { return }
             UserDefaults.standard.set(isEnabled, forKey: Self.enabledKey)
             guard isEnabled else {
-                allowsManualQueueRefill = false
                 stop()
                 BackupScheduler.cancel()
                 BackupNotifier.shared.clearProgress()
+                if queue.hasPendingUserRequests { requestNetworkWake() }
                 return
             }
             // Izin pemberitahuan diminta TEPAT di sini: pengguna baru saja
@@ -80,6 +80,7 @@ final class BackupService {
         didSet {
             guard cellularPhotos != oldValue else { return }
             UserDefaults.standard.set(cellularPhotos, forKey: Self.cellularPhotosKey)
+            requestNetworkWake()
         }
     }
 
@@ -88,6 +89,7 @@ final class BackupService {
         didSet {
             guard cellularVideos != oldValue else { return }
             UserDefaults.standard.set(cellularVideos, forKey: Self.cellularVideosKey)
+            requestNetworkWake()
         }
     }
 
@@ -133,20 +135,23 @@ final class BackupService {
     private static let cellularPhotosKey = "backup.cellularPhotos"
     private static let cellularVideosKey = "backup.cellularVideos"
     private static let syncAlbumsKey = "backup.syncAlbums"
-    private static let manualQueueRefillKey = "backup.manualQueueRefill"
 
     private var repo: BackupRepository?
     private var albumRepo: AlbumRepository?
     private weak var session: SessionManager?
     private let dataManager = SwiftDataManager.shared
-    private let queue = BackupQueueStore.shared
+    private let queue: BackupQueueStore
+    private let uploadRequests: BackupUploadRequests
     private var task: Task<Void, Never>?
-    private var refillRequested = false
-    private var allowsManualQueueRefill = false {
-        didSet {
-            UserDefaults.standard.set(allowsManualQueueRefill, forKey: Self.manualQueueRefillKey)
-        }
+    private var workID: UUID?
+    private var networkWakeTask: Task<Void, Never>?
+    private var networkWakeID = UUID()
+    private struct PreparationClaim {
+        let id = UUID()
+        let isOwned: Bool
     }
+    private var preparationClaims: [String: PreparationClaim] = [:]
+    private var refillRequested = false
     private var libraryChangeTask: Task<Void, Never>?
     private var retryWakeTask: Task<Void, Never>?
     private var notificationRevision = 0
@@ -178,16 +183,18 @@ final class BackupService {
     private var hasAuthenticatedSession = true
 
     private init() {
+        let queue = BackupQueueStore.shared
+        self.queue = queue
+        uploadRequests = BackupUploadRequests(queue: queue)
         isEnabled = UserDefaults.standard.bool(forKey: Self.enabledKey)
         cellularPhotos = UserDefaults.standard.bool(forKey: Self.cellularPhotosKey)
         cellularVideos = UserDefaults.standard.bool(forKey: Self.cellularVideosKey)
         syncAlbums = UserDefaults.standard.bool(forKey: Self.syncAlbumsKey)
-        allowsManualQueueRefill = UserDefaults.standard.bool(forKey: Self.manualQueueRefillKey)
         LocalPhotoLibrary.shared.onLibraryChange = { [weak self] in
             self?.handleLibraryChange()
         }
-        NetworkMonitor.shared.onPathChange = { [weak self] online, expensive in
-            self?.handleNetworkChange(isOnline: online, isExpensive: expensive)
+        NetworkMonitor.shared.onPathChange = { [weak self] online, _ in
+            self?.handleNetworkChange(isOnline: online)
         }
         applyQueueSnapshot(notify: false)
     }
@@ -200,11 +207,16 @@ final class BackupService {
     func configure(session: SessionManager) {
         guard repo == nil else { return }
         attach(session)
-        guard isEnabled, acceptsUploadResults else { return }
-        BackupScheduler.schedule()
+        guard (isEnabled || queue.hasPendingUserRequests), acceptsUploadResults else { return }
+        if isEnabled { BackupScheduler.schedule() }
         Task { [weak self] in
-            await self?.prepare()
-            self?.start()
+            guard let self else { return }
+            if self.isEnabled {
+                await self.prepare()
+                self.start()
+            } else {
+                self.requestNetworkWake()
+            }
         }
     }
 
@@ -271,30 +283,66 @@ final class BackupService {
         }
         await pruneUnavailableFailures()
         applyQueueSnapshot()
-        if allowsManualQueueRefill {
-            await ensureConfigured()
-            refillReadyQueue()
+        if queue.hasPendingUserRequests {
+            requestNetworkWake()
         }
     }
 
-    private func handleNetworkChange(isOnline: Bool, isExpensive: Bool) {
-        guard isEnabled, isOnline else {
+    private func handleNetworkChange(isOnline: Bool) {
+        guard isOnline else {
+            networkWakeTask?.cancel()
             applyQueueSnapshot()
             return
         }
-        do {
-            if !isExpensive || canUploadNow { try queue.releaseNetworkWaits() }
-        } catch {
-            lastError = error.localizedDescription
-            acceptsUploadResults = false
+        requestNetworkWake()
+    }
+
+    private var networkPolicy: BackupNetworkPolicy {
+        BackupNetworkPolicy(isOnline: NetworkMonitor.shared.isOnline,
+            isExpensive: NetworkMonitor.shared.isExpensive,
+            cellularPhotos: cellularPhotos, cellularVideos: cellularVideos)
+    }
+
+    private func requestNetworkWake() {
+        networkWakeTask?.cancel()
+        let id = UUID()
+        networkWakeID = id
+        guard isEnabled || queue.hasPendingUserRequests else {
+            networkWakeTask = nil
             return
         }
-        BackupScheduler.schedule()
-        Task { [weak self] in
-            await self?.continueInBackground()
+        networkWakeTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if self.networkWakeID == id { self.networkWakeTask = nil } }
+            await self.ensureConfigured()
+            await NetworkMonitor.shared.waitUntilReady()
+            guard !Task.isCancelled, self.acceptsUploadResults, self.hasAuthenticatedSession,
+                  self.repo != nil, self.dataManager.isPersistentStoreAvailable else { return }
+            do {
+                let eligible = try await self.uploadRequests.releaseNetworkWaits(
+                    automaticEnabled: self.isEnabled, policy: self.networkPolicy,
+                    metadata: { await self.photoMetadata(for: $0) })
+                guard !Task.isCancelled else { return }
+                await BackupUploader.shared.requeueBlockedTasks(eligibleIDs: eligible)
+                guard !Task.isCancelled else { return }
+            } catch {
+                self.lastError = error.localizedDescription
+                self.acceptsUploadResults = false
+                return
+            }
+            self.applyQueueSnapshot()
+            self.refillReadyQueue()
+            if self.isEnabled { await self.continueInBackground() }
         }
     }
 
+    private func requestQueueRetry() {
+        applyQueueSnapshot()
+        BackupScheduler.schedule()
+        requestNetworkWake()
+    }
+
+    var hasPendingRequestedUploads: Bool { queue.hasPendingUserRequests }
     /// Mencari pekerjaan baru, lalu menyerahkannya.
     ///
     /// **Inilah yang membuat pencadangan bisa berlanjut tanpa aplikasi dibuka.**
@@ -308,9 +356,9 @@ final class BackupService {
     /// menyampaikan hasilnya. Yang kedua membuatnya berantai — selama masih ada
     /// sisa, tiap penyelesaian membangunkan aplikasi ini untuk mengantre lagi.
     func continueInBackground() async {
-        guard isEnabled || allowsManualQueueRefill else { return }
+        guard isEnabled || queue.hasPendingUserRequests else { return }
         await ensureConfigured()
-        guard isEnabled || allowsManualQueueRefill,
+        guard isEnabled || queue.hasPendingUserRequests,
               repo != nil, !Task.isCancelled else { return }
         if !isEnabled {
             refillReadyQueue()
@@ -419,19 +467,13 @@ final class BackupService {
             lastError = BackupPersistenceError().localizedDescription
             return
         }
-        task = Task { [weak self] in
-            await self?.enqueueAutomaticBatch()
-            self?.task = nil
-            self?.refreshCounts()
-            self?.applyQueueSnapshot()
-            self?.resumeQueuedUploadsIfRequested()
-        }
+        beginQueueWork(discover: true)
     }
 
     /// Completion frees a staging slot. Refill in foreground as well as during
     /// background events; otherwise a bounded queue would stop after its first window.
     func refillReadyQueue() {
-        guard isEnabled || allowsManualQueueRefill else { return }
+        guard isEnabled || queue.hasPendingUserRequests else { return }
         refillRequested = true
         resumeQueuedUploadsIfRequested()
     }
@@ -453,18 +495,42 @@ final class BackupService {
     private func resumeQueuedUploadsIfRequested() {
         guard refillRequested, task == nil else { return }
         refillRequested = false
-        guard isEnabled || allowsManualQueueRefill,
+        guard isEnabled || queue.hasPendingUserRequests,
               acceptsUploadResults, hasAuthenticatedSession, repo != nil,
               dataManager.isPersistentStoreAvailable,
-              !queue.readyItems(limit: 1).isEmpty else { return }
+              !uploadRequests.readyItems(automaticEnabled: isEnabled, limit: 1).isEmpty else { return }
+        beginQueueWork(discover: false)
+    }
+
+    private func beginQueueWork(discover: Bool) {
+        let id = UUID()
+        workID = id
         task = Task { [weak self] in
-            await NetworkMonitor.shared.waitUntilReady()
-            await self?.processReadyQueueItems()
-            self?.task = nil
-            self?.refreshCounts()
-            self?.applyQueueSnapshot()
-            self?.resumeQueuedUploadsIfRequested()
+            guard let self else { return }
+            defer { self.finishQueueWork(id) }
+            let before = self.queue.items
+            if discover {
+                await self.enqueueAutomaticBatch()
+            } else {
+                await NetworkMonitor.shared.waitUntilReady()
+                guard !Task.isCancelled, self.hasAuthenticatedSession, self.acceptsUploadResults else { return }
+                await self.processReadyQueueItems()
+            }
+            if !Task.isCancelled, self.queue.items != before,
+               self.queue.snapshot.active < BackupStagingPolicy.maximumActiveUploads,
+               !self.uploadRequests.readyItems(automaticEnabled: self.isEnabled, limit: 1).isEmpty {
+                self.refillRequested = true
+            }
         }
+    }
+
+    private func finishQueueWork(_ id: UUID) {
+        guard workID == id else { return }
+        task = nil
+        workID = nil
+        refreshCounts()
+        applyQueueSnapshot()
+        resumeQueuedUploadsIfRequested()
     }
 
     /// Discover up to 100 metadata candidates. Only the staging window below
@@ -519,43 +585,39 @@ final class BackupService {
     ///
     /// - Parameter ids: id petak, boleh berawalan `device:` maupun tidak.
     func uploadNow(_ ids: [String]) async {
-        guard repo != nil, task == nil else { return }
         guard dataManager.isPersistentStoreAvailable else {
             lastError = BackupPersistenceError().localizedDescription
             return
         }
-        let wanted = Set(ids.map(LocalPhotoLibrary.localIdentifier(from:)))
-        let uploaded = dataManager.uploadedLocalIdentifiers()
-        let pending = LocalPhotoLibrary.shared.photos.filter {
-            wanted.contains($0.id) && !uploaded.contains($0.id)
-        }
-        guard !pending.isEmpty else { return }
-
         do {
-            try queue.enqueue(pending.map(\.id))
-            try queue.retryFailed()
+            try uploadRequests.requestUploads(ids, uploadedIDs: dataManager.uploadedLocalIdentifiers())
         } catch {
             lastError = error.localizedDescription
             return
         }
-        applyQueueSnapshot()
-        allowsManualQueueRefill = true
-        let work = Task { await processReadyQueueItems() }
-        task = work
-        await work.value
-        task = nil
-        refreshCounts()
-        resumeQueuedUploadsIfRequested()
+        requestQueueRetry()
+        await waitUntilFinished()
     }
 
     func stop() {
         refillRequested = false
         task?.cancel()
         task = nil
+        workID = nil
+        networkWakeTask?.cancel()
+        networkWakeTask = nil
+        networkWakeID = UUID()
         libraryChangeTask?.cancel()
         libraryChangeTask = nil
         retryWakeTask?.cancel()
         retryWakeTask = nil
+        let owned = Set(preparationClaims.filter { $0.value.isOwned }.map(\.key))
+        preparationClaims = preparationClaims.filter { !$0.value.isOwned }
+        do { try queue.releasePreparations(owned) }
+        catch {
+            lastError = error.localizedDescription
+            acceptsUploadResults = false
+        }
         // Hanya metadata album di RAM yang dibuang. Queue persisten dan transfer
         // yang sudah berada di tangan sistem tetap ada; BGTask yang kedaluwarsa
         // tidak boleh mengubah penghentian proses menjadi kehilangan pekerjaan.
@@ -566,8 +628,8 @@ final class BackupService {
     /// Menghentikan backup dan membuang semua state yang terikat akun.
     func resetForLogout() {
         acceptsUploadResults = false
-        allowsManualQueueRefill = false
         stop()
+        preparationClaims.removeAll()
         repo = nil
         albumRepo = nil
         session = nil
@@ -608,6 +670,11 @@ final class BackupService {
         albumRepo = nil
         task?.cancel()
         task = nil
+        workID = nil
+        networkWakeTask?.cancel()
+        networkWakeTask = nil
+        networkWakeID = UUID()
+        preparationClaims.removeAll()
         pendingPhotos.removeAll()
         let message = String(localized: "Your Immich session expired. Sign in again to resume backup.")
         do {
@@ -620,9 +687,8 @@ final class BackupService {
 
     func retryFailedUploads() {
         do {
-            try queue.retryFailed()
-            applyQueueSnapshot()
-            start()
+            try uploadRequests.retryFailed()
+            requestQueueRetry()
         } catch {
             lastError = error.localizedDescription
         }
@@ -630,10 +696,9 @@ final class BackupService {
 
     func retryUpload(_ localIdentifier: String) {
         do {
-            try queue.retryFailed(localIdentifier)
+            try uploadRequests.retry(localIdentifier)
             uploadProgressByID[localIdentifier] = nil
-            applyQueueSnapshot()
-            start()
+            requestQueueRetry()
         } catch {
             lastError = error.localizedDescription
         }
@@ -663,6 +728,7 @@ final class BackupService {
     func cancelUpload(_ localIdentifier: String) {
         guard let item = queue.item(id: localIdentifier), item.state.isActive else { return }
         let canceledMessage = String(localized: "Upload canceled.")
+        preparationClaims[localIdentifier] = nil
 
         do {
             if item.state == .uploading {
@@ -711,16 +777,14 @@ final class BackupService {
         }
     }
 
-    /// Menunggu putaran yang sedang berjalan sampai habis.
-    ///
-    /// Dipakai tugas latar, yang WAJIB memanggil `setTaskCompleted` — dan tidak
-    /// boleh memanggilnya sebelum kerjanya betul-betul selesai.
-    ///
-    /// `task` dibaca sebelum penangguhan pertama, jadi nilainya masih yang baru
-    /// dipasang `start()`: putaran itu terikat main actor dan tidak bisa mulai
-    /// berjalan — apalagi membereskan dirinya — selagi kita masih memegang actor.
+    /// Waits for the current network wake and preparation work before a
+    /// background task reports completion.
     func waitUntilFinished() async {
-        await task?.value
+        while !Task.isCancelled {
+            if let wake = networkWakeTask { await wake.value }
+            else if let work = task { await work.value }
+            else { return }
+        }
     }
 
     /// Jaringan mengizinkan foto INI naik sekarang.
@@ -728,17 +792,16 @@ final class BackupService {
     /// `isExpensive` menangkap seluler DAN hotspot — keduanya berkuota, dan
     /// keduanya sama-sama tidak diharapkan menelan pustaka foto seseorang.
     func allowsNetwork(for photo: LocalPhoto) -> Bool {
-        guard NetworkMonitor.shared.isOnline else { return false }
-        guard NetworkMonitor.shared.isExpensive else { return true }
-        if photo.isLivePhoto { return cellularPhotos && cellularVideos }
-        return photo.isVideo ? cellularVideos : cellularPhotos
+        uploadRequests.allowsNetwork(for: photo, policy: networkPolicy)
     }
 
     /// Ada sesuatu yang bisa naik dengan jaringan yang ada sekarang.
     var canUploadNow: Bool {
         guard NetworkMonitor.shared.isOnline else { return false }
         guard NetworkMonitor.shared.isExpensive else { return true }
-        return cellularPhotos || cellularVideos
+        return cellularPhotos || cellularVideos || queue.items.contains {
+            $0.allowsCellularOverride && $0.state != .failed && $0.state != .cancelling
+        }
     }
 
     /// Prepare only a small window of originals. The rest of the queue remains
@@ -746,207 +809,191 @@ final class BackupService {
     private func processReadyQueueItems() async {
         guard let repo else { return }
         albumIDsByName = [:]
-
-        let ready = queue.readyItems(limit: Self.automaticBatchSize)
-        guard !ready.isEmpty else {
-            applyQueueSnapshot()
-            return
-        }
-        var photos: [LocalPhoto] = []
-        for item in ready {
-            if let cached = LocalPhotoLibrary.shared.photos.first(where: { $0.id == item.id }) {
-                photos.append(cached)
-            } else if let restored = await LocalPhotoLibrary.shared.photoMetadata(for: item.id) {
-                photos.append(restored)
-            } else if BackupTemporaryFiles.recordedContexts(in: BackupTemporaryFiles.recoveryDirectory)
-                .contains(where: { $0.localIdentifier == item.id }) {
-                reportPreservedUpload(localIdentifier: item.id)
-            } else {
-                // Tidak ada lagi sumber yang dapat di-retry. Menyimpannya
-                // sebagai failure hanya membuat daftar dan notifikasi terus
-                // menghitung foto yang sudah dihapus pengguna.
-                try? queue.discard(item.id)
-            }
-        }
-        applyQueueSnapshot()
-
-        // Penanda "masih ada yang akan menyusul".
-        //
-        // Loop ini melepaskan main actor di tiap `await` — membaca berkas, lalu
-        // menghitung checksum. Selama jeda itu, hasil unggahan PERTAMA bisa saja
-        // sudah kembali (server yang menolak cepat menjawab dalam milidetik),
-        // dan `pendingPhotos` sempat kosong padahal 39 foto lagi belum
-        // diserahkan. `finishUpload` akan membaca kekosongan itu sebagai "sudah
-        // selesai" dan menerbitkan "Backup Complete" di tengah putaran — lalu
-        // mengulanginya di hampir setiap penyelesaian berikutnya.
         enqueueDepth += 1
         defer {
             enqueueDepth -= 1
-            // Tidak ada satu pun yang sampai ke sistem: jaringan berpindah di
-            // antara penyaringan di `start()` dan pemeriksaan ulang di sini,
-            // atau semua berkasnya gagal dibaca. Tanpa penutupan di sini,
-            // `finishUpload` tidak akan pernah dipanggil — `isUploading`
-            // tersangkut menyala selamanya, dan "0 of N" menetap di pusat
-            // pemberitahuan tanpa pernah ada pasangannya.
             if enqueueDepth == 0 { finishRunIfSettled() }
         }
-
-        for photo in photos {
-            if Task.isCancelled { return }
-            let staged = await BackupUploader.shared.stagingUsage()
-            guard !Task.isCancelled,
-                  BackupStagingPolicy.canPrepare(
-                    activeCount: max(queue.snapshot.active, staged.activeTasks),
-                    stagedBytes: staged.bytes)
-            else { return }
-            // Another callback may have claimed this item during the await.
-            guard let current = queue.item(id: photo.id), !current.state.isActive,
-                  current.state != .failed else { continue }
-            // Live Photo tidak boleh terpotong menjadi still image ketika opsi
-            // video seluler dimatikan. Kedua izin harus aktif agar pasangan
-            // lengkap boleh naik melalui jaringan mahal.
-            let allowsCellular = photo.isLivePhoto
-                ? (cellularPhotos && cellularVideos)
-                : (photo.isVideo ? cellularVideos : cellularPhotos)
-            let mayReadFromICloud = !NetworkMonitor.shared.isExpensive || allowsCellular
-
-            guard allowsNetwork(for: photo) else {
-                do {
-                    try queue.markRetry(
-                        photo.id,
-                        state: .waitingForNetwork,
-                        error: NetworkMonitor.shared.isOnline
-                            ? String(localized: "Waiting for Wi-Fi.")
-                            : String(localized: "Waiting for a network connection."),
-                        retryAt: Date(timeIntervalSinceNow: 15 * 60))
-                } catch { lastError = error.localizedDescription }
-                applyQueueSnapshot()
-                continue
-            }
-
-            if photo.isLivePhoto {
-                do {
-                    if let motionAssetID = queue.item(id: photo.id)?.motionAssetID {
-                        try queue.markPreparing(
-                            photo.id,
-                            phase: .primaryAsset,
-                            motionAssetID: motionAssetID)
-                        applyQueueSnapshot()
-                        try await enqueueLivePhotoPrimary(
-                            photo,
-                            motionAssetID: motionAssetID,
-                            repository: repo,
-                            allowsCellular: allowsCellular,
-                            mayReadFromICloud: mayReadFromICloud)
+        do {
+            try await uploadRequests.process(
+                automaticEnabled: { self.isEnabled },
+                policy: { self.networkPolicy },
+                canProcess: {
+                    self.acceptsUploadResults && self.hasAuthenticatedSession
+                        && self.dataManager.isPersistentStoreAvailable
+                },
+                metadata: { await self.photoMetadata(for: $0) },
+                staging: { await BackupUploader.shared.stagingUsage() },
+                unavailable: { id in
+                    if BackupTemporaryFiles.recordedContexts(in: BackupTemporaryFiles.recoveryDirectory)
+                        .contains(where: { $0.localIdentifier == id }) {
+                        self.reportPreservedUpload(localIdentifier: id)
                     } else {
-                        try queue.markPreparing(photo.id, phase: .livePhotoMotion)
-                        applyQueueSnapshot()
-                        try await enqueueLivePhoto(
-                            photo,
-                            repository: repo,
-                            allowsCellular: allowsCellular,
-                            mayReadFromICloud: mayReadFromICloud)
+                        try? self.queue.discard(id)
                     }
-                } catch {
-                    pendingPhotos[photo.id] = nil
-                    handlePreparationFailure(
-                        localIdentifier: photo.id,
-                        error: error,
-                        waitingForICloud: mayReadFromICloud)
-                }
-                applyQueueSnapshot()
-                continue
-            }
-
-            do {
-                try queue.markPreparing(photo.id, phase: .primaryAsset)
-                applyQueueSnapshot()
-            } catch {
-                lastError = error.localizedDescription
-                acceptsUploadResults = false
-                continue
-            }
-
-            guard let file = await LocalPhotoLibrary.shared.originalFile(
-                for: LocalPhotoLibrary.assetID(for: photo.id),
-                allowsNetworkFallback: mayReadFromICloud)
-            else {
-                // Berkas iCloud yang sedang menunggu Wi‑Fi bukan kegagalan. Ia
-                // akan ditemukan lagi oleh BGTask berikutnya di jaringan sesuai.
-                let message = mayReadFromICloud
-                    ? String(localized: "The original file is still downloading from iCloud.")
-                    : String(localized: "Waiting for Wi-Fi to download the original from iCloud.")
-                try? queue.markRetry(
-                    photo.id,
-                    state: .waitingForICloud,
-                    error: message,
-                    retryAt: Date(timeIntervalSinceNow: 15 * 60))
-                applyQueueSnapshot()
-                continue
-            }
-
-            do {
-                let checksum = try await repo.checksum(forFile: file.url)
-                if Task.isCancelled {
-                    try? FileManager.default.removeItem(at: file.url)
-                    return
-                }
-                let prepared = try await repo.makeUploadRequest(
-                    fileURL: file.url,
-                    filename: file.filename,
-                    checksum: checksum,
-                    // `PHAsset.localIdentifier`, bukan checksum: yang diminta
-                    // server adalah id foto ini DI PERANGKAT INI, dan itu yang
-                    // membuatnya bisa mengenali unggahan ulang dari sumber yang
-                    // sama.
-                    deviceAssetId: photo.id,
-                    createdAt: photo.createdAt,
-                    modifiedAt: photo.modifiedAt)
-                try? FileManager.default.removeItem(at: file.url)
-                if Task.isCancelled {
-                    try? FileManager.default.removeItem(at: prepared.bodyFile)
-                    return
-                }
-                pendingPhotos[photo.id] = photo
-
-                // DISERAHKAN, bukan ditunggu.
-                //
-                // Yang mengirimkannya `nsurlsessiond`, dan ia tidak peduli
-                // apakah aplikasi ini masih hidup. Hasilnya masuk lewat
-                // `finishUpload`, bisa jadi berjam-jam kemudian di proses yang
-                // sama sekali baru.
-                let uploadTask = try BackupUploader.shared.makeUploadTask(
-                    prepared,
-                    localIdentifier: photo.id,
-                    checksum: checksum,
-                    allowsCellular: allowsCellular)
-                do {
-                    try queue.markUploading(
-                        photo.id,
-                        phase: .primaryAsset,
-                        checksum: checksum,
-                        taskIdentifier: uploadTask.taskIdentifier)
-                    uploadTask.resume()
-                    applyQueueSnapshot()
-                } catch {
-                    uploadTask.cancel()
-                    try? FileManager.default.removeItem(at: prepared.bodyFile)
-                    throw error
-                }
-            } catch {
-                try? FileManager.default.removeItem(at: file.url)
-                pendingPhotos[photo.id] = nil
-                handlePreparationFailure(
-                    localIdentifier: photo.id,
-                    error: error,
-                    waitingForICloud: false)
-            }
+                },
+                prepare: { photo, cloud in
+                    await self.prepareQueuePhoto(photo, repository: repo,
+                        mayReadFromICloud: cloud)
+                },
+                didChange: { self.applyQueueSnapshot() })
+        } catch {
+            lastError = error.localizedDescription
+            acceptsUploadResults = false
         }
         applyQueueSnapshot()
     }
 
+    private func photoMetadata(for id: String) async -> LocalPhoto? {
+        if let photo = LocalPhotoLibrary.shared.photos.first(where: { $0.id == id }) { return photo }
+        return await LocalPhotoLibrary.shared.photoMetadata(for: id)
+    }
+
+    private func prepareQueuePhoto(
+        _ photo: LocalPhoto, repository repo: BackupRepository,
+        mayReadFromICloud: Bool
+    ) async {
+        guard !Task.isCancelled else { return }
+        let claim = PreparationClaim(isOwned: true)
+        preparationClaims[photo.id] = claim
+        defer { releasePreparation(photo.id, claim: claim.id) }
+        if photo.isLivePhoto {
+            do {
+                if let motionAssetID = queue.item(id: photo.id)?.motionAssetID {
+                    try queue.markPreparing(
+                        photo.id,
+                        phase: .primaryAsset,
+                        motionAssetID: motionAssetID)
+                    applyQueueSnapshot()
+                    try await enqueueLivePhotoPrimary(
+                        photo,
+                        motionAssetID: motionAssetID,
+                        repository: repo,
+                        claim: claim.id,
+                        mayReadFromICloud: mayReadFromICloud)
+                } else {
+                    try queue.markPreparing(photo.id, phase: .livePhotoMotion)
+                    applyQueueSnapshot()
+                    try await enqueueLivePhoto(
+                        photo,
+                        repository: repo,
+                        claim: claim.id,
+                        mayReadFromICloud: mayReadFromICloud)
+                }
+            } catch {
+                guard preparationClaims[photo.id]?.id == claim.id, !Task.isCancelled else { return }
+                pendingPhotos[photo.id] = nil
+                handlePreparationFailure(
+                    localIdentifier: photo.id,
+                    error: error,
+                    waitingForICloud: mayReadFromICloud)
+            }
+            applyQueueSnapshot()
+            return
+        }
+
+        do {
+            try queue.markPreparing(photo.id, phase: .primaryAsset)
+            applyQueueSnapshot()
+        } catch {
+            lastError = error.localizedDescription
+            acceptsUploadResults = false
+            return
+        }
+
+        guard let file = await LocalPhotoLibrary.shared.originalFile(
+            for: LocalPhotoLibrary.assetID(for: photo.id),
+            allowsNetworkFallback: mayReadFromICloud)
+        else {
+            guard isCurrentPreparation(photo.id, claim: claim.id) else { return }
+            // Berkas iCloud yang sedang menunggu Wi‑Fi bukan kegagalan. Ia
+            // akan ditemukan lagi oleh BGTask berikutnya di jaringan sesuai.
+            let message = mayReadFromICloud
+                ? String(localized: "The original file is still downloading from iCloud.")
+                : String(localized: "Waiting for Wi-Fi to download the original from iCloud.")
+            try? queue.markRetry(
+                photo.id,
+                state: .waitingForICloud,
+                error: message,
+                retryAt: Date(timeIntervalSinceNow: 15 * 60))
+            applyQueueSnapshot()
+            return
+        }
+
+        do {
+            let checksum = try await repo.checksum(forFile: file.url)
+            if !isCurrentPreparation(photo.id, claim: claim.id) {
+                try? FileManager.default.removeItem(at: file.url)
+                return
+            }
+            let prepared = try await repo.makeUploadRequest(
+                fileURL: file.url,
+                filename: file.filename,
+                checksum: checksum,
+                // `PHAsset.localIdentifier`, bukan checksum: yang diminta
+                // server adalah id foto ini DI PERANGKAT INI, dan itu yang
+                // membuatnya bisa mengenali unggahan ulang dari sumber yang
+                // sama.
+                deviceAssetId: photo.id,
+                createdAt: photo.createdAt,
+                modifiedAt: photo.modifiedAt)
+            try? FileManager.default.removeItem(at: file.url)
+            if !isCurrentPreparation(photo.id, claim: claim.id) {
+                try? FileManager.default.removeItem(at: prepared.bodyFile)
+                return
+            }
+            pendingPhotos[photo.id] = photo
+
+            // DISERAHKAN, bukan ditunggu.
+            //
+            // Yang mengirimkannya `nsurlsessiond`, dan ia tidak peduli
+            // apakah aplikasi ini masih hidup. Hasilnya masuk lewat
+            // `finishUpload`, bisa jadi berjam-jam kemudian di proses yang
+            // sama sekali baru.
+            let uploadTask = try BackupUploader.shared.makeUploadTask(
+                prepared,
+                localIdentifier: photo.id,
+                checksum: checksum,
+                allowsCellular: uploadRequests.allowsCellular(for: photo, policy: networkPolicy))
+            do {
+                try queue.markUploading(
+                    photo.id,
+                    phase: .primaryAsset,
+                    checksum: checksum,
+                    taskIdentifier: uploadTask.taskIdentifier)
+                uploadTask.resume()
+                applyQueueSnapshot()
+            } catch {
+                uploadTask.cancel()
+                try? FileManager.default.removeItem(at: prepared.bodyFile)
+                throw error
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: file.url)
+            guard preparationClaims[photo.id]?.id == claim.id, !Task.isCancelled else { return }
+            pendingPhotos[photo.id] = nil
+            handlePreparationFailure(
+                localIdentifier: photo.id,
+                error: error,
+                waitingForICloud: false)
+        }
+    }
+
     func reportStorageCleanupFailure(_ error: Error) {
         lastError = error.localizedDescription
+    }
+
+    private func isCurrentPreparation(_ id: String, claim: UUID) -> Bool {
+        !Task.isCancelled && acceptsUploadResults && hasAuthenticatedSession
+            && preparationClaims[id]?.id == claim && queue.item(id: id)?.state == .preparing
+    }
+
+    private func checkPreparation(_ id: String, claim: UUID) throws {
+        guard isCurrentPreparation(id, claim: claim) else { throw CancellationError() }
+    }
+
+    private func releasePreparation(_ id: String, claim: UUID) {
+        if preparationClaims[id]?.id == claim { preparationClaims[id] = nil }
     }
 
     /// No automatic re-export is possible without the original. Keep this
@@ -973,7 +1020,7 @@ final class BackupService {
     private func enqueueLivePhoto(
         _ photo: LocalPhoto,
         repository: BackupRepository,
-        allowsCellular: Bool,
+        claim: UUID,
         mayReadFromICloud: Bool
     ) async throws {
         guard let motion = await LocalPhotoLibrary.shared.livePhotoMotionFile(
@@ -983,7 +1030,7 @@ final class BackupService {
 
         do {
             let checksum = try await repository.checksum(forFile: motion.url)
-            try Task.checkCancellation()
+            try checkPreparation(photo.id, claim: claim)
             pendingPhotos[photo.id] = photo
 
             // Jika motion video sudah sampai ke server pada putaran sebelumnya
@@ -994,6 +1041,7 @@ final class BackupService {
             if let existing = try? await repository.duplicateMatches([
                 (id: correlationID, checksum: checksum),
             ]).first?.serverAssetID {
+                try checkPreparation(photo.id, claim: claim)
                 try? FileManager.default.removeItem(at: motion.url)
                 try queue.markPreparing(
                     photo.id,
@@ -1004,10 +1052,12 @@ final class BackupService {
                     photo,
                     motionAssetID: existing,
                     repository: repository,
-                    allowsCellular: allowsCellular,
+                    claim: claim,
                     mayReadFromICloud: mayReadFromICloud)
                 return
             }
+
+            try checkPreparation(photo.id, claim: claim)
 
             let prepared = try await repository.makeUploadRequest(
                 fileURL: motion.url,
@@ -1024,13 +1074,13 @@ final class BackupService {
                 if !handedOff { try? FileManager.default.removeItem(at: prepared.bodyFile) }
             }
             try? FileManager.default.removeItem(at: motion.url)
-            try Task.checkCancellation()
+            try checkPreparation(photo.id, claim: claim)
 
             let uploadTask = try BackupUploader.shared.makeUploadTask(
                 prepared,
                 localIdentifier: photo.id,
                 checksum: checksum,
-                allowsCellular: allowsCellular,
+                allowsCellular: uploadRequests.allowsCellular(for: photo, policy: networkPolicy),
                 phase: .livePhotoMotion)
             do {
                 try queue.markUploading(
@@ -1115,22 +1165,40 @@ final class BackupService {
                 return
             }
 
-            pendingPhotos[localIdentifier] = photo
-            let allowsCellular = cellularPhotos && cellularVideos
+            let allowsCellular = uploadRequests.allowsCellular(for: photo, policy: networkPolicy)
             let mayReadFromICloud = !NetworkMonitor.shared.isExpensive || allowsCellular
+            if queue.item(id: localIdentifier)?.state == .cancelling {
+                finishUpload(localIdentifier: localIdentifier, checksum: motionChecksum,
+                    outcome: .failure(URLError(.cancelled)), remainingBackgroundTasks: remainingBackgroundTasks)
+                return
+            }
+            guard let current = queue.item(id: localIdentifier), current.state == .uploading,
+                  current.phase == .livePhotoMotion else { return }
+            let claim = PreparationClaim(isOwned: false)
+            preparationClaims[localIdentifier] = claim
+            pendingPhotos[localIdentifier] = photo
+            defer { releasePreparation(localIdentifier, claim: claim.id) }
             do {
                 try queue.markPreparing(
                     localIdentifier,
                     phase: .primaryAsset,
                     motionAssetID: motionAssetID)
                 applyQueueSnapshot()
+                guard allowsNetwork(for: photo) else {
+                    try queue.markRetry(localIdentifier, state: .waitingForNetwork,
+                        error: String(localized: "Waiting for Wi-Fi."),
+                        retryAt: Date(timeIntervalSinceNow: 15 * 60))
+                    applyQueueSnapshot()
+                    return
+                }
                 try await enqueueLivePhotoPrimary(
                     photo,
                     motionAssetID: motionAssetID,
                     repository: repo,
-                    allowsCellular: allowsCellular,
+                    claim: claim.id,
                     mayReadFromICloud: mayReadFromICloud)
             } catch {
+                guard preparationClaims[localIdentifier]?.id == claim.id else { return }
                 pendingPhotos[localIdentifier] = nil
                 handlePreparationFailure(
                     localIdentifier: localIdentifier,
@@ -1147,7 +1215,7 @@ final class BackupService {
         _ photo: LocalPhoto,
         motionAssetID: String,
         repository: BackupRepository,
-        allowsCellular: Bool,
+        claim: UUID,
         mayReadFromICloud: Bool
     ) async throws {
         guard let still = await LocalPhotoLibrary.shared.originalFile(
@@ -1157,7 +1225,7 @@ final class BackupService {
 
         do {
             let checksum = try await repository.checksum(forFile: still.url)
-            try Task.checkCancellation()
+            try checkPreparation(photo.id, claim: claim)
             let prepared = try await repository.makeUploadRequest(
                 fileURL: still.url,
                 filename: still.filename,
@@ -1171,13 +1239,13 @@ final class BackupService {
                 if !handedOff { try? FileManager.default.removeItem(at: prepared.bodyFile) }
             }
             try? FileManager.default.removeItem(at: still.url)
-            try Task.checkCancellation()
+            try checkPreparation(photo.id, claim: claim)
 
             let uploadTask = try BackupUploader.shared.makeUploadTask(
                 prepared,
                 localIdentifier: photo.id,
                 checksum: checksum,
-                allowsCellular: allowsCellular,
+                allowsCellular: uploadRequests.allowsCellular(for: photo, policy: networkPolicy),
                 phase: .primaryAsset)
             do {
                 try queue.markUploading(
@@ -1307,6 +1375,7 @@ final class BackupService {
         error: Error,
         waitingForICloud: Bool
     ) {
+        guard !Task.isCancelled, !(error is CancellationError) else { return }
         if let state = queue.item(id: localIdentifier)?.state,
            state == .failed || state == .cancelling {
             return
@@ -1395,7 +1464,7 @@ final class BackupService {
         scheduledForRetry = state.retryScheduled
         queueStatusTitle = state.presentation?.title
         queueStatusBody = state.presentation?.body
-        scheduleRetryWake(for: state.nextAttemptAt)
+        scheduleRetryWake()
         if let queueError = state.lastError {
             lastError = queueError
         } else if state.total == 0 || (state.unfinished == 0 && state.failed == 0) {
@@ -1422,28 +1491,23 @@ final class BackupService {
         }
     }
 
-    private func scheduleRetryWake(for date: Date?) {
+    private func scheduleRetryWake() {
         retryWakeTask?.cancel()
         retryWakeTask = nil
-        guard isEnabled, hasAuthenticatedSession, let date else { return }
-        let delay = max(0, date.timeIntervalSinceNow)
+        guard (isEnabled || queue.hasPendingUserRequests), hasAuthenticatedSession,
+              acceptsUploadResults, dataManager.isPersistentStoreAvailable,
+              let delay = uploadRequests.retryWakeDelay(automaticEnabled: isEnabled) else { return }
         retryWakeTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
-            await self?.continueInBackground()
+            self?.requestNetworkWake()
         }
     }
 
-    /// Menutup putaran, sekali saja.
-    ///
-    /// Dipanggil dari dua arah — penyelesaian terakhir, dan akhir pengantrean
-    /// yang ternyata tidak menyerahkan apa pun — jadi penjaga `isUploading` di
-    /// depan bukan basa-basi: tanpa itu "Backup Complete" bisa terbit dua kali
-    /// untuk satu putaran.
+    /// Publishes the idle queue and schedules another chance for waiting work.
     private func finishRunIfSettled() {
         let state = queue.snapshot
         guard state.active == 0, state.queued == 0 else { return }
-        allowsManualQueueRefill = false
         lastRunAt = Date()
         applyQueueSnapshot()
         if state.waiting > 0 { BackupScheduler.schedule() }
