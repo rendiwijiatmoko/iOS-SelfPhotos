@@ -203,7 +203,13 @@ struct AlbumDetailView: View {
 @MainActor
 @Observable
 final class AlbumDetailViewModel {
-    var assets: [AssetLite] = []
+    // AssetLite equality compares IDs; this storage also publishes metadata changes.
+    private struct AssetStorage { var assets: [AssetLite] = [] }
+    private var assetStorage = AssetStorage()
+    var assets: [AssetLite] {
+        get { assetStorage.assets }
+        set { assetStorage = AssetStorage(assets: newValue) }
+    }
     var phase: LoadingPhase<Void> = .idle
 
     private let timelineRepo: TimelineRepository
@@ -293,8 +299,6 @@ final class AlbumDetailViewModel {
             for id in ids {
                 try await assetRepo.setVisibility(id, to: archived ? .archive : .timeline)
             }
-            // Linimasa dirender dari cache lokal — lihat AssetGridViewModel.
-            try? SwiftDataManager.shared.setTimelineVisibility(ids, inTimeline: !archived)
         } catch {
             phase = .failed((error as? APIError)?.errorDescription
                 ?? String(localized: "Failed to archive photos"))
@@ -325,8 +329,6 @@ final class AlbumDetailViewModel {
             let moved = Set(ids)
             assets.removeAll { moved.contains($0.id) }
             persist()
-            // Linimasa dirender dari cache lokal — lihat AssetGridViewModel.
-            try? SwiftDataManager.shared.setTimelineVisibility(ids, inTimeline: false)
         } catch {
             phase = .failed((error as? APIError)?.errorDescription
                 ?? String(localized: "Failed to move photos"))
@@ -441,7 +443,8 @@ final class AlbumDetailViewModel {
             let fetched = try await timelineRepo.albumAssets(
                 albumId,
                 expectedCount: self.expectedAssetCount)
-            if LocalSnapshot.save(fetched, for: key) || assets.isEmpty {
+            LocalSnapshot.save(fetched, for: key)
+            if !assets.elementsEqual(fetched, by: { $0.hasSameContent(as: $1) }) {
                 assets = fetched
             }
             phase = .loaded(())
