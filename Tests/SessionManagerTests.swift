@@ -480,6 +480,23 @@ final class SessionManagerTests: XCTestCase {
         XCTAssertNil(fixture.server.header("Authorization", for: "/server/ping"))
     }
 
+    func testRestoreCompatibilityFailureRemainsAvailableToOnboarding() async throws {
+        let fixture = try SessionFixture()
+        defer { fixture.cleanup() }
+        try await fixture.signIn()
+        fixture.server.respond(to: "/server/version", status: 200, json: #"{"major":4,"minor":0,"patch":0}"#)
+        let restored = fixture.makeSession(restoresSession: true)
+        let onboarding = OnboardingViewModel(session: restored)
+        XCTAssertNil(onboarding.sessionErrorMessage)
+
+        await restored.restore()
+
+        XCTAssertFalse(restored.isLoggedIn)
+        let error = ServerCompatibilityError.appTooOld(found: ServerVersionDTO(major: 4, minor: 0, patch: 0))
+        XCTAssertEqual(restored.compatibilityIssue, error)
+        XCTAssertEqual(onboarding.sessionErrorMessage, error.localizedDescription)
+    }
+
     func testChangingServerSignsOutAndInvalidatesExistingRequests() async throws {
         let fixture = try SessionFixture()
         defer { fixture.cleanup() }
