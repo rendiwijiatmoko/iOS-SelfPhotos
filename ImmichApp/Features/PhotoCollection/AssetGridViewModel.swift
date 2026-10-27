@@ -11,10 +11,12 @@ import Observation
 final class AssetGridViewModel {
     var assets: [AssetLite] = []
     var phase: LoadingPhase<Void> = .idle
+    var actionError: String?
 
     private let assetRepo: AssetDetailRepository
     private let albumRepo: AlbumRepository
     private let loader: () async throws -> [AssetLite]
+    private let dataManager: SwiftDataManager
     /// Nama potret lokal layar ini; nil berarti tidak disimpan.
     private let snapshotKey: String?
 
@@ -22,11 +24,13 @@ final class AssetGridViewModel {
         assetRepo: AssetDetailRepository,
         albumRepo: AlbumRepository,
         snapshotKey: String? = nil,
+        dataManager: SwiftDataManager? = nil,
         loader: @escaping () async throws -> [AssetLite]
     ) {
         self.assetRepo = assetRepo
         self.albumRepo = albumRepo
         self.snapshotKey = snapshotKey
+        self.dataManager = dataManager ?? .shared
         self.loader = loader
     }
 
@@ -84,16 +88,18 @@ final class AssetGridViewModel {
     /// Status favorit ditambal di tempat, bukan lewat muat ulang — hanya satu
     /// nilai boolean yang berubah.
     func toggleFavorite(_ asset: AssetLite) async {
+        actionError = nil
         let newValue = !asset.isFavorite
         do {
             try await assetRepo.toggleFavorite(asset.id, to: newValue)
             if let index = assets.firstIndex(where: { $0.id == asset.id }) {
                 assets[index].isFavorite = newValue
             }
+            try? dataManager.patchCachedAsset(asset.id, isFavorite: newValue)
             persist()
         } catch {
-            phase = .failed((error as? APIError)?.errorDescription
-                ?? String(localized: "Failed to update favorite"))
+            actionError = (error as? APIError)?.errorDescription
+                ?? String(localized: "Failed to update favorite")
         }
     }
 
@@ -101,26 +107,41 @@ final class AssetGridViewModel {
     /// sekadar berganti ikon hati — daftar itu memang isinya favorit saja.
     func unfavorite(_ ids: [String]) async {
         guard !ids.isEmpty else { return }
-        for id in ids {
-            try? await assetRepo.toggleFavorite(id, to: false)
+        actionError = nil
+        var firstFailure: String?
+        defer {
+            persist()
+            actionError = firstFailure
         }
-        let removed = Set(ids)
-        assets.removeAll { removed.contains($0.id) }
-        persist()
+        for id in ids {
+            do {
+                try Task.checkCancellation()
+                try await assetRepo.toggleFavorite(id, to: false)
+                assets.removeAll { $0.id == id }
+                try? dataManager.patchCachedAsset(id, isFavorite: false)
+            } catch {
+                if firstFailure == nil {
+                    firstFailure = (error as? APIError)?.errorDescription
+                        ?? String(localized: "Failed to update favorite")
+                }
+                if error is CancellationError || Task.isCancelled { return }
+            }
+        }
     }
 
     /// Menghapus dari PERPUSTAKAAN — ke tong sampah, atau permanen kalau
     /// fotonya memang sudah ada di sana.
     func delete(_ ids: [String], permanently: Bool = false) async {
         guard !ids.isEmpty else { return }
+        actionError = nil
         do {
             try await assetRepo.delete(ids, force: permanently)
             let removed = Set(ids)
             assets.removeAll { removed.contains($0.id) }
             persist()
         } catch {
-            phase = .failed((error as? APIError)?.errorDescription
-                ?? String(localized: "Failed to delete photos"))
+            actionError = (error as? APIError)?.errorDescription
+                ?? String(localized: "Failed to delete photos")
         }
     }
 
@@ -133,21 +154,24 @@ final class AssetGridViewModel {
     @discardableResult
     func setFavorite(_ ids: [String], to value: Bool) async -> Bool {
         guard !ids.isEmpty else { return false }
+        actionError = nil
         // `defer`, bukan di ujung jalur sukses: kalau server menolak di tengah
         // daftar, yang terlanjur berubah di memori tetap harus sampai ke disk —
         // kalau tidak, layar dan potretnya berbeda sampai penulisan berikutnya.
         defer { persist() }
         do {
             for id in ids {
+                try Task.checkCancellation()
                 try await assetRepo.toggleFavorite(id, to: value)
                 if let index = assets.firstIndex(where: { $0.id == id }) {
                     assets[index].isFavorite = value
                 }
+                try? dataManager.patchCachedAsset(id, isFavorite: value)
             }
             return true
         } catch {
-            phase = .failed((error as? APIError)?.errorDescription
-                ?? String(localized: "Failed to update favorite"))
+            actionError = (error as? APIError)?.errorDescription
+                ?? String(localized: "Failed to update favorite")
             return false
         }
     }
@@ -158,45 +182,32 @@ final class AssetGridViewModel {
     /// yang diarsipkan, layar lain berisi yang tidak.
     @discardableResult
     func setArchived(_ ids: [String], to archived: Bool) async -> Bool {
-        guard !ids.isEmpty else { return false }
-        do {
-            for id in ids {
-                try await assetRepo.setVisibility(id, to: archived ? .archive : .timeline)
-            }
-            let moved = Set(ids)
-            assets.removeAll { moved.contains($0.id) }
-            persist()
-            // Linimasa dirender dari cache lokal, jadi tanpa tambalan ini
-            // mengembalikan foto dari arsip tidak terlihat di tab Photos sampai
-            // sync berikutnya — dan kembali ke sana untuk memeriksa adalah hal
-            // pertama yang dilakukan siapa pun setelah menekannya.
-            try? SwiftDataManager.shared.setTimelineVisibility(ids, inTimeline: !archived)
-            return true
-        } catch {
-            phase = .failed((error as? APIError)?.errorDescription
-                ?? String(localized: "Failed to archive photos"))
-            return false
-        }
+        await move(ids, to: archived ? .archive : .timeline,
+            failure: String(localized: "Failed to archive photos"))
     }
 
     /// Memindahkan ke folder terkunci — dan itu MENGELUARKANNYA dari daftar
     /// mana pun yang sedang dibuka, karena itulah arti "terkunci".
     @discardableResult
     func setLocked(_ ids: [String]) async -> Bool {
+        await move(ids, to: .locked, failure: String(localized: "Failed to move photos"))
+    }
+
+    private func move(_ ids: [String], to visibility: AssetDetailRepository.Visibility, failure: String) async -> Bool {
         guard !ids.isEmpty else { return false }
+        actionError = nil
+        defer { persist() }
         do {
             for id in ids {
-                try await assetRepo.setVisibility(id, to: .locked)
+                try Task.checkCancellation()
+                try await assetRepo.setVisibility(id, to: visibility)
+                assets.removeAll { $0.id == id }
+                // Only confirmed requests may change the local timeline.
+                try? dataManager.setTimelineVisibility([id], inTimeline: visibility == .timeline)
             }
-            let moved = Set(ids)
-            assets.removeAll { moved.contains($0.id) }
-            persist()
-            // Terkunci berarti keluar dari linimasa — lihat `setArchived`.
-            try? SwiftDataManager.shared.setTimelineVisibility(ids, inTimeline: false)
             return true
         } catch {
-            phase = .failed((error as? APIError)?.errorDescription
-                ?? String(localized: "Failed to move photos"))
+            actionError = (error as? APIError)?.errorDescription ?? failure
             return false
         }
     }
@@ -234,6 +245,7 @@ final class AssetGridViewModel {
     /// Mengembalikan foto terpilih dari tong sampah.
     func restore(_ ids: [String], using repo: TrashRepository) async {
         guard !ids.isEmpty else { return }
+        actionError = nil
         // DICATAT SEBELUM dibuang dari daftar: setelah `removeAll`, tidak ada
         // lagi tempat mengambil rasio dan thumbhash-nya untuk ditulis balik ke
         // cache linimasa.
@@ -246,34 +258,36 @@ final class AssetGridViewModel {
             persist()
             // Aset yang dibuang sudah tidak ada di cache linimasa, jadi ini
             // menulisnya kembali — bukan sekadar menandai.
-            try? SwiftDataManager.shared.restoreToTimeline(restoredAssets)
+            try? dataManager.restoreToTimeline(restoredAssets)
         } catch {
-            phase = .failed((error as? APIError)?.errorDescription
-                ?? String(localized: "Failed to restore photos"))
+            actionError = (error as? APIError)?.errorDescription
+                ?? String(localized: "Failed to restore photos")
         }
     }
 
     func restoreAll(using repo: TrashRepository) async {
+        actionError = nil
         do {
             try await repo.restoreAll()
             DeletedServerAssetRegistry.shared.restoreAllFromTrash()
             assets.removeAll()
             persist()
         } catch {
-            phase = .failed((error as? APIError)?.errorDescription
-                ?? String(localized: "Failed to restore photos"))
+            actionError = (error as? APIError)?.errorDescription
+                ?? String(localized: "Failed to restore photos")
         }
     }
 
     func emptyTrash(using repo: TrashRepository) async {
+        actionError = nil
         do {
             try await repo.empty()
             DeletedServerAssetRegistry.shared.emptyTrash()
             assets.removeAll()
             persist()
         } catch {
-            phase = .failed((error as? APIError)?.errorDescription
-                ?? String(localized: "Failed to empty trash"))
+            actionError = (error as? APIError)?.errorDescription
+                ?? String(localized: "Failed to empty trash")
         }
     }
 
