@@ -64,15 +64,7 @@ enum WidgetSnapshotExporter {
             UserDefaults(suiteName: appGroup)?
                 .stringArray(forKey: selectedAlbumsKey) ?? [])
         let albumRepo = AlbumRepository(api: api)
-        var albumAssetIDs: [String: [String]] = [:]
-        for id in selectedIDs where id != favoritesID {
-            guard let detail = try? await albumRepo.detail(id) else { continue }
-            albumAssetIDs[id] = Array(
-                (detail.assets ?? [])
-                    .sorted { $0.fileCreatedAt > $1.fileCreatedAt }
-                    .prefix(Self.photosPerAlbum)
-                    .map(\.id))
-        }
+        let albumAssetIDs = await albumAssetIDs(for: selectedIDs, repository: albumRepo)
 
         let favoriteAssetIDs = favoritesResponse?.assets.items.map(\.id) ?? []
         let favoriteCount = favoritesResponse?.assets.total ?? favoriteAssetIDs.count
@@ -84,6 +76,18 @@ enum WidgetSnapshotExporter {
             favoriteCount: favoriteCount,
             memories: memories,
             session: session)
+    }
+
+    static func albumAssetIDs(
+        for selectedIDs: Set<String>, repository: AlbumRepository
+    ) async -> [String: [String]] {
+        var ids: [String: [String]] = [:]
+        for albumID in selectedIDs where albumID != favoritesID {
+            guard let recent = try? await repository.recentAssetIDs(
+                in: albumID, limit: photosPerAlbum) else { continue }
+            ids[albumID] = recent
+        }
+        return ids
     }
 
     static func refresh(
