@@ -8,7 +8,7 @@ import UIKit
 /// endpoint, dan urutan cadangannya berbeda — dan menyatukannya hanya melahirkan
 /// parameter yang harus dibaca ulang setiap kali.
 @MainActor
-final class PhotoPreviewLoader {
+class PhotoPreviewLoader {
     /// Sisi terpanjang untuk layar detail.
     ///
     /// 2048px sudah melampaui resolusi layar mana pun, sementara membongkar
@@ -17,13 +17,36 @@ final class PhotoPreviewLoader {
     static let maxPixelSize = 2048
 
     private let session: SessionManager
+    private let imageCache: ImageCache
+    private let serverIDForLocalAsset: @MainActor (String) -> String?
+    private let localPreview: @MainActor (String) async -> UIImage?
 
-    init(session: SessionManager) {
+    init(
+        session: SessionManager,
+        imageCache: ImageCache = .shared,
+        serverIDForLocalAsset: @escaping @MainActor (String) -> String? = {
+            SwiftDataManager.shared.getBackupRecord(localIdentifier: $0)?.assetId
+        },
+        localPreview: @escaping @MainActor (String) async -> UIImage? = {
+            await LocalPhotoLibrary.shared.preview(for: $0,
+                size: CGSize(width: PhotoPreviewLoader.maxPixelSize, height: PhotoPreviewLoader.maxPixelSize))
+        }
+    ) {
         self.session = session
+        self.imageCache = imageCache
+        self.serverIDForLocalAsset = serverIDForLocalAsset
+        self.localPreview = localPreview
     }
 
     private func cacheKey(for assetId: String) -> String {
         "\(assetId)-preview"
+    }
+
+    private func serverPreviewID(for assetID: String) -> String? {
+        guard LocalPhotoLibrary.isLocal(assetID) else { return assetID }
+        let localID = LocalPhotoLibrary.localIdentifier(from: assetID)
+        guard let serverID = serverIDForLocalAsset(localID), !serverID.isEmpty else { return nil }
+        return serverID
     }
 
     /// Gambar terbaik yang SUDAH ada di memori, tanpa `await`.
@@ -33,10 +56,16 @@ final class PhotoPreviewLoader {
     /// pasti sudah ada. Menampilkannya seketika inilah yang membuat aplikasi
     /// resmi terasa tanpa loading.
     func cachedImage(for assetId: String) -> UIImage? {
+        let sourceID = serverPreviewID(for: assetId) ?? assetId
         if let preview = ImageMemoryCache.shared.image(
-            for: ImageCache.memoryKey(cacheKey(for: assetId), Self.maxPixelSize)) {
+            for: ImageCache.memoryKey(cacheKey(for: sourceID), Self.maxPixelSize)) {
             return preview
         }
+        if let thumbnail = ImageMemoryCache.shared.image(
+            for: ImageCache.memoryKey("\(sourceID)-thumbnail", PhotoThumbnailLoader.maxPixelSize)) {
+            return thumbnail
+        }
+        guard sourceID != assetId else { return nil }
         return ImageMemoryCache.shared.image(
             for: ImageCache.memoryKey("\(assetId)-thumbnail", PhotoThumbnailLoader.maxPixelSize))
     }
@@ -44,26 +73,21 @@ final class PhotoPreviewLoader {
     /// true kalau yang ada di memori sudah versi tajamnya, jadi tidak perlu
     /// mengambil apa pun.
     func hasPreview(for assetId: String) -> Bool {
-        ImageMemoryCache.shared.image(
-            for: ImageCache.memoryKey(cacheKey(for: assetId), Self.maxPixelSize)) != nil
+        let sourceID = serverPreviewID(for: assetId) ?? assetId
+        return ImageMemoryCache.shared.image(
+            for: ImageCache.memoryKey(cacheKey(for: sourceID), Self.maxPixelSize)) != nil
     }
 
     func image(for assetId: String) async -> UIImage? {
-        // Aset PERANGKAT tidak punya alamat di server.
-        //
-        // Memintanya ke sana berakhir 400/404, dan itu dibaca `UnreadableAssets`
-        // sebagai "aset ini sudah tidak bisa dibaca" — lalu petaknya DIBUANG
-        // dari linimasa. Foto yang masih ada di perangkat hilang dari grid
-        // hanya karena dibuka.
-        if LocalPhotoLibrary.isLocal(assetId) {
-            return await LocalPhotoLibrary.shared.preview(
-                for: assetId,
-                size: CGSize(width: Self.maxPixelSize, height: Self.maxPixelSize))
+        // Display ID lokal tetap stabil setelah upload, tetapi edit server
+        // berada pada preview server. Foto yang belum tertaut tetap lokal.
+        guard let sourceID = serverPreviewID(for: assetId) else {
+            return await localPreview(assetId)
         }
 
         let api = session.imageAPI
         let endpoint = Endpoint(
-            path: "/assets/\(assetId)/thumbnail",
+            path: "/assets/\(sourceID)/thumbnail",
             query: [
                 .init(name: "size", value: "preview"),
                 // Kalau aset punya crop/rotate/mirror, tampilkan hasilnya.
@@ -72,13 +96,17 @@ final class PhotoPreviewLoader {
             ])
 
         do {
-            let image = try await ImageCache.shared.image(
-                key: cacheKey(for: assetId),
+            let image = try await imageCache.image(
+                key: cacheKey(for: sourceID),
                 maxPixelSize: Self.maxPixelSize,
                 fetch: { try await api.rawData(endpoint) })
             UnreadableAssets.shared.noteSuccess()
             return image
         } catch {
+            if LocalPhotoLibrary.isLocal(assetId) {
+                guard !Task.isCancelled else { return nil }
+                return await localPreview(assetId)
+            }
             // Aset yang ditolak server dibuang dari linimasa — lihat
             // `UnreadableAssets`.
             UnreadableAssets.shared.report(assetId, error: error)
@@ -190,13 +218,11 @@ final class PhotoPreviewLoader {
 
     /// Menghangatkan halaman tetangga sebelum diusap ke sana.
     func prefetch(_ assetIds: [String]) {
-        // Id perangkat tidak punya alamat di server; menembakkannya ke sana
-        // hanya menghasilkan 404 untuk setiap tetangga halaman.
-        let serverIDs = assetIds.filter { !LocalPhotoLibrary.isLocal($0) }
+        let serverIDs = assetIds.compactMap(serverPreviewID(for:))
         guard !serverIDs.isEmpty else { return }
 
         let api = session.imageAPI
-        ImageCache.shared.prefetch(
+        imageCache.prefetch(
             keys: serverIDs.map(cacheKey(for:)),
             maxPixelSize: Self.maxPixelSize,
             fetch: { key in
@@ -211,7 +237,8 @@ final class PhotoPreviewLoader {
     }
 
     func invalidate(_ assetId: String) async {
-        await ImageCache.shared.remove(
-            key: cacheKey(for: assetId), maxPixelSize: Self.maxPixelSize)
+        let sourceID = serverPreviewID(for: assetId) ?? assetId
+        await imageCache.remove(
+            key: cacheKey(for: sourceID), maxPixelSize: Self.maxPixelSize)
     }
 }
