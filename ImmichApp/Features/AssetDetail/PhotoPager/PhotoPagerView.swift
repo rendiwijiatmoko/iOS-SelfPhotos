@@ -374,11 +374,6 @@ final class PhotoPagerController: UIViewController {
     func toggleMute() { currentCell?.toggleMute() }
     func seek(toFraction fraction: Double) { currentCell?.seek(toFraction: fraction) }
 
-    func reloadCurrentImage() async {
-        guard assets.indices.contains(currentIndex) else { return }
-        await reloadImage(for: assets[currentIndex].id)
-    }
-
     /// Hasil edit tetap milik aset asal walau pengguna sudah berganti halaman.
     func reloadImage(for assetID: String) async {
         let request = UUID()
