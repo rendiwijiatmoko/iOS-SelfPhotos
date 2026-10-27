@@ -6,16 +6,13 @@ import Observation
 final class SearchViewModel {
     var searchText = ""
     var results: [AssetLite] = []
-    /// Jumlah SELURUH yang cocok di server, bukan cuma yang sudah dimuat.
-    ///
-    /// Halamannya seratusan sekali ambil, jadi `results.count` menjawab
-    /// pertanyaan yang berbeda: "berapa yang sudah turun", bukan "berapa yang
-    /// ketemu" — dan subtitle yang berubah angka setiap kali digulir bukan
-    /// informasi, itu gangguan.
+    /// Lower bound while more pages remain; Immich v3 totals can be page-local.
     private(set) var totalResults = 0
     var phase: LoadingPhase<Void> = .idle
-    var currentPage = 1
-    var nextPage: String?
+    private(set) var currentPage = 1
+    private(set) var nextPage: String?
+    private(set) var isLoadingMore = false
+    private(set) var paginationError: String?
     /// Penyaring yang sedang berlaku.
     var filters = SearchFilters()
     /// Bahan pilihan untuk sheet penyaring; dimuat sekali.
@@ -35,16 +32,10 @@ final class SearchViewModel {
     private let peopleRepo: PeopleRepository?
     private let assetRepo: AssetDetailRepository
     private let albumRepo: AlbumRepository
-    /// Penomor pencarian.
-    ///
-    /// `loadMore` berjalan di task lepas yang tidak pernah dibatalkan
-    /// `scheduleSearch` — hanya `searchTask` yang dibatalkan. Tanpa penomor ini,
-    /// halaman kedua dari pencarian LAMA bisa mendarat setelah pencarian baru
-    /// mengosongkan hasilnya, menambahkan foto yang tidak dicari dan merusak
-    /// penunjuk halamannya.
+    // Every criteria change invalidates outstanding responses before debounce.
     private var generation = 0
     private var searchTask: Task<Void, Never>?
-    private var isLoadingMore = false
+    private var activeRequest: SearchRequestDTO?
 
     init(
         repo: SearchRepository,
@@ -67,92 +58,131 @@ final class SearchViewModel {
         !searchText.trimmingCharacters(in: .whitespaces).isEmpty || filters.isActive
     }
 
-    /// Debounce per ketukan; membatalkan pencarian sebelumnya supaya
-    /// hasil lama tidak menimpa hasil baru.
-    ///
-    /// Dipakai juga saat penyaing berubah — dan itu disengaja: mengetuk beberapa
-    /// chip beruntun tidak boleh menembakkan satu permintaan per ketukan.
     func scheduleSearch() {
-        searchTask?.cancel()
-        guard hasCriteria else {
-            results = []
-            totalResults = 0
-            phase = .idle
-            return
-        }
+        guard let request = beginSearch() else { return }
+        let startedAt = generation
         searchTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled else { return }
-            await self?.search()
+            do {
+                try await Task.sleep(for: .milliseconds(300))
+            } catch { return }
+            await self?.performSearch(request, generation: startedAt)
         }
     }
 
     func search() async {
-        guard hasCriteria else {
-            results = []
-            totalResults = 0
-            phase = .idle
-            return
-        }
+        guard let request = beginSearch() else { return }
+        await performSearch(request, generation: generation)
+    }
 
-        phase = .loading
+    private func beginSearch() -> SearchRequestDTO? {
+        searchTask?.cancel()
+        searchTask = nil
+        generation &+= 1
+        activeRequest = nil
+        results = []
+        totalResults = 0
         currentPage = 1
         nextPage = nil
-        generation &+= 1
+        isLoadingMore = false
+        paginationError = nil
+        guard hasCriteria else {
+            phase = .idle
+            return nil
+        }
+        phase = .loading
+        var request = SearchRequestDTO(page: 1, size: 100)
+        let query = searchText.trimmingCharacters(in: .whitespaces)
+        request.query = query.isEmpty ? nil : query
+        filters.apply(to: &request)
+        return request
+    }
 
+    private func performSearch(_ request: SearchRequestDTO, generation startedAt: Int) async {
+        guard startedAt == generation else { return }
+        defer { if startedAt == generation { searchTask = nil } }
         do {
-            let response = try await fetch(page: 1)
-            guard !Task.isCancelled else { return }
-            results = response.assets.items.map(Self.makeAssetLite)
-            totalResults = response.assets.total
+            try Task.checkCancellation()
+            let response = try await fetch(request)
+            try Task.checkCancellation()
+            guard startedAt == generation else { return }
+            try validate(response.assets, after: 1)
+            var seen = Set<String>()
+            results = response.assets.items.filter { seen.insert($0.id).inserted }
+                .map(Self.makeAssetLite)
+            totalResults = response.assets.nextPage == nil
+                ? results.count : max(response.assets.total, results.count)
+            activeRequest = request
             nextPage = response.assets.nextPage
             phase = .loaded(())
-        } catch is CancellationError {
         } catch {
-            guard !Task.isCancelled else { return }
-            phase = .failed((error as? APIError)?.errorDescription ?? String(localized: "Search failed"))
+            guard startedAt == generation else { return }
+            if Task.isCancelled || error is CancellationError {
+                phase = .idle
+            } else {
+                phase = .failed(message(error, fallback: String(localized: "Search failed")))
+            }
         }
     }
 
     func loadMore() async {
-        guard hasCriteria, nextPage != nil, !isLoadingMore else { return }
+        guard case .loaded = phase, let activeRequest, let nextPage,
+              !isLoadingMore, paginationError == nil else { return }
+        guard let page = Int(nextPage), page > currentPage else {
+            paginationError = SearchPageError.incomplete.errorDescription
+            return
+        }
         isLoadingMore = true
-        defer { isLoadingMore = false }
-
         let startedAt = generation
+        defer { if startedAt == generation { isLoadingMore = false } }
+        var request = activeRequest
+        request.page = page
         do {
-            let response = try await fetch(page: currentPage + 1)
-            // Pencarian sudah berganti selagi halaman ini diambil; hasilnya milik
-            // pertanyaan yang sudah tidak ditanyakan lagi.
+            try Task.checkCancellation()
+            let response = try await fetch(request)
+            try Task.checkCancellation()
             guard startedAt == generation else { return }
-            currentPage += 1
-            let existing = Set(results.map(\.id))
-            let newAssets = response.assets.items
-                .filter { !existing.contains($0.id) }
+            try validate(response.assets, after: page)
+            var seen = Set(results.map(\.id))
+            let newAssets = response.assets.items.filter { seen.insert($0.id).inserted }
                 .map(Self.makeAssetLite)
             results.append(contentsOf: newAssets)
-            nextPage = response.assets.nextPage
+            totalResults = response.assets.nextPage == nil
+                ? results.count : max(totalResults, response.assets.total, results.count)
+            currentPage = page
+            self.nextPage = response.assets.nextPage
         } catch {
-            // Halaman berikutnya gagal — biarkan; onAppear sel terakhir akan mencoba lagi.
+            guard startedAt == generation else { return }
+            guard !Task.isCancelled, !(error is CancellationError) else { return }
+            paginationError = message(error, fallback: String(localized: "Failed to load more photos"))
         }
     }
 
-    /// DUA endpoint, dipilih dari ada-tidaknya kata kunci.
-    ///
-    /// `/search/smart` mencari berdasarkan makna gambar dan MEMBUTUHKAN kata
-    /// kunci — memanggilnya tanpa itu tidak menghasilkan apa-apa. Penyaring saja
-    /// adalah pertanyaan tentang metadata, dan `/search/metadata` yang
-    /// menjawabnya.
-    private func fetch(page: Int) async throws -> SearchResponseDTO {
-        let query = searchText.trimmingCharacters(in: .whitespaces)
-        var request = SearchRequestDTO(page: page, size: 100)
-        filters.apply(to: &request)
+    func retryLoadMore() async {
+        guard !isLoadingMore else { return }
+        paginationError = nil
+        await loadMore()
+    }
 
-        guard !query.isEmpty else {
+    private func fetch(_ request: SearchRequestDTO) async throws -> SearchResponseDTO {
+        if request.query == nil {
             return try await repo.metadataSearch(request)
         }
-        request.query = query
         return try await repo.smartSearch(request)
+    }
+
+    private func validate(_ page: SearchResponseDTO.AssetsPage, after currentPage: Int) throws {
+        guard let nextPage = page.nextPage else { return }
+        guard let next = Int(nextPage), next > currentPage, !page.items.isEmpty else {
+            throw SearchPageError.incomplete
+        }
+    }
+
+    private enum SearchPageError: LocalizedError {
+        case incomplete
+
+        var errorDescription: String? {
+            String(localized: "Search returned an incomplete page. Please try again.")
+        }
     }
 
     /// Bahan pilihan penyaring. Kegagalannya senyap: penyaring yang daftarnya
@@ -291,7 +321,7 @@ final class SearchViewModel {
     /// bukan `LocalizationValue` yang dilokalkan di sini: alat ekstraksi string
     /// hanya melihat literal yang berada langsung di dalam `String(localized:)`.
     private func message(_ error: Error, fallback: String) -> String {
-        (error as? APIError)?.errorDescription ?? fallback
+        (error as? LocalizedError)?.errorDescription ?? fallback
     }
 
     private static func makeAssetLite(_ asset: AssetResponseDTO) -> AssetLite {
