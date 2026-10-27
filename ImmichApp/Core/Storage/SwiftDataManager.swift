@@ -368,6 +368,12 @@ final class SwiftDataManager {
 
     // MARK: - Tambalan dari layar lain
 
+    func patchCachedAsset(_ id: String, isFavorite: Bool? = nil) throws {
+        guard let asset = getCachedAsset(id: id), let isFavorite else { return }
+        asset.isFavorite = isFavorite
+        try modelContext.save()
+    }
+
     /// Mengubah "ada di linimasa atau tidak" untuk aset yang SUDAH ada di cache.
     ///
     /// Dipakai layar Archived dan Locked Folder: mengembalikan foto ke linimasa

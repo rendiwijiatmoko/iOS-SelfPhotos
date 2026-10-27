@@ -35,6 +35,7 @@ final class SearchViewModel {
     private let peopleRepo: PeopleRepository?
     private let assetRepo: AssetDetailRepository
     private let albumRepo: AlbumRepository
+    private let dataManager: SwiftDataManager
     /// Penomor pencarian.
     ///
     /// `loadMore` berjalan di task lepas yang tidak pernah dibatalkan
@@ -50,12 +51,14 @@ final class SearchViewModel {
         repo: SearchRepository,
         assetRepo: AssetDetailRepository,
         albumRepo: AlbumRepository,
-        peopleRepo: PeopleRepository? = nil
+        peopleRepo: PeopleRepository? = nil,
+        dataManager: SwiftDataManager? = nil
     ) {
         self.repo = repo
         self.assetRepo = assetRepo
         self.albumRepo = albumRepo
         self.peopleRepo = peopleRepo
+        self.dataManager = dataManager ?? .shared
     }
 
     /// Ada sesuatu untuk dicari: kata kunci, penyaring, atau keduanya.
@@ -186,10 +189,12 @@ final class SearchViewModel {
     @discardableResult
     func setFavorite(_ ids: [String], to value: Bool) async -> Bool {
         guard !ids.isEmpty else { return false }
+        actionError = nil
         do {
             for id in ids {
                 try await assetRepo.toggleFavorite(id, to: value)
                 patchFavorite(id, to: value)
+                try? dataManager.patchCachedAsset(id, isFavorite: value)
             }
             return true
         } catch {
@@ -210,11 +215,13 @@ final class SearchViewModel {
     @discardableResult
     func archive(_ ids: [String]) async -> Bool {
         guard !ids.isEmpty else { return false }
+        actionError = nil
         do {
             for id in ids {
                 try await assetRepo.setVisibility(id, to: .archive)
+                removeLocally([id])
+                try? dataManager.setTimelineVisibility([id], inTimeline: false)
             }
-            removeLocally(ids)
             return true
         } catch {
             actionError = message(error, fallback: String(localized: "Failed to archive photos"))
@@ -227,6 +234,7 @@ final class SearchViewModel {
     @discardableResult
     func delete(_ ids: [String]) async -> Bool {
         guard !ids.isEmpty else { return false }
+        actionError = nil
         do {
             try await assetRepo.delete(ids)
             removeLocally(ids)
@@ -237,8 +245,10 @@ final class SearchViewModel {
         }
     }
 
-    func addToAlbum(_ ids: [String], album: AlbumResponseDTO) async {
-        guard !ids.isEmpty else { return }
+    @discardableResult
+    func addToAlbum(_ ids: [String], album: AlbumResponseDTO) async -> Bool {
+        guard !ids.isEmpty else { return false }
+        actionError = nil
         do {
             let duplicates = try await albumRepo.addAssets(ids, to: album.id)
             if !duplicates.isEmpty {
@@ -247,8 +257,10 @@ final class SearchViewModel {
                 // yang terlihat.
                 actionError = String(localized: "Already in this album")
             }
+            return true
         } catch {
             actionError = message(error, fallback: String(localized: "Failed to add to album"))
+            return false
         }
     }
 
