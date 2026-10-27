@@ -166,11 +166,6 @@ final class AssetGridViewModel {
             let moved = Set(ids)
             assets.removeAll { moved.contains($0.id) }
             persist()
-            // Linimasa dirender dari cache lokal, jadi tanpa tambalan ini
-            // mengembalikan foto dari arsip tidak terlihat di tab Photos sampai
-            // sync berikutnya — dan kembali ke sana untuk memeriksa adalah hal
-            // pertama yang dilakukan siapa pun setelah menekannya.
-            try? SwiftDataManager.shared.setTimelineVisibility(ids, inTimeline: !archived)
             return true
         } catch {
             phase = .failed((error as? APIError)?.errorDescription
@@ -191,8 +186,6 @@ final class AssetGridViewModel {
             let moved = Set(ids)
             assets.removeAll { moved.contains($0.id) }
             persist()
-            // Terkunci berarti keluar dari linimasa — lihat `setArchived`.
-            try? SwiftDataManager.shared.setTimelineVisibility(ids, inTimeline: false)
             return true
         } catch {
             phase = .failed((error as? APIError)?.errorDescription
