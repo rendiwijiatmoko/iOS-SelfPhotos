@@ -12,6 +12,7 @@ enum WidgetSnapshotExporter {
     static let favoritesID = "__favorites__"
     static let selectedAlbumsKey = "widget.album.selectedIDs"
     private static let photosPerAlbum = 8
+    private static var visibilityRevision = UUID()
 
     private struct Snapshot: Encodable {
         let generatedAt: Date
@@ -36,16 +37,31 @@ enum WidgetSnapshotExporter {
     /// Penyegaran mandiri saat aplikasi dibuka. Widget tidak bergantung pada
     /// pengguna pernah masuk ke tab Library pada sesi ini.
     static func refresh(session: SessionManager) async {
-        let api = APIClient(session: session)
+        guard let container = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: appGroup) else { return }
+        let selectedIDs = Set(UserDefaults(suiteName: appGroup)?
+            .stringArray(forKey: selectedAlbumsKey) ?? [])
+        await refresh(api: APIClient(session: session), imageAPI: session.imageAPI,
+            container: container, selectedAlbumIDs: selectedIDs)
+    }
+
+    static func refresh(
+        api: APIClient, imageAPI: APIClient, container: URL, selectedAlbumIDs: Set<String>,
+        dataManager: SwiftDataManager? = nil
+    ) async {
+        let dataManager = dataManager ?? .shared
+        let expectedRevision = visibilityRevision
         async let fetchedAlbums = try? AlbumRepository(api: api).all()
         async let fetchedMemories = try? MemoriesRepository(api: api).getMemories()
         async let fetchedFavorites = try? SearchRepository(api: api).metadataSearch(
             SearchRequestDTO(
                 page: 1,
                 isFavorite: true,
-                size: Self.photosPerAlbum))
+                size: Self.photosPerAlbum,
+                visibility: "timeline"))
         let (allAlbums, allMemories, favoritesResponse) = await (
             fetchedAlbums, fetchedMemories, fetchedFavorites)
+        guard expectedRevision == visibilityRevision else { return }
 
         let albums = (allAlbums ?? LocalSnapshot.load(
             [AlbumResponseDTO].self,
@@ -53,28 +69,32 @@ enum WidgetSnapshotExporter {
             .sorted { lhs, rhs in
                 (lhs.updatedAt ?? lhs.createdAt) > (rhs.updatedAt ?? rhs.createdAt)
             }
-        let memories = allMemories.map {
-            MemoryStory.build(from: $0, limit: 15)
+        let memories = allMemories.map { entries in
+            MemoryStory.build(from: entries.map { memory in
+                MemoryDTO(id: memory.id, type: memory.type, memoryAt: memory.memoryAt,
+                    assets: memory.assets.filter {
+                        !dataManager.nonTimelineAssetIDs.contains($0.id)
+                    }, data: memory.data)
+            }, limit: 15)
         } ?? []
 
-        // Extension mencatat album yang dipilih tiap instance widget. Dengan
-        // begitu startup berikutnya hanya perlu mengambil isi album yang benar-
-        // benar dipakai, bukan ratusan thumbnail dari setiap album di server.
-        let selectedIDs = Set(
-            UserDefaults(suiteName: appGroup)?
-                .stringArray(forKey: selectedAlbumsKey) ?? [])
         let albumRepo = AlbumRepository(api: api)
         var albumAssetIDs: [String: [String]] = [:]
-        for id in selectedIDs where id != favoritesID {
+        for id in selectedAlbumIDs where id != favoritesID {
             guard let detail = try? await albumRepo.detail(id) else { continue }
+            guard expectedRevision == visibilityRevision else { return }
             albumAssetIDs[id] = Array(
                 (detail.assets ?? [])
+                    .filter { $0.isTimelineVisible && !dataManager.nonTimelineAssetIDs.contains($0.id) }
                     .sorted { $0.fileCreatedAt > $1.fileCreatedAt }
                     .prefix(Self.photosPerAlbum)
                     .map(\.id))
         }
 
-        let favoriteAssetIDs = favoritesResponse?.assets.items.map(\.id) ?? []
+        guard expectedRevision == visibilityRevision else { return }
+        let favoriteAssetIDs = favoritesResponse?.assets.items.filter {
+            $0.isTimelineVisible && !dataManager.nonTimelineAssetIDs.contains($0.id)
+        }.map(\.id) ?? []
         let favoriteCount = favoritesResponse?.assets.total ?? favoriteAssetIDs.count
 
         await refresh(
@@ -83,24 +103,30 @@ enum WidgetSnapshotExporter {
             favoriteAssetIDs: favoriteAssetIDs,
             favoriteCount: favoriteCount,
             memories: memories,
-            session: session)
+            imageAPI: imageAPI,
+            container: container,
+            expectedRevision: expectedRevision)
     }
 
-    static func refresh(
+    private static func refresh(
         albums: [AlbumResponseDTO],
         albumAssetIDs: [String: [String]],
         favoriteAssetIDs: [String],
         favoriteCount: Int,
         memories: [MemoryStory],
-        session: SessionManager
+        imageAPI: APIClient,
+        container: URL,
+        expectedRevision: UUID
     ) async {
-        guard let container = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: appGroup)
-        else { return }
+        guard expectedRevision == visibilityRevision else { return }
 
         let root = container.appendingPathComponent("Widgets", isDirectory: true)
         let generation = UUID().uuidString
         let images = root.appendingPathComponent(generation, isDirectory: true)
+        var published = false
+        defer {
+            if !published { try? FileManager.default.removeItem(at: images) }
+        }
         do {
             try FileManager.default.createDirectory(
                 at: images, withIntermediateDirectories: true)
@@ -124,7 +150,6 @@ enum WidgetSnapshotExporter {
             }
         }
 
-        let api = session.imageAPI
         var written = Set<String>()
         await withTaskGroup(of: (String, Data?).self) { group in
             for (name, assetID) in requested {
@@ -132,11 +157,15 @@ enum WidgetSnapshotExporter {
                     let endpoint = Endpoint(
                         path: "/assets/\(assetID)/thumbnail",
                         query: [.init(name: "size", value: "thumbnail")])
-                    return (name, try? await api.rawData(endpoint))
+                    return (name, try? await imageAPI.rawData(endpoint))
                 }
             }
 
             for await (name, data) in group {
+                guard expectedRevision == visibilityRevision else {
+                    group.cancelAll()
+                    return
+                }
                 guard let data else { continue }
                 let url = images.appendingPathComponent(name)
                 if (try? data.write(to: url, options: .atomic)) != nil {
@@ -144,11 +173,11 @@ enum WidgetSnapshotExporter {
                 }
             }
         }
+        guard expectedRevision == visibilityRevision else { return }
 
         // Saat offline jangan mengganti widget bergambar yang masih valid
         // dengan snapshot baru yang seluruh gambarnya kosong.
         if !requested.isEmpty, written.isEmpty {
-            try? FileManager.default.removeItem(at: images)
             return
         }
 
@@ -191,6 +220,7 @@ enum WidgetSnapshotExporter {
         let snapshotURL = root.appendingPathComponent("snapshot.json")
         do {
             try data.write(to: snapshotURL, options: .atomic)
+            published = true
         } catch {
             return
         }
@@ -219,8 +249,9 @@ enum WidgetSnapshotExporter {
         WidgetCenter.shared.reloadAllTimelines()
     }
 
-    static func clear() {
-        guard let container = FileManager.default.containerURL(
+    static func clear(container: URL? = nil) {
+        visibilityRevision = UUID()
+        guard let container = container ?? FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: appGroup)
         else { return }
         try? FileManager.default.removeItem(
