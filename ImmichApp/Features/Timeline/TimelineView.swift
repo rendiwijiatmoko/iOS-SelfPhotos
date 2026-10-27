@@ -186,6 +186,9 @@ struct TimelineView: View {
         .onChange(of: LocalPhotoLibrary.shared.revision) { _, _ in
             Task { await vm?.reloadDevicePhotos() }
         }
+        .onChange(of: SwiftDataManager.shared.assetMutationRevision) { _, _ in
+            Task { await vm?.loadTimeline() }
+        }
         .deleteFromDeviceAlert($deviceDeleteID) { deleteFeedback += 1 }
         .sensoryFeedback(.impact(weight: .heavy), trigger: deleteFeedback)
         // Favorit BUKAN ketukan berat: hasilnya bukan sesuatu yang hilang,
