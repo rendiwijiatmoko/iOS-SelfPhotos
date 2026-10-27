@@ -200,16 +200,6 @@ final class AssetDetailViewModel {
         }
     }
 
-    /// Unduh file asli lewat request terautentikasi (URL polos akan kena 401).
-    func downloadOriginal(_ id: String) async -> Data? {
-        do {
-            return try await repo.downloadOriginal(id)
-        } catch {
-            actionError = ErrorEvent(Self.describe(error))
-            return nil
-        }
-    }
-
     func downloadOriginalFile(_ id: String, filename: String) async -> URL? {
         do {
             return try await repo.downloadOriginalFile(id, filename: filename)
