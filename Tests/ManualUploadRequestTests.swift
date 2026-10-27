@@ -489,6 +489,31 @@ final class ManualUploadRequestTests: XCTestCase {
         XCTAssertEqual(fixture.queue.item(id: "manual")?.taskIdentifier, 77)
     }
 
+    func testCanceledNetworkWakeCannotReleaseOrUpgradeWorkAfterMetadataReturns() async throws {
+        for active in [false, true] {
+            let fixture = try fixture()
+            try fixture.requests.requestUploads(["manual"], uploadedIDs: [])
+            if active { try makeUploading("manual", queue: fixture.queue, task: 77) }
+            else {
+                try fixture.queue.markRetry("manual", state: .waitingForNetwork, error: "Waiting for Wi-Fi",
+                    retryAt: .distantFuture, now: timestamp)
+            }
+            let before = fixture.queue.item(id: "manual")
+            let held = HeldMetadata()
+            let wake = Task {
+                try await fixture.requests.releaseNetworkWaits(automaticEnabled: false, policy: fixture.policy,
+                    metadata: { _ in await held.value() })
+            }
+            await fulfillment(of: [held.started], timeout: 2)
+            wake.cancel()
+            held.resolve(photo("manual"))
+
+            let upgraded = try await wake.value
+            XCTAssertTrue(upgraded.isEmpty)
+            XCTAssertEqual(fixture.queue.item(id: "manual"), before)
+        }
+    }
+
     func testAuthenticationWaitsPreserveManualIntentUntilSignInReleasesThem() async throws {
         let fixture = try fixture()
         fixture.photos = ["manual": photo("manual"), "automatic": photo("automatic")]
