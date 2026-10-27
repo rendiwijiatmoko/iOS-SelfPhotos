@@ -368,6 +368,8 @@ class SessionManager {
         // token must never be removed by that instance's delayed response.
         if let storedToken = credentialStore.read("token"),
            storedToken != token || credentialStore.read("mode") != mode.rawValue { return }
+        let ownership = BackupService.shared.uploadOwnership
+        let headers = authHeaders
         ["token", "mode"].forEach(credentialStore.delete)
         SharedSessionStore.clear()
         AppLaunchState.shared.reset()
@@ -378,7 +380,7 @@ class SessionManager {
         invalidateRequests()
         BackupService.shared.pauseForAuthentication()
         SharedUploadService.shared.cancel()
-        await BackupUploader.shared.cancelAll()
+        await BackupUploader.shared.cancelAll(ownership: ownership, authHeaders: headers)
     }
 
     func expireForBackgroundUpload() async {
@@ -445,6 +447,8 @@ class SessionManager {
 
     private func clearAccountData() async throws {
         if let cleanupTask { return try await cleanupTask.value }
+        let ownership = BackupQueueStore.shared.ownership
+        let headers = authHeaders
         ["token", "mode"].forEach(credentialStore.delete)
         token = nil
         isLoggedIn = false
@@ -459,7 +463,8 @@ class SessionManager {
         BackupService.shared.resetForLogout()
         SharedUploadService.shared.cancel()
         let cleanup = Task { @MainActor in
-            await BackupUploader.shared.cancelAll()
+            await BackupUploader.shared.cancelAll(
+                ownership: ownership, authHeaders: headers.isEmpty ? nil : headers)
             try self.dataManager.clearAllAccountData()
             AssistiveAccessPreferences.clearSelectedAlbum()
             DeletedServerAssetRegistry.shared.clear()
