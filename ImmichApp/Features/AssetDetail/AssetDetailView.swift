@@ -310,8 +310,9 @@ struct AssetDetailView: View {
             AssetDateEditor(initialDate: detail.fileCreatedAt) { newDate in
                 guard let id = currentServerAssetID else { return }
                 Task {
-                    await vm?.updateDate(id, to: newDate)
-                    onAssetUpdated?(id)
+                    if await vm?.updateDate(id, to: newDate) == true {
+                        onAssetUpdated?(id)
+                    }
                 }
             }
         }
@@ -322,11 +323,12 @@ struct AssetDetailView: View {
         AssetLocationEditor(initialCoordinate: currentCoordinate) { coordinate in
             guard let id = currentServerAssetID else { return }
             Task {
-                await vm?.updateLocation(
+                if await vm?.updateLocation(
                     id,
                     latitude: coordinate.latitude,
-                    longitude: coordinate.longitude)
-                onAssetUpdated?(id)
+                    longitude: coordinate.longitude) == true {
+                    onAssetUpdated?(id)
+                }
             }
         }
     }

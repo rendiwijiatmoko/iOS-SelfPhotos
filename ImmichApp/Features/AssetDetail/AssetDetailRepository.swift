@@ -49,9 +49,11 @@ struct AssetEditRecord: Decodable, Sendable {
 
 class AssetDetailRepository {
     private let api: APIClient
+    private let dataManager: SwiftDataManager?
 
-    init(api: APIClient) {
+    init(api: APIClient, dataManager: SwiftDataManager? = nil) {
         self.api = api
+        self.dataManager = dataManager
     }
 
     func fetchAsset(_ id: String) async throws -> AssetResponseDTO {
@@ -99,6 +101,38 @@ class AssetDetailRepository {
     /// visibility. Disatukan di sini agar penggantian berikutnya hanya satu edit.
     private func update(_ id: String, with mutation: AssetMutation) async throws {
         try await api.sendVoid(.json("/assets/\(id)", method: .put, body: mutation))
+        await cacheMutation(mutation, for: id)
+    }
+
+    @MainActor
+    private func cacheMutation(_ mutation: AssetMutation, for id: String) {
+        let cache = dataManager ?? .shared
+        if let visibility = mutation.visibility {
+            try? cache.setTimelineVisibility([id], inTimeline: visibility == Visibility.timeline.rawValue)
+        } else {
+            try? cache.patchCachedAsset(id,
+                isFavorite: mutation.isFavorite,
+                createdAt: mutation.dateTimeOriginal.flatMap(ISO8601DateFormatter.immichFractional.date(from:)),
+                description: mutation.description,
+                latitude: mutation.latitude,
+                longitude: mutation.longitude)
+        }
+
+        let key = LocalSnapshot.Key.assetDetail(id)
+        guard var cached = LocalSnapshot.load(AssetResponseDTO.self, for: key), cached.id == id else { return }
+        if let favorite = mutation.isFavorite {
+            cached.isFavorite = favorite
+        } else if let description = mutation.description {
+            cached.setDescription(description)
+        } else if let visibility = mutation.visibility, visibility != Visibility.locked.rawValue {
+            cached.isArchived = visibility == Visibility.archive.rawValue
+        } else {
+            // Derived metadata is refreshed by the detail view. Other callers
+            // must not leave an obsolete detail snapshot behind.
+            LocalSnapshot.remove(key)
+            return
+        }
+        LocalSnapshot.save(cached, for: key)
     }
 
     private struct AssetMutation: Encodable {
@@ -127,6 +161,13 @@ class AssetDetailRepository {
         // Penanda terpisah ini mencegah mapping tersebut membuat foto yang baru
         // dihapus muncul kembali sebagai petak lokal setelah app restart.
         await DeletedServerAssetRegistry.shared.record(ids, permanently: force)
+        await cacheDeletedAssets(ids, permanently: force)
+    }
+
+    @MainActor
+    private func cacheDeletedAssets(_ ids: [String], permanently: Bool) {
+        try? (dataManager ?? .shared).purgeAssets(ids, reason: permanently ? .unavailable : .trashed)
+        for id in ids { LocalSnapshot.remove(LocalSnapshot.Key.assetDetail(id)) }
     }
 
     func downloadOriginal(_ id: String) async throws -> Data {
@@ -150,10 +191,12 @@ class AssetDetailRepository {
         struct Response: Decodable { let assetId: String }
         let _: Response = try await api.send(.json(
             "/assets/\(id)/edits", method: .put, body: Body(edits: edits)))
+        LocalSnapshot.remove(LocalSnapshot.Key.assetDetail(id))
     }
 
     func removeEdits(from id: String) async throws {
         try await api.sendVoid(.init(path: "/assets/\(id)/edits", method: .delete))
+        LocalSnapshot.remove(LocalSnapshot.Key.assetDetail(id))
     }
 
     func edits(for id: String) async throws -> [AssetEditRecord] {

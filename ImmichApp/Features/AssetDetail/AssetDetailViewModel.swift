@@ -118,7 +118,6 @@ final class AssetDetailViewModel {
         do {
             try await repo.toggleFavorite(id, to: newValue)
             detail?.isFavorite = newValue
-            persistDetail()
             return true
         } catch {
             actionError = ErrorEvent(Self.describe(error))
@@ -130,8 +129,7 @@ final class AssetDetailViewModel {
     func updateDescription(_ id: String, to text: String) async -> Bool {
         do {
             try await repo.updateDescription(id, to: text)
-            detail?.exifInfo?.description = text
-            persistDetail()
+            if detail?.id == id { detail?.setDescription(text) }
             return true
         } catch {
             actionError = ErrorEvent(Self.describe(error))
@@ -142,21 +140,27 @@ final class AssetDetailViewModel {
     /// Tanggal & lokasi tersimpan di beberapa field turunan (`fileCreatedAt`,
     /// `localDateTime`, `exifInfo`), jadi lebih aman memuat ulang detailnya
     /// daripada menambal satu per satu di sisi klien.
-    func updateDate(_ id: String, to date: Date) async {
+    @discardableResult
+    func updateDate(_ id: String, to date: Date) async -> Bool {
         do {
             try await repo.updateDate(id, to: date)
             await load(id)
+            return true
         } catch {
             actionError = ErrorEvent(Self.describe(error))
+            return false
         }
     }
 
-    func updateLocation(_ id: String, latitude: Double, longitude: Double) async {
+    @discardableResult
+    func updateLocation(_ id: String, latitude: Double, longitude: Double) async -> Bool {
         do {
             try await repo.updateLocation(id, latitude: latitude, longitude: longitude)
             await load(id)
+            return true
         } catch {
             actionError = ErrorEvent(Self.describe(error))
+            return false
         }
     }
 
@@ -179,7 +183,6 @@ final class AssetDetailViewModel {
         do {
             try await repo.toggleArchive(id, to: newValue)
             detail?.isArchived = newValue
-            persistDetail()
         } catch {
             actionError = ErrorEvent(Self.describe(error))
         }
@@ -190,9 +193,6 @@ final class AssetDetailViewModel {
     func delete(_ id: String) async -> Bool {
         do {
             try await repo.delete(id)
-            // Fotonya sudah tidak ada; potret detailnya tidak boleh menunggu
-            // seseorang membukanya lagi untuk dibersihkan.
-            LocalSnapshot.remove(LocalSnapshot.Key.assetDetail(id))
             return true
         } catch {
             actionError = ErrorEvent(Self.describe(error))
@@ -256,17 +256,6 @@ final class AssetDetailViewModel {
 
     func retry(_ id: String) async {
         await load(id)
-    }
-
-    /// Menulis ulang potret detail setelah ditambal di tempat.
-    ///
-    /// Tanpa ini, membalik favorit lalu membuka foto yang sama saat offline akan
-    /// menampilkan status lamanya — dan hati yang tidak sesuai dengan yang baru
-    /// saja ditekan lebih membingungkan daripada tidak ada informasi sama
-    /// sekali.
-    private func persistDetail() {
-        guard let detail else { return }
-        LocalSnapshot.save(detail, for: LocalSnapshot.Key.assetDetail(detail.id))
     }
 
     private static func describe(_ error: Error) -> String {
