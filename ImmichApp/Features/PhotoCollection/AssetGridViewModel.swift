@@ -9,7 +9,13 @@ import Observation
 @MainActor
 @Observable
 final class AssetGridViewModel {
-    var assets: [AssetLite] = []
+    // AssetLite equality compares IDs; this storage also publishes metadata changes.
+    private struct AssetStorage { var assets: [AssetLite] = [] }
+    private var assetStorage = AssetStorage()
+    var assets: [AssetLite] {
+        get { assetStorage.assets }
+        set { assetStorage = AssetStorage(assets: newValue) }
+    }
     var phase: LoadingPhase<Void> = .idle
 
     private let assetRepo: AssetDetailRepository
@@ -58,12 +64,11 @@ final class AssetGridViewModel {
         do {
             let fetched = try await loader()
             if let snapshotKey {
-                // Hanya dipasang ulang kalau isinya memang berbeda — lihat
-                // alasannya di `LocalSnapshot.save`.
-                if LocalSnapshot.save(fetched, for: snapshotKey) || assets.isEmpty {
-                    assets = fetched
-                }
-            } else {
+                LocalSnapshot.save(fetched, for: snapshotKey)
+            }
+            // Another instance may already have written this snapshot. Compare
+            // against this screen's content rather than the disk write result.
+            if !assets.elementsEqual(fetched, by: { $0.hasSameContent(as: $1) }) {
                 assets = fetched
             }
             phase = .loaded(())
