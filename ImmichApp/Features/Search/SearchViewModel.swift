@@ -254,16 +254,7 @@ final class SearchViewModel {
 
     /// Yang gagal diunduh dilewati, bukan membatalkan seluruh operasi.
     func shareURLs(for ids: [String]) async -> [URL] {
-        var urls: [URL] = []
-        for id in ids {
-            guard let data = try? await assetRepo.downloadOriginal(id) else { continue }
-            if let url = try? TemporaryMediaStore.createShareFile(
-                data: data,
-                suggestedFilename: "\(id).jpg") {
-                urls.append(url)
-            }
-        }
-        return urls
+        await assetRepo.shareFiles(ids)
     }
 
     // MARK: - Penambalan lokal

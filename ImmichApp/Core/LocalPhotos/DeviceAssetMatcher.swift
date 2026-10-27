@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import Observation
 
@@ -40,6 +39,7 @@ final class DeviceAssetMatcher {
 
     private let repo: BackupRepository
     private let dataManager: SwiftDataManager
+    private let originalFile: (String) async -> URL?
     private var task: Task<Void, Never>?
     /// Penomor putaran pencocokan.
     ///
@@ -56,9 +56,16 @@ final class DeviceAssetMatcher {
     /// seluruh pustaka.
     private static let batchSize = 200
 
-    init(repo: BackupRepository, dataManager: SwiftDataManager) {
+    init(
+        repo: BackupRepository,
+        dataManager: SwiftDataManager,
+        originalFile: @escaping (String) async -> URL? = {
+            await LocalPhotoLibrary.shared.originalFile(for: $0)?.url
+        }
+    ) {
         self.repo = repo
         self.dataManager = dataManager
+        self.originalFile = originalFile
     }
 
     /// - Parameter onMatched: dipanggil setiap kelompok yang menghasilkan
@@ -102,7 +109,7 @@ final class DeviceAssetMatcher {
                 // Yang belum punya checksum dihitung dulu, DI LUAR main actor.
                 let missing = slice.filter { cached[$0.id] == nil }.map(\.id)
                 if !missing.isEmpty {
-                    let computed = await Self.computeChecksums(missing)
+                    let computed = await computeChecksums(missing)
                     try? dataManager.storeChecksums(computed)
                     for entry in computed { cached[entry.localIdentifier] = entry.checksum }
                 }
@@ -166,7 +173,7 @@ final class DeviceAssetMatcher {
             let missing = slice.filter { cached[$0.id] == nil }.map(\.id)
 
             if !missing.isEmpty {
-                let computed = await Self.computeChecksums(missing)
+                let computed = await computeChecksums(missing)
                 try dataManager.storeChecksums(computed)
                 for entry in computed { cached[entry.localIdentifier] = entry.checksum }
             }
@@ -207,7 +214,7 @@ final class DeviceAssetMatcher {
         for group in stride(from: 0, to: pending.count, by: Self.batchSize) {
             try Task.checkCancellation()
             let slice = pending[group..<min(group + Self.batchSize, pending.count)]
-            let computed = await Self.computeChecksums(slice.map(\.id))
+            let computed = await computeChecksums(slice.map(\.id))
             try dataManager.storeChecksums(computed)
             for entry in computed { cached[entry.localIdentifier] = entry.checksum }
             hashed += computed.count
@@ -216,32 +223,24 @@ final class DeviceAssetMatcher {
         return hashed
     }
 
-    /// Membaca byte lalu menghitung SHA1, satu per satu.
-    ///
-    /// Berurutan, bukan berbarengan: yang membatasi di sini pembacaan berkas,
-    /// dan menembakkan puluhan permintaan sekaligus ke PhotoKit justru membuat
-    /// semuanya mengantre lebih lama sambil menahan puluhan megabyte di memori.
-    private static func computeChecksums(
+    /// Export and hash one file at a time, without buffering original videos.
+    func computeChecksums(
         _ ids: [String]
     ) async -> [(localIdentifier: String, checksum: String)] {
         var result: [(localIdentifier: String, checksum: String)] = []
         for id in ids {
             if Task.isCancelled { return result }
-            guard let file = await LocalPhotoLibrary.shared.originalData(
-                for: LocalPhotoLibrary.assetID(for: id))
+            guard let file = await originalFile(LocalPhotoLibrary.assetID(for: id))
             else { continue }
-            // Hashing DI LUAR main actor.
-            //
-            // `BackupRepository.checksum` terikat pemanggilnya, dan pemanggilnya
-            // di sini main actor — SHA1 atas puluhan megabyte di sana berarti
-            // antarmuka membeku persis saat linimasa baru tergambar.
-            let data = file.data
-            let checksum = await Task.detached(priority: .utility) {
-                Insecure.SHA1.hash(data: data)
-                    .map { String(format: "%02x", $0) }
-                    .joined()
-            }.value
-            result.append((id, checksum))
+            do {
+                defer { try? FileManager.default.removeItem(at: file) }
+                try Task.checkCancellation()
+                let checksum = try await repo.checksum(forFile: file)
+                try Task.checkCancellation()
+                result.append((id, checksum))
+            } catch {
+                if Task.isCancelled || error is CancellationError { return result }
+            }
         }
         return result
     }

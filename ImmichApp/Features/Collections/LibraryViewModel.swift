@@ -290,11 +290,7 @@ final class LibraryViewModel {
     /// (URL server polos akan kena 401).
     func shareURL(for asset: AssetLite) async -> URL? {
         do {
-            let data = try await assetRepo.downloadOriginal(asset.id)
-            let filename = "\(asset.id).\(asset.isVideo ? "mov" : "jpg")"
-            return try TemporaryMediaStore.createShareFile(
-                data: data,
-                suggestedFilename: filename)
+            return try await assetRepo.shareFile(asset.id)
         } catch {
             actionError = (error as? APIError)?.errorDescription
                 ?? String(localized: "Failed to prepare share")

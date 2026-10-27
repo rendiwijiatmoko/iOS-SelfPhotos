@@ -1191,10 +1191,27 @@ struct AssetDetailView: View {
         isPreparingShare = true
         defer { isPreparingShare = false }
 
-        guard let file = await currentFileURL() else { return }
-        downloadedFileURL = file
-        sharePreviewImage = currentAsset.isVideo ? nil : UIImage(contentsOfFile: file.path)
-        isSharePresented = true
+        guard let file = await currentFile() else { return }
+        var transferredToShareSheet = false
+        defer {
+            if !transferredToShareSheet { try? FileManager.default.removeItem(at: file.url) }
+        }
+        guard !Task.isCancelled else { return }
+        do {
+            let url = try TemporaryMediaStore.adoptShareFile(
+                at: file.url, suggestedFilename: file.filename)
+            let preview = currentAsset.isVideo ? nil : SharePreviewThumbnail.image(at: url)
+            guard !Task.isCancelled else {
+                TemporaryMediaStore.remove(url)
+                return
+            }
+            downloadedFileURL = url
+            sharePreviewImage = preview
+            transferredToShareSheet = true
+            isSharePresented = true
+        } catch {
+            vm?.actionError = ErrorEvent(error.localizedDescription)
+        }
     }
 
     private var currentServerAssetID: String? {
@@ -1227,7 +1244,7 @@ struct AssetDetailView: View {
 
     /// Memilih salinan lokal lebih dulu; server hanya disentuh kalau aset belum
     /// ada di perangkat. Ini membuat Share pada foto lokal benar-benar lokal.
-    private func currentFileURL() async -> URL? {
+    private func currentFile() async -> (url: URL, filename: String)? {
         if currentAsset.isOnDevice {
             let localIdentifier: String?
             if LocalPhotoLibrary.isLocal(currentAsset.id) {
@@ -1240,14 +1257,14 @@ struct AssetDetailView: View {
             if let localIdentifier,
                let file = await LocalPhotoLibrary.shared.originalFile(
                    for: LocalPhotoLibrary.assetID(for: localIdentifier)) {
-                return file.url
+                return file
             }
         }
 
         guard let serverID = currentServerAssetID, let vm else { return nil }
-        let filename = vm.detail?.originalFileName
-            ?? (currentAsset.isVideo ? "video.mov" : "photo.jpg")
-        return await vm.downloadOriginalFile(serverID, filename: filename)
+        let filename = vm.detail?.originalFileName ?? serverID
+        guard let url = await vm.downloadOriginalFile(serverID, filename: filename) else { return nil }
+        return (url, url.lastPathComponent)
     }
 
     private func createSharedLink(for serverID: String) {
@@ -1283,8 +1300,7 @@ struct AssetDetailView: View {
         else { return }
 
         isDownloadingToDevice = true
-        let filename = vm.detail?.originalFileName
-            ?? (currentAsset.isVideo ? "video.mov" : "photo.jpg")
+        let filename = vm.detail?.originalFileName ?? serverID
         let isVideo = currentAsset.isVideo
         Task {
             defer { isDownloadingToDevice = false }
@@ -1309,12 +1325,12 @@ struct AssetDetailView: View {
         isSettingProfilePhoto = true
         Task {
             defer { isSettingProfilePhoto = false }
-            guard let file = await currentFileURL() else {
+            guard let file = await currentFile() else {
                 vm.actionError = ErrorEvent(String(localized: "Could not prepare the profile photo."))
                 return
             }
-            defer { try? FileManager.default.removeItem(at: file) }
-            guard let jpeg = await Self.profileJPEG(from: file) else {
+            defer { try? FileManager.default.removeItem(at: file.url) }
+            guard let jpeg = await Self.profileJPEG(from: file.url) else {
                 vm.actionError = ErrorEvent(String(localized: "Could not prepare the profile photo."))
                 return
             }
@@ -1376,7 +1392,7 @@ struct AssetDetailView: View {
     }
 
     private func cleanupSharedFile() {
-        if let downloadedFileURL { try? FileManager.default.removeItem(at: downloadedFileURL) }
+        if let downloadedFileURL { TemporaryMediaStore.remove(downloadedFileURL) }
         downloadedFileURL = nil
         sharePreviewImage = nil
     }

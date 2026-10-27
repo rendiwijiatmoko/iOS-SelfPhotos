@@ -35,10 +35,7 @@ final class MemoriesViewModel {
     /// (URL server polos akan kena 401).
     func shareURL(for asset: AssetLite) async -> URL? {
         do {
-            let data = try await assetRepo.downloadOriginal(asset.id)
-            return try TemporaryMediaStore.createShareFile(
-                data: data,
-                suggestedFilename: "\(asset.id).\(asset.isVideo ? "mov" : "jpg")")
+            return try await assetRepo.shareFile(asset.id)
         } catch {
             return nil
         }
